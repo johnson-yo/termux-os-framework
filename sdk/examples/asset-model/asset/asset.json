@@ -1,0 +1,7 @@
+{
+  "schema": "termux-os.package-asset.v1",
+  "id": "model.example-model",
+  "model": "example-model",
+  "payload_sha256": "cacd724e52866adf015edfd7fc22f393ea3bf2949ae4aa592291a253a0e8e9e5",
+  "note": "Tiny synthetic model fixture; replace it with licensed target metadata."
+}

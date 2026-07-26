@@ -1,0 +1,28 @@
+{
+  "name": "termux-os-framework",
+  "version": "0.2.2",
+  "description": "A local-first package and service framework for Android and Termux",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "termux-os-sdk": "sdk/termux-os-sdk"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node src/server.mjs",
+    "test": "bash scripts/test-core.sh",
+    "check:public": "node scripts/check-publication.mjs",
+    "public:export": "node scripts/export-public-tree.mjs",
+    "public:check": "node scripts/check-publication.mjs --tree tmp/public-tree"
+  },
+  "keywords": [
+    "android",
+    "termux",
+    "local-first",
+    "package-manager",
+    "service-supervisor"
+  ]
+}

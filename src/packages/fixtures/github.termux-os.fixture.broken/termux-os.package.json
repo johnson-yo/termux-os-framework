@@ -1,0 +1,11 @@
+{
+  "schema": "termux-os.package.v1",
+  "id": "github.termux-os.fixture.broken",
+  "name": "Fixture Broken Package",
+  "version": "0.1.0",
+  "description": "Loader failure fixture: register() always throws",
+  "types": ["adapter"],
+  "entrypoints": { "backend": "package.mjs", "webui": "web/index.html" },
+  "components": { "services": [], "actions": [], "apps": [] },
+  "capabilities": { "provides": [], "requires": [] }
+}

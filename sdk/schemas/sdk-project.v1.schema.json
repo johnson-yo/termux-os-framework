@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "termux-os.sdk-project.v1",
+  "type": "object",
+  "required": ["schema", "package_id", "primary_type", "development"],
+  "properties": {
+    "schema": { "const": "termux-os.sdk-project.v1" },
+    "package_id": { "type": "string" },
+    "primary_type": { "enum": ["service", "app", "adapter", "asset"] },
+    "created_by": { "type": "string" },
+    "requirements": {
+      "type": "object",
+      "properties": {
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "feeds": { "type": "array", "items": { "type": "string" } },
+        "ports": { "type": "array", "items": { "type": "string" } },
+        "menu_parent": { "type": "string" },
+        "browser_session": { "type": "boolean" }
+      }
+    },
+    "development": {
+      "type": "object",
+      "required": ["current_section"],
+      "properties": { "current_section": { "type": "integer", "minimum": 0 } }
+    }
+  }
+}

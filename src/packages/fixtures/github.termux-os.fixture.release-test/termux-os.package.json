@@ -1,0 +1,11 @@
+{
+  "schema": "termux-os.package.v1",
+  "id": "github.termux-os.fixture.release-test",
+  "name": "Fixture Release Test",
+  "version": "0.1.0",
+  "description": "Installer fixture: install/update/rollback drills",
+  "types": ["adapter"],
+  "entrypoints": { "backend": "package.mjs", "webui": "web/index.html" },
+  "components": { "services": [], "actions": ["fixture.release.echo"], "apps": [] },
+  "capabilities": { "provides": [], "requires": [] }
+}

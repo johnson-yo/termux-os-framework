@@ -1,0 +1,34 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  [INPUT]: Runtime inputs documented by this file, its public API, and adjacent documentation.
+  [OUTPUT]: The exports or executable behavior implemented by this file.
+  [POS]: sdk/examples/adapter-http/web/index.html in termux-os-framework.
+  [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Example HTTP Adapter</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>Example HTTP Adapter <a class="back" href="/admin">Back to administration</a></h1>
+  <section class="card">
+    <h2>Status</h2>
+    <pre id="status">-</pre>
+    <p id="note" class="note"></p>
+    <p class="note">Errors must explain what happened and what the user can do next.</p>
+  </section>
+  <section class="card">
+    <h2>Verification</h2>
+    <p><a class="back" href="/admin/status/runtime">Open runtime status</a></p>
+  </section>
+</main>
+<script src="/admin/session.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

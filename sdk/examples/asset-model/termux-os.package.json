@@ -1,0 +1,71 @@
+{
+  "schema": "termux-os.package.v1",
+  "id": "github.termux-os.asset.example-model",
+  "name": "Example Model Asset",
+  "version": "0.1.0",
+  "description": "TODO: describe Example Model Asset",
+  "types": [
+    "asset"
+  ],
+  "compatibility": {
+    "framework": ">=0.1.0"
+  },
+  "entrypoints": {
+    "backend": "package.mjs",
+    "webui": "web/index.html"
+  },
+  "admin": {
+    "title": "Example Model Asset"
+  },
+  "verification": {
+    "device": {
+      "command": "node scripts/verify-device.mjs",
+      "timeout_ms": 30000,
+      "requires_running": false
+    }
+  },
+  "components": {
+    "services": [],
+    "actions": [],
+    "apps": [],
+    "assets": [
+      "model.example-model"
+    ]
+  },
+  "capabilities": {
+    "provides": [],
+    "requires": []
+  },
+  "menu": [
+    {
+      "parent": "/admin/packages",
+      "path": "/packages/github.termux-os.asset.example-model/",
+      "title": "Example Model Asset",
+      "order": 100
+    }
+  ],
+  "assets": {
+    "provides": [
+      {
+        "id": "model.example-model",
+        "kind": "model",
+        "payload": "payload/example-model",
+        "files": {
+          "metadata": "asset.json",
+          "model": "model.bin"
+        }
+      }
+    ],
+    "requires": []
+  },
+  "runtime": {
+    "framework": {
+      "commands": [
+        "node"
+      ]
+    },
+    "termux_packages": [],
+    "bundled": [],
+    "external": []
+  }
+}

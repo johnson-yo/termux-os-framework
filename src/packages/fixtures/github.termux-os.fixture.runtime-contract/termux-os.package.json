@@ -1,0 +1,21 @@
+{
+  "schema": "termux-os.package.v1",
+  "id": "github.termux-os.fixture.runtime-contract",
+  "name": "Fixture Runtime Contract",
+  "version": "0.1.0",
+  "description": "023 runtime fixture: runtime dependency + device target contract",
+  "types": ["adapter"],
+  "entrypoints": { "backend": "package.mjs", "webui": "web/index.html" },
+  "components": { "services": [], "actions": ["fixture.runtime.echo"], "apps": [] },
+  "capabilities": { "provides": [], "requires": [] },
+  "runtime": {
+    "framework": { "commands": ["node"] },
+    "bundled": [
+      { "path": "service/native/bin/tool", "type": "executable", "required": true },
+      { "path": "assets/data.bin", "type": "file", "required": true }
+    ]
+  },
+  "targets": [
+    { "id": "fixture-host", "os": "linux", "arch": "x86_64" }
+  ]
+}

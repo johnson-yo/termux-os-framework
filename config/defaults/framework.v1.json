@@ -1,0 +1,16 @@
+{
+  "schema": "termux-os-framework.conf.v1",
+  "device_name": "android-device",
+  "developer_mode": false,
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8980
+  },
+  "auth": {},
+  "integrations": {
+    "package_registry": {
+      "base_url": "https://package.termux-os.com",
+      "framework_repository": "johnson-yo/termux-os-framework"
+    }
+  }
+}

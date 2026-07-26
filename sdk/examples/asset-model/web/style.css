@@ -1,0 +1,24 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * [INPUT]: Runtime inputs documented by this file, its public API, and adjacent documentation.
+ * [OUTPUT]: The exports or executable behavior implemented by this file.
+ * [POS]: sdk/examples/asset-model/web/style.css in termux-os-framework.
+ * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
+ */
+
+* { box-sizing: border-box; margin: 0; }
+body { font: 15px/1.5 system-ui, sans-serif; background: #0b0d10; color: #e8eaed; padding: 12px; }
+main { width: min(720px, 100%); margin: 0 auto; }
+h1 { font-size: 1.1rem; color: #8ab4f8; margin: .5rem 0; display: flex; justify-content: space-between; gap: .7rem; flex-wrap: wrap; }
+h2 { font-size: 1rem; color: #8ab4f8; margin-bottom: .6rem; }
+.card { background: #16181c; border: 1px solid #2a2f36; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+button { padding: 8px 14px; border: 0; border-radius: 6px; background: #2f6fed; color: #fff; cursor: pointer; }
+pre { font-family: ui-monospace, monospace; font-size: .8rem; background: #111418; border: 1px solid #2a2f36;
+  border-radius: 6px; padding: .5rem; white-space: pre-wrap; max-height: 20rem; overflow-y: auto; }
+.note { color: #9aa0a6; font-size: .8rem; }
+.back { color: #8ab4f8; font-size: .85rem; }
+@media (max-width: 480px) {
+  body { padding: 9px; font-size: 14px; }
+  .card { padding: 10px; margin-bottom: 9px; }
+  pre { max-height: 55vh; }
+}

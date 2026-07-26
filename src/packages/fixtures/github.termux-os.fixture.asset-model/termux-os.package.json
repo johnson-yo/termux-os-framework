@@ -1,0 +1,26 @@
+{
+  "schema": "termux-os.package.v1",
+  "id": "github.termux-os.fixture.asset-model",
+  "name": "Fixture Asset Model",
+  "version": "0.1.0",
+  "description": "024 asset fixture: model asset package with KB-sized payload",
+  "types": ["asset"],
+  "entrypoints": { "backend": "package.mjs", "webui": "web/index.html" },
+  "components": { "services": [], "actions": [], "apps": [], "assets": ["model.fixture"] },
+  "capabilities": { "provides": [], "requires": [] },
+  "assets": {
+    "provides": [
+      {
+        "id": "model.fixture",
+        "kind": "model",
+        "payload": "payload/fixture",
+        "files": { "context": "fixture.ctx.onnx", "metadata": "asset.json" }
+      }
+    ],
+    "requires": []
+  },
+  "targets": [
+    { "id": "fixture-host", "os": "linux", "arch": "x86_64" },
+    { "id": "android-arm64-v79-qnn247", "os": "android", "arch": "arm64", "htp": "v79", "qnn": "2.47" }
+  ]
+}

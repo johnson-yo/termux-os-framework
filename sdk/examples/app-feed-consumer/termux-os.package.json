@@ -1,0 +1,63 @@
+{
+  "schema": "termux-os.package.v1",
+  "id": "github.termux-os.app.example-feed-consumer",
+  "name": "Example Feed Consumer",
+  "version": "0.1.0",
+  "description": "TODO: describe Example Feed Consumer",
+  "types": [
+    "app"
+  ],
+  "compatibility": {
+    "framework": ">=0.1.0"
+  },
+  "entrypoints": {
+    "backend": "package.mjs",
+    "webui": "web/index.html"
+  },
+  "admin": {
+    "title": "Example Feed Consumer"
+  },
+  "verification": {
+    "device": {
+      "command": "node scripts/verify-device.mjs",
+      "timeout_ms": 30000,
+      "requires_running": false
+    }
+  },
+  "components": {
+    "services": [
+      "app.example-feed-consumer"
+    ],
+    "actions": [],
+    "apps": [
+      "example-feed-consumer"
+    ]
+  },
+  "capabilities": {
+    "provides": [],
+    "requires": [
+      {
+        "id": "speech.transcript",
+        "optional": false
+      }
+    ]
+  },
+  "menu": [
+    {
+      "parent": "/admin/applications",
+      "path": "/packages/github.termux-os.app.example-feed-consumer/",
+      "title": "Example Feed Consumer",
+      "order": 100
+    }
+  ],
+  "runtime": {
+    "framework": {
+      "commands": [
+        "node"
+      ]
+    },
+    "termux_packages": [],
+    "bundled": [],
+    "external": []
+  }
+}

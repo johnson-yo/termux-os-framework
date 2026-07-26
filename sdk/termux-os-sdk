@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Extensionless executable shim; the implementation remains an ES module.
+exec node "$(dirname "$0")/termux-os-sdk.mjs" "$@"

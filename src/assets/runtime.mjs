@@ -1,0 +1,81 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * [INPUT]: Runtime inputs documented by this file, its public API, and adjacent documentation.
+ * [OUTPUT]: The exports or executable behavior implemented by this file.
+ * [POS]: src/assets/runtime.mjs in termux-os-framework.
+ * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
+ */
+
+import { describeAsset, resolveAsset as resolveFromRegistry, listResolvedAssets } from './resolver.mjs';
+
+const providers = new Map(); // assetId → { id, kind, package, payload, files }
+
+export function registerAssetProvider(asset) {
+  if (!asset?.id) throw new Error('asset provider requires id');
+  const existing = providers.get(asset.id);
+  if (existing && existing.package !== asset.package) {
+    // 與 021 的重複 ID 紅線同源：一律拒絕並指明衝突雙方
+    throw new Error(`duplicate asset id "${asset.id}": already provided by ${existing.package}, now ${asset.package}`);
+  }
+  providers.set(asset.id, { ...asset });
+  return providers.get(asset.id);
+}
+
+export const clearAssetProviders = () => providers.clear();
+// 029 Dev Runtime：卸載 Package 時回收其 asset 宣稱（payload/registry 不動——那是 Installer 的事）
+export const unregisterAssetProvider = (id) => providers.delete(id);
+export const getAssetProvider = (id) => providers.get(id) ?? null;
+
+/**
+ * 全部 asset 的狀態 = 宣稱提供的（providers）∪ 已登記安裝的（registry）。
+ * 兩邊都要列：只看 providers 會漏掉「包已卸載但 payload 還在」；
+ * 只看 registry 會漏掉「包裝了但 payload 沒裝成」。
+ */
+export function listAssets(opts = {}) {
+  const out = new Map();
+  for (const d of listResolvedAssets(opts)) out.set(d.id, { ...d, declared_by: providers.get(d.id)?.package ?? null });
+  for (const [id, p] of providers) {
+    if (out.has(id)) { out.get(id).kind = p.kind; continue; }
+    out.set(id, { ...describeAsset(id, opts), kind: p.kind, declared_by: p.package });
+  }
+  return [...out.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+export const resolveAsset = (id, opts = {}) => resolveFromRegistry(id, opts);
+export { describeAsset };
+
+// ============================================================
+// 自檢：node src/assets/runtime.mjs --self-test
+// ============================================================
+const { fileURLToPath } = await import('node:url');
+const { resolve } = await import('node:path');
+if (process.argv.includes('--self-test')
+  && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  let fails = 0;
+  const t = (name, cond) => { console.log(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'assetrt-'));
+  process.env.ASSETS_REGISTRY_DIR = path.join(tmp, 'reg');
+
+  registerAssetProvider({ id: 'model.a', kind: 'model', package: 'pkg.a', payload: 'payload/a', files: {} });
+  t('provider registered', getAssetProvider('model.a').package === 'pkg.a');
+  t('same package re-register is idempotent',
+    !!registerAssetProvider({ id: 'model.a', kind: 'model', package: 'pkg.a', payload: 'payload/a', files: {} }));
+  let threw = false;
+  try { registerAssetProvider({ id: 'model.a', kind: 'model', package: 'pkg.b' }); } catch { threw = true; }
+  t('duplicate asset id from another package rejected', threw);
+
+  const list = listAssets({ profile: { os: 'android', arch: 'arm64' } });
+  t('declared-but-not-installed shows up as not ready',
+    list.length === 1 && list[0].id === 'model.a' && list[0].ready === false
+    && list[0].reason === 'missing_asset:model.a' && list[0].declared_by === 'pkg.a');
+
+  clearAssetProviders();
+  t('clear empties providers', listAssets().length === 0);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+  process.exit(fails ? 1 : 0);
+}

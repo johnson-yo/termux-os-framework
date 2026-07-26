@@ -1,0 +1,14 @@
+.runtime/
+.runtime-dev/
+dist/
+tmp/
+node_modules/
+__pycache__/
+*.py[cod]
+*.log
+*.pid
+*.sock
+.env
+.env.*
+!.env.example
+.DS_Store

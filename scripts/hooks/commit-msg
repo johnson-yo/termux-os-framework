@@ -1,0 +1,42 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# [INPUT]: The pending commit message file ($1).
+# [OUTPUT]: A non-zero exit status when language, format, or privacy rules fail.
+# [POS]: scripts/hooks/commit-msg in termux-os-framework; local enforcement of Commit discipline.
+# [PROTOCOL]: Keep this gate synchronized with the Commit discipline section in CLAUDE.md.
+#
+# Install once per clone:
+#   git config core.hooksPath scripts/hooks
+
+set -eu
+
+msg_file="$1"
+
+# --- 1. Subject: present, English, conventional, <=72 chars -------------------
+subject=$(grep -v '^#' "$msg_file" | sed '/^[[:space:]]*$/d' | head -n1)
+[ -n "$subject" ] || { echo "commit rejected: empty subject" >&2; exit 1; }
+
+if printf '%s' "$subject" | grep -qP '\p{Han}' 2>/dev/null; then
+  echo "commit rejected: subject must be English (public history)" >&2
+  exit 1
+fi
+if ! printf '%s' "$subject" | grep -qE '^(feat|fix|docs|refactor|test|chore|perf|build|ci|revert)(\([a-z0-9._-]+\))?: .+'; then
+  echo "commit rejected: subject must be 'type(scope): summary'" >&2
+  echo "types: feat fix docs refactor test chore perf build ci revert" >&2
+  exit 1
+fi
+if [ "$(printf '%s' "$subject" | wc -c)" -gt 72 ]; then
+  echo "commit rejected: subject exceeds 72 characters" >&2
+  exit 1
+fi
+
+# --- 2. Privacy: generic private path, network, or weak credential -----------
+private_path_re='/(home|mnt|Users)/[A-Za-z0-9._-]+(/[A-Za-z0-9._-])+'
+private_network_re='\b(10|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b'
+weak_credential_re='(token|password|secret)[[:space:]]*[:=][[:space:]]*[0-9]{8,}'
+if grep -nEi "$private_path_re|$private_network_re|$weak_credential_re" "$msg_file" >/dev/null; then
+  echo "commit rejected: message contains a private path, device alias, address, or legacy credential" >&2
+  exit 1
+fi
+
+exit 0

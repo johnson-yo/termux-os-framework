@@ -1,0 +1,17 @@
+{
+  "schema": "termux-os.package.v1",
+  "id": "github.termux-os.fixture.valid",
+  "name": "Fixture Valid Package",
+  "version": "0.1.0",
+  "description": "Loader fixture: registers one action, one HTTP route, and one WebSocket route",
+  "types": ["adapter"],
+  "compatibility": { "framework": ">=0.1.0" },
+  "entrypoints": { "backend": "package.mjs", "webui": "web/index.html" },
+  "components": { "services": [], "actions": ["fixture.echo"], "apps": [] },
+  "capabilities": {
+    "provides": [
+      { "id": "text.translate", "provider": "fixture.echo", "kind": "action", "action": "fixture.echo" }
+    ],
+    "requires": []
+  }
+}

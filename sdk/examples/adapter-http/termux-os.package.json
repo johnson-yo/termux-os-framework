@@ -1,0 +1,57 @@
+{
+  "schema": "termux-os.package.v1",
+  "id": "github.termux-os.adapter.example-http",
+  "name": "Example HTTP Adapter",
+  "version": "0.1.0",
+  "description": "TODO: describe Example HTTP Adapter",
+  "types": [
+    "adapter"
+  ],
+  "compatibility": {
+    "framework": ">=0.1.0"
+  },
+  "entrypoints": {
+    "backend": "package.mjs",
+    "webui": "web/index.html"
+  },
+  "admin": {
+    "title": "Example HTTP Adapter"
+  },
+  "verification": {
+    "device": {
+      "command": "node scripts/verify-device.mjs",
+      "timeout_ms": 30000,
+      "requires_running": false
+    }
+  },
+  "components": {
+    "services": [],
+    "actions": [
+      "example-http.probe",
+      "example-http.echo"
+    ],
+    "apps": []
+  },
+  "capabilities": {
+    "provides": [],
+    "requires": []
+  },
+  "menu": [
+    {
+      "parent": "/admin/adapters",
+      "path": "/packages/github.termux-os.adapter.example-http/",
+      "title": "Example HTTP Adapter",
+      "order": 100
+    }
+  ],
+  "runtime": {
+    "framework": {
+      "commands": [
+        "node"
+      ]
+    },
+    "termux_packages": [],
+    "bundled": [],
+    "external": []
+  }
+}

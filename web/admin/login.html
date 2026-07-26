@@ -1,0 +1,31 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  [INPUT]: Runtime inputs documented by this file, its public API, and adjacent documentation.
+  [OUTPUT]: The exports or executable behavior implemented by this file.
+  [POS]: web/admin/login.html in termux-os-framework.
+  [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
+-->
+
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login — Termux-OS</title>
+  <link rel="stylesheet" href="/admin/style.css">
+</head>
+<body class="login-page">
+  <main class="login-wrap">
+    <form class="login-card" id="login-form">
+      <p class="eyebrow">TERMUX-OS</p>
+      <h1>Administration</h1>
+      <p class="description">Sign in to manage runtime state, Packages, Services, and Framework updates on this phone.</p>
+      <label for="password">Administrator password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <button class="primary" type="submit" id="login-button">Login</button>
+      <p class="alert error" id="login-error" hidden></p>
+    </form>
+  </main>
+  <script src="/admin/login.js"></script>
+</body>
+</html>

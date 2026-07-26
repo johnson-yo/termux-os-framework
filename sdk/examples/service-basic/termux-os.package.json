@@ -1,0 +1,64 @@
+{
+  "schema": "termux-os.package.v1",
+  "id": "github.termux-os.service.example-counter",
+  "name": "Example Counter",
+  "version": "0.1.0",
+  "description": "TODO: describe Example Counter",
+  "types": [
+    "service"
+  ],
+  "compatibility": {
+    "framework": ">=0.1.0"
+  },
+  "entrypoints": {
+    "backend": "package.mjs",
+    "webui": "web/index.html"
+  },
+  "admin": {
+    "title": "Example Counter"
+  },
+  "verification": {
+    "device": {
+      "command": "node scripts/verify-device.mjs",
+      "timeout_ms": 30000,
+      "requires_running": false
+    }
+  },
+  "components": {
+    "services": [
+      "example-counter"
+    ],
+    "actions": [],
+    "apps": []
+  },
+  "capabilities": {
+    "provides": [],
+    "requires": []
+  },
+  "menu": [
+    {
+      "parent": "/admin/services",
+      "path": "/packages/github.termux-os.service.example-counter/",
+      "title": "Example Counter",
+      "order": 100
+    }
+  ],
+  "ports": [
+    {
+      "id": "http",
+      "protocol": "http",
+      "visibility": "loopback",
+      "health": "/health"
+    }
+  ],
+  "runtime": {
+    "framework": {
+      "commands": [
+        "node"
+      ]
+    },
+    "termux_packages": [],
+    "bundled": [],
+    "external": []
+  }
+}
