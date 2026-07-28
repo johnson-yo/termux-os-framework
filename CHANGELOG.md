@@ -4,6 +4,15 @@ All notable public changes will be recorded here after the first tagged release.
 
 ## Unreleased
 
+- Workspace data no longer lands on shared storage. A Package under development may write
+  audio or images, and anything under `/sdcard` is indexed by the Android media scanner and
+  appears in the user's gallery; development output must not be able to pollute the device
+  that way. It now lives under the Framework's private `.runtime/dev-data`, which the
+  installer preserves across updates.
+- The Workspace page no longer repeats the page heading in a card of its own — the Shell
+  already renders the title and its registry description — and its cards use the shared
+  `valueRow` layout instead of a bespoke grid, so they read like every other page.
+
 - Fixed the Workspace page rendering "No workspace mounted" while the API returned the
   mount: it read `api()`, which resolves to a `Response`, instead of `apiData()`, which
   parses it. The API was right and the screen was wrong, so checking the API alone could

@@ -148,6 +148,10 @@ curl -s -H "$AUTH" $B/api/admin/workspaces \
   && ok "工作區視圖列出實例與其頁面" || bad "工作區視圖未列出實例"
 grep -q "apiData('/api/admin/workspaces')" "$ROOT/web/admin/app-core.js" \
   && ok "視圖用 apiData 解析（api 回傳的是 Response）" || bad "工作區視圖用錯 API helper"
+# 版面必須與其它管理頁一致：用共用的 valueRow，而不是自造一套 kv-grid
+grep -q "valueRow('Instance', ws.instance_id)" "$ROOT/web/admin/app-core.js" \
+  && ! grep -q "kv-grid" "$ROOT/web/admin/app-core.js" \
+  && ok "工作區卡片沿用共用 valueRow 版式" || bad "工作區卡片版式與其它頁不一致"
 
 echo "--- 9. 工作區不得佔用全域資源 ---"
 curl -s -H "$AUTH" "$B/api/packages/$INST" | jq "assert d['package']['ports'] in ([], None)" \
@@ -174,6 +178,8 @@ curl -s "$B/api/dev/packages/$INST/events" | jq "assert d['status']=='loaded'" \
   && ok "修復 → 自動重載復活" || bad "自動復活"
 curl -s -H "$AUTH" -X POST "$B/api/packages/$INST/config" -d '{"interval_ms":9999}' >/dev/null
 [ -f ".runtime/dev-data/$INST/conf/sdk-smoke-dr.v1.json" ] && ok "Dev 配置落隔離區（dev-data）" || bad "dev 資料隔離"
+# 工作區資料一律不得落共享存儲：包在開發中寫出的音訊/圖片會被媒體掃描器收進相簿
+[ ! -e "/sdcard/termux-os/framework/dev/$INST" ] && ok "Dev 資料未落 /sdcard（避免被媒體掃描）" || bad "Dev 資料落到共享存儲"
 # 並存後正式版全程在跑，它**本來就會**建自己的預設配置——那不是污染。
 # 要驗的是 Dev 改的值有沒有漏進正式版，所以比對內容而不是比對檔案存在與否。
 if [ -f ".runtime/persist/conf/sdk-smoke-dr.v1.json" ]; then

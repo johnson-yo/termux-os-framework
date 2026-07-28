@@ -686,85 +686,65 @@ function renderLogs() {
  * guess. Listing every page as a real button is the whole point of this view — a newcomer
  * should never have to derive a URL from a naming convention, and the released copy is
  * shown right next to it so it is obvious both are running.
+ *
+ * The Shell already renders the page title and its registry description, so this view
+ * adds no heading of its own and uses valueRow() like every other administration page.
  */
 async function renderWorkspace() {
   const data = await apiData('/api/admin/workspaces');
-  const nodes = [];
-
-  const intro = section('Workspace');
-  intro.body.append(text('p',
-    'Packages being developed on this device. A workspace runs alongside the released package '
-    + 'of the same id — neither replaces the other, so you can compare them page by page.',
-    'description'));
-  nodes.push(intro.card);
 
   if (!data.workspaces?.length) {
     const empty = section('No workspace mounted');
-    empty.body.append(text('p',
-      'Mount one with: termux-os-sdk dev start <package-id> --slug <name>', 'muted'));
+    empty.body.append(
+      text('p', 'Start one from a package workspace directory:', 'description'),
+      valueRow('Command', 'termux-os-sdk dev start <package-id> --slug <name>'),
+    );
     if (data.mountable?.length) {
-      empty.body.append(text('p',
-        `Installed and mountable: ${data.mountable.map((m) => m.package_id).join(', ')}`, 'muted'));
+      empty.body.append(valueRow('Installed packages', data.mountable.map((m) => m.package_id).join(', ')));
     }
-    nodes.push(empty.card);
-    replacePage(...nodes);
+    replacePage(empty.card);
     return;
   }
 
-  for (const ws of data.workspaces) {
-    const card = section(`${ws.package_id}  ·  ${ws.slug}`);
-
-    const facts = document.createElement('div');
-    facts.className = 'kv-grid';
-    const fact = (label, value) => {
-      const row = document.createElement('div');
-      row.append(text('span', label), text('b', value ?? 'n/a'));
-      facts.append(row);
-    };
-    fact('Instance', ws.instance_id);
-    fact('Version', ws.version);
-    fact('Status', ws.error ? `${ws.status} — ${ws.error}` : ws.status);
-    fact('Workspace', ws.workspace);
-    fact('Watch', ws.watch_mode);
-    fact('Reloads', String(ws.seq ?? 0));
-    if (ws.released) fact('Released alongside', `${ws.released.version} (${ws.released.status})`);
-    card.body.append(facts);
-
-    // Every page, as a button. This is what stops a newcomer from hunting.
-    if (ws.pages?.length) {
-      card.body.append(text('p', 'Pages', 'description'));
-      const row = document.createElement('div');
-      row.className = 'button-row';
-      for (const page of ws.pages) {
-        const link = document.createElement('a');
-        link.href = page.url;
-        link.target = '_blank';
-        link.rel = 'noopener';
-        link.className = 'button-link primary-link';
-        link.textContent = `Open ${page.title}`;
-        row.append(link);
-      }
-      if (ws.released) {
-        const link = document.createElement('a');
-        link.href = ws.released.url;
-        link.target = '_blank';
-        link.rel = 'noopener';
-        link.className = 'button-link';
-        link.textContent = `Open released ${ws.released.version}`;
-        row.append(link);
-      }
-      card.body.append(row);
-    }
-
+  const cards = data.workspaces.map((ws) => {
+    const card = section(`${ws.package_id} · ${ws.slug}`);
+    card.body.append(
+      valueRow('Instance', ws.instance_id),
+      valueRow('Version', ws.version),
+      valueRow('Status', ws.error ? `${ws.status} — ${ws.error}` : ws.status),
+      valueRow('Workspace', ws.workspace),
+      valueRow('Watch', `${ws.watch_mode} · ${ws.seq ?? 0} reloads`),
+    );
+    if (ws.released) card.body.append(valueRow('Released alongside', `${ws.released.version} (${ws.released.status})`));
     if (ws.services?.length) {
-      card.body.append(text('p',
-        `Services: ${ws.services.map((sv) => `${sv.id} (${sv.state})`).join(', ')}`, 'muted'));
+      card.body.append(valueRow('Services', ws.services.map((sv) => `${sv.id} (${sv.state})`).join(', ')));
     }
-    nodes.push(card.card);
-  }
 
-  replacePage(...nodes);
+    // Every page as a real button. Instance URLs cannot be guessed, so they are stated.
+    const row = document.createElement('div');
+    row.className = 'button-row';
+    for (const page of ws.pages ?? []) {
+      row.append(pageLink(`Open ${page.title}`, page.url, 'button-link primary-link'));
+    }
+    if (ws.released) {
+      row.append(pageLink(`Open released ${ws.released.version}`, ws.released.url, 'button-link'));
+    }
+    if (row.childElementCount) card.body.append(row);
+    return card.card;
+  });
+
+  replacePage(...cards);
 }
+
+const pageLink = (label, href, className) => {
+  const link = document.createElement('a');
+  link.href = href;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.className = className;
+  link.textContent = label;
+  return link;
+};
 
 function renderDeveloperResources() {
   const panel = section('Developer resources');

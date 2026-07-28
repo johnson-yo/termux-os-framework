@@ -20,10 +20,15 @@ const mounts = new Map();     // id → mount 記錄（見 devMount）
 const stateFile = () => path.join(CFG.frameworkRoot, '.runtime/dev/packages.v1.json');
 const genRoot = () => path.join(CFG.frameworkRoot, '.runtime/dev/gen');
 
-/** Dev 資料隔離區（029 §6.4）：真機共享存儲走 /sdcard dev 子樹；否則 framework 私有 dev-data */
-const devDataRoot = (id) => (fs.existsSync('/sdcard/termux-os')
-  ? `/sdcard/termux-os/framework/dev/${id}`
-  : path.join(CFG.frameworkRoot, '.runtime/dev-data', id));
+/**
+ * Workspace data always lives in the Framework's private tree, never on shared storage.
+ *
+ * A Package under development may write audio or images, and anything under /sdcard gets
+ * picked up by the Android media scanner and shows up in the user's gallery. Development
+ * output must not be able to pollute the device that way. `.runtime` is preserved across
+ * Framework updates (see preserve_runtime_state), so this is persistent, not scratch.
+ */
+const devDataRoot = (id) => path.join(CFG.frameworkRoot, '.runtime/dev-data', id);
 
 function copyTree(src, dst) {
   fs.mkdirSync(dst, { recursive: true });
