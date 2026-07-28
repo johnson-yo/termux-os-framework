@@ -159,7 +159,8 @@ TODO: State one responsibility and the explicit non-responsibilities.
 Files in this Package repository may be changed. Do not change Framework Core, another Package, or existing user data to hide a Package defect.
 
 ## Runtime paths
-- Ephemeral status: \`<frameworkRoot>/.runtime/services/${v.SERVICE_ID}/\`
+- Ephemeral status: \`<frameworkRoot>/.runtime/services/<instance-scoped service id>/\`
+  (use \`context.services.id('${v.SERVICE_ID}')\`; a Workspace instance is suffixed with its slug)
 - Persistent configuration: \`/sdcard/termux-os/framework/conf/${v.SHORT}.v1.json\`
 - Persistent data: \`/sdcard/termux-os/framework/data/${v.SHORT}/\`
 
@@ -468,7 +469,11 @@ import { loadConfig } from './service/config.mjs';
 const EDITABLE = { interval_ms: 'number' };
 
 export async function register(context) {
-  const STATUS_FILE = path.join(context.frameworkRoot, '.runtime/services/${v.SERVICE_ID}/status.json');
+  // Derive runtime paths from the instance-scoped service id, never from the literal
+  // one: a Workspace runs alongside the released Package, and two instances that
+  // build this path from the same constant read and write each other's status file.
+  const SERVICE_ID = context.services.id('${v.SERVICE_ID}');
+  const STATUS_FILE = path.join(context.frameworkRoot, \`.runtime/services/\${SERVICE_ID}/status.json\`);
   const CONFIG_FILE = path.join(context.persistRoot, 'conf/${v.SHORT}.v1.json');
 
   context.services.register({

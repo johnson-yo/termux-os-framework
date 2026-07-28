@@ -253,6 +253,15 @@ function makeContext(record, config, configPath, overrides = null) {
       },
     },
     services: {
+      /**
+       * The instance-scoped id of a service this package declares.
+       *
+       * Namespacing the registration alone is not enough: a package computes its own
+       * runtime paths (status file, pid file) from its literal service id, so two
+       * instances would read and write the same files while appearing isolated.
+       * Packages must derive those paths from this, not from a local constant.
+       */
+      id: (localId) => ns(localId),
       register(def) {
         const serviceId = ns(def.id);
         const existing = getServiceDef(serviceId);

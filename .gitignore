@@ -12,3 +12,6 @@ __pycache__/
 .env.*
 !.env.example
 .DS_Store
+
+# SDK project state is local development output, never published
+.sdk/

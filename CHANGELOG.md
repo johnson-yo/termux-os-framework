@@ -4,6 +4,14 @@ All notable public changes will be recorded here after the first tagged release.
 
 ## Unreleased
 
+- Service identity is instance-scoped end to end. Namespacing only the registration
+  was not enough: a Package builds its own runtime paths from its literal service id,
+  so two instances read and wrote the same status file while appearing isolated.
+  `context.services.id(localId)` now returns the scoped id, and the generated Package
+  templates derive `STATUS_FILE` from it instead of a constant.
+- Stage service control accepts instance-scoped ids; `@` was previously rejected by the
+  route pattern, leaving a Workspace service impossible to start or stop over the API.
+
 
 - A Workspace now runs **alongside** the released package of the same id instead of
   displacing it. Dev Mount registers under a derived instance key `<package-id>@<slug>`,

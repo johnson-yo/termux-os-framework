@@ -680,8 +680,8 @@ async function overviewReport() {
 const recovered = await recoverStaleSessions(sessionDeps);
 if (recovered.length) console.log(`app sessions recovered: ${JSON.stringify(recovered)}`);
 
-const STAGE_CTL = /^\/api\/stage\/services\/([\w.-]+)\/(start|stop|restart)$/;
-const STAGE_LOGS = /^\/api\/stage\/services\/([\w.-]+)\/logs$/;
+const STAGE_CTL = /^\/api\/stage\/services\/([\w.@-]+)\/(start|stop|restart)$/;
+const STAGE_LOGS = /^\/api\/stage\/services\/([\w.@-]+)\/logs$/;
 
 const stageRoute = async (req, res, url, query) => {
   if (url === '/api/stage/services' && req.method === 'GET') {

@@ -130,6 +130,17 @@ curl -s -b "$WORK/cookie" "$B/packages/$INST/" | grep -q "DEV WORKSPACE" && ok "
 curl -s -H "$AUTH" "$B/api/packages/$INST" | jq "assert d['package']['source']=='dev-mount'" \
   && ok "工作區 runtime 來源=dev-mount" || bad "dev-mount source"
 
+echo "--- 8b. 服務身分必須實例化 ---"
+# 命名空間只做到註冊是不夠的：包會用自己的 service id 去拼 status/pid 路徑，
+# 兩個實例就會讀寫同一批檔案，看起來隔離其實沒有。context.services.id() 是唯一解。
+curl -s -H "$AUTH" $B/api/stage/services | jq "assert any(s['id']=='sdk-smoke-dr@$SLUG' for s in d['services'])" \
+  && ok "工作區 service id 已實例化" || bad "service id 未實例化"
+curl -s -H "$AUTH" $B/api/stage/services | jq "assert any(s['id']=='sdk-smoke-dr' for s in d['services'])" \
+  && ok "正式版 service id 未被改名" || bad "正式版 service id 被改名"
+# 控制端點必須吃得下實例化的 id（`@` 曾被路由正則擋掉）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST "$B/api/stage/services/sdk-smoke-dr@$SLUG/restart")
+[ "$CODE" = 200 ] && ok "可用實例 id 控制工作區 service" || bad "實例 service 控制 HTTP $CODE"
+
 echo "--- 9. 工作區不得佔用全域資源 ---"
 curl -s -H "$AUTH" "$B/api/packages/$INST" | jq "assert d['package']['ports'] in ([], None)" \
   && ok "工作區不佔 port" || bad "工作區佔了 port"
