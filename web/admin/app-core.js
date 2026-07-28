@@ -28,7 +28,6 @@ let pageCleanup = null;
 let serviceNotice = null;
 let applicationNotice = null;
 let administrationNotice = null;
-let sdkNotice = null;
 
 const flatMenu = (nodes) => nodes.flatMap((node) => [node, ...flatMenu(node.children ?? [])]);
 const canWrite = () => window.TermuxOS.session?.permissions?.includes('write') === true;
@@ -593,36 +592,6 @@ async function copyText(textValue) {
   return copied;
 }
 
-async function renderSdk() {
-  const data = await apiData('/api/admin/sdk-guide');
-  const intro = section('AI Agent guide');
-  intro.body.append(
-    text('p', 'Use this prompt to start a feature implementation with the same Package, authentication, port, mobile WebUI, and release contracts as this Framework build.', 'description'),
-    valueRow('Framework version', data.framework_version),
-    valueRow('Canonical source', data.source),
-  );
-  if (sdkNotice) intro.body.append(text('p', sdkNotice.text, `alert ${sdkNotice.kind}`));
-  const actions = document.createElement('div');
-  actions.className = 'button-row sdk-actions';
-  actions.append(actionButton('Copy AI Agent Prompt', 'primary', async () => {
-    const copied = await copyText(data.prompt);
-    sdkNotice = copied
-      ? { kind: 'good', text: 'AI Agent prompt copied. Paste it into a new conversation and replace the feature placeholder.' }
-      : { kind: 'warning', text: 'Automatic copy was blocked. Select the prompt below and copy it manually.' };
-    renderSdk();
-  }));
-  intro.body.append(actions);
-
-  const promptPanel = section('Current prompt');
-  const prompt = document.createElement('pre');
-  prompt.className = 'sdk-prompt';
-  prompt.tabIndex = 0;
-  prompt.setAttribute('aria-label', 'AI Agent prompt');
-  prompt.textContent = data.prompt;
-  promptPanel.body.append(prompt);
-  replacePage(intro.card, promptPanel.card);
-}
-
 async function renderRuntime() {
   const [overview, integrity, stage, dev] = await Promise.all([
     apiData('/api/admin/overview'), apiData('/api/admin/integrity'), apiData('/api/stage/services'), apiData('/api/dev/packages'),
@@ -708,6 +677,93 @@ function createObservationPanel(title = 'Log observation') {
 function renderLogs() {
   const observation = createObservationPanel('Logs');
   replacePage(observation.card); pageCleanup = observation.cleanup;
+}
+
+/**
+ * Workspace page: one card per package under development on this device.
+ *
+ * A workspace instance serves its pages at `/packages/<id>@<slug>/`, which nobody can
+ * guess. Listing every page as a real button is the whole point of this view — a newcomer
+ * should never have to derive a URL from a naming convention, and the released copy is
+ * shown right next to it so it is obvious both are running.
+ */
+async function renderWorkspace() {
+  const data = await api('/api/admin/workspaces');
+  const nodes = [];
+
+  const intro = section('Workspace');
+  intro.body.append(text('p',
+    'Packages being developed on this device. A workspace runs alongside the released package '
+    + 'of the same id — neither replaces the other, so you can compare them page by page.',
+    'description'));
+  nodes.push(intro.card);
+
+  if (!data.workspaces?.length) {
+    const empty = section('No workspace mounted');
+    empty.body.append(text('p',
+      'Mount one with: termux-os-sdk dev start <package-id> --slug <name>', 'muted'));
+    if (data.mountable?.length) {
+      empty.body.append(text('p',
+        `Installed and mountable: ${data.mountable.map((m) => m.package_id).join(', ')}`, 'muted'));
+    }
+    nodes.push(empty.card);
+    replacePage(...nodes);
+    return;
+  }
+
+  for (const ws of data.workspaces) {
+    const card = section(`${ws.package_id}  ·  ${ws.slug}`);
+
+    const facts = document.createElement('div');
+    facts.className = 'kv-grid';
+    const fact = (label, value) => {
+      const row = document.createElement('div');
+      row.append(text('span', label), text('b', value ?? 'n/a'));
+      facts.append(row);
+    };
+    fact('Instance', ws.instance_id);
+    fact('Version', ws.version);
+    fact('Status', ws.error ? `${ws.status} — ${ws.error}` : ws.status);
+    fact('Workspace', ws.workspace);
+    fact('Watch', ws.watch_mode);
+    fact('Reloads', String(ws.seq ?? 0));
+    if (ws.released) fact('Released alongside', `${ws.released.version} (${ws.released.status})`);
+    card.body.append(facts);
+
+    // Every page, as a button. This is what stops a newcomer from hunting.
+    if (ws.pages?.length) {
+      card.body.append(text('p', 'Pages', 'description'));
+      const row = document.createElement('div');
+      row.className = 'button-row';
+      for (const page of ws.pages) {
+        const link = document.createElement('a');
+        link.href = page.url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.className = 'button-link primary-link';
+        link.textContent = `Open ${page.title}`;
+        row.append(link);
+      }
+      if (ws.released) {
+        const link = document.createElement('a');
+        link.href = ws.released.url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.className = 'button-link';
+        link.textContent = `Open released ${ws.released.version}`;
+        row.append(link);
+      }
+      card.body.append(row);
+    }
+
+    if (ws.services?.length) {
+      card.body.append(text('p',
+        `Services: ${ws.services.map((sv) => `${sv.id} (${sv.state})`).join(', ')}`, 'muted'));
+    }
+    nodes.push(card.card);
+  }
+
+  replacePage(...nodes);
 }
 
 function renderDeveloperResources() {

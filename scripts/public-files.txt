@@ -212,6 +212,7 @@ src/system/admin-pages.mjs
 src/system/auth-file.mjs
 src/system/auth.mjs
 src/system/framework-update-control.mjs
+src/system/workspace-view.mjs
 src/system/job-store.mjs
 src/system/menu.mjs
 src/system/metrics.mjs

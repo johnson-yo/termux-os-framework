@@ -66,31 +66,49 @@ export async function cmdDev(flags, pos) {
     if (dataMode === 'live') {
       console.error('⚠ --use-live-data lets development code modify production configuration and data.');
     }
-    const r = await post(conn, '/api/dev/packages', { package_id: id, workspace: ws, data_mode: dataMode });
+    const r = await post(conn, '/api/dev/packages',
+      { package_id: id, workspace: ws, data_mode: dataMode, slug: flags.slug ?? null });
     if (!r.ok) return fail(flags, 'framework_unreachable', r.error, 'Start Framework and retry.');
     if (!r.data?.ok) return fail(flags, r.data?.error ?? 'dev_start_failed', r.data?.detail ?? r.data?.error, r.data?.fix ?? 'Inspect Framework logs.');
-    if (wsIsLocal) writeSession(ws, { schema: 'termux-os.dev-session.v1', package_id: id, started_at: r.data.mount.started_at, connection: conn.name ?? conn.source, log_marks: await currentMarks(conn, ws) });
-    const url = conn.framework_url ? `${conn.framework_url}/packages/${id}/` : `/packages/${id}/`;
-    emit({ ok: true, package: id, mode: 'DEV', workspace: ws, data_mode: dataMode,
-      watch_mode: r.data.mount.watch_mode, shadow: r.data.mount.shadow, url }, flags, (o) => {
-      console.log(`✓ Dev Mode started: ${o.package}`);
-      if (o.shadow) console.log(`  Shadow: Installed ${o.shadow.version} remains untouched and returns after dev stop.`);
+    // The workspace runs as its own instance; the released package is untouched
+    // and stays reachable at its own URL, so both can be compared side by side.
+    const instanceId = r.data.mount.instance_id ?? id;
+    if (wsIsLocal) writeSession(ws, { schema: 'termux-os.dev-session.v1', package_id: id, instance_id: instanceId, started_at: r.data.mount.started_at, connection: conn.name ?? conn.source, log_marks: await currentMarks(conn, ws) });
+    const url = conn.framework_url ? `${conn.framework_url}/packages/${instanceId}/` : `/packages/${instanceId}/`;
+    const releasedUrl = conn.framework_url ? `${conn.framework_url}/packages/${id}/` : `/packages/${id}/`;
+    emit({ ok: true, package: id, instance: instanceId, mode: 'DEV', workspace: ws, data_mode: dataMode,
+      watch_mode: r.data.mount.watch_mode, url, released_url: releasedUrl }, flags, (o) => {
+      console.log(`✓ Dev Mode started: ${o.instance}`);
       console.log(`  Workspace: ${o.workspace}\n  Data mode: ${o.data_mode}\n  Watch: ${o.watch_mode}`);
-      console.log(`\nOpen on this phone:\n\n${o.url}\n\nWeb changes refresh; backend changes reload automatically.`);
+      console.log(`\nOpen on this phone:\n\n  workspace  ${o.url}\n  released   ${o.released_url}\n`);
+      console.log('Both run at the same time. Web changes refresh; backend changes reload automatically.');
     });
     return;
   }
 
+  // Mount lookups are keyed by instance id. `--slug` names it explicitly; otherwise
+  // resolve the single mount belonging to this package id.
+  const resolveInstance = async () => {
+    if (flags.slug) return `${id}@${flags.slug}`;
+    const mounts = await api(conn, '/api/dev/packages');
+    const owned = (mounts.data?.mounts ?? []).filter((x) => x.package_id === id);
+    if (owned.length === 1) return owned[0].instance_id ?? id;
+    if (owned.length > 1) return null; // ambiguous: caller must pass --slug
+    return id;
+  };
+
   if (sub === 'reload' || sub === 'stop') {
-    const r = await post(conn, `/api/dev/packages/${id}/${sub === 'stop' ? 'stop' : 'reload'}`);
+    const instanceId = await resolveInstance();
+    if (!instanceId) return fail(flags, 'ambiguous_workspace', id, `Add --slug <name> to pick one workspace.`);
+    const r = await post(conn, `/api/dev/packages/${instanceId}/${sub === 'stop' ? 'stop' : 'reload'}`);
     if (!r.ok) return fail(flags, 'framework_unreachable', r.error, null);
-    if (r.status === 404) return fail(flags, 'not_dev_mounted', id, `termux-os-sdk dev start ${id}`);
+    if (r.status === 404) return fail(flags, 'not_dev_mounted', instanceId, `termux-os-sdk dev start ${id}`);
     if (!r.data?.ok && sub === 'reload') return fail(flags, 'dev_reload_failed', r.data?.error, 'Fix the Workspace code and retry.');
-    emit({ ok: true, package: id, ...(sub === 'stop' ? { restored: r.data.restored, workspace_kept: r.data.workspace_kept } : { status: r.data.status }) },
+    emit({ ok: true, package: id, instance: instanceId, ...(sub === 'stop' ? { restored: r.data.restored, workspace_kept: r.data.workspace_kept } : { status: r.data.status }) },
       flags, (o) => {
         if (sub === 'stop') {
           console.log(`✓ Dev Mode stopped: ${o.package}`);
-      console.log(o.restored ? `  Restored Installed ${o.restored.version} (${o.restored.status})` : '  No Installed version exists to restore.');
+      console.log('  The released package was never displaced, so there is nothing to restore.');
           console.log(`  Workspace kept: ${o.workspace_kept}`);
         } else console.log(`✓ Reloaded: ${o.package} (${o.status})`);
       });
@@ -100,14 +118,17 @@ export async function cmdDev(flags, pos) {
   if (sub === 'status') {
     const mounts = await api(conn, '/api/dev/packages');
     if (!mounts.ok) return fail(flags, 'framework_unreachable', mounts.error, 'Start Framework and retry.');
-    const m = (mounts.data?.mounts ?? []).find((x) => x.package_id === id);
+    const owned = (mounts.data?.mounts ?? []).filter((x) => x.package_id === id);
+    const m = flags.slug ? owned.find((x) => x.workspace_slug === flags.slug) : owned[0];
     if (!m) return fail(flags, 'not_dev_mounted', id, `termux-os-sdk dev start ${id}`);
-    const ev = await api(conn, `/api/dev/packages/${id}/events`);
+    const instanceId = m.instance_id ?? id;
+    const ev = await api(conn, `/api/dev/packages/${instanceId}/events`);
     const svcIds = wsIsLocal ? pkgServices(ws) : [];
     const stages = await api(conn, '/api/stage/services');
     const svc = (stages.data?.services ?? []).find((s) => svcIds.includes(s.id));
     const out = { ok: true, package: id, mode: 'DEV', workspace: m.workspace, source_hash: m.source_hash,
-      framework_url: conn.framework_url, package_url: conn.framework_url ? `${conn.framework_url}/packages/${id}/` : null,
+      framework_url: conn.framework_url, instance: instanceId,
+      package_url: conn.framework_url ? `${conn.framework_url}/packages/${instanceId}/` : null,
       watch: m.watch_mode, status: ev.data?.status ?? 'unknown', last_error: ev.data?.error ?? null,
       service: svc ? { id: svc.id, desired: svc.desired, process: svc.process?.state ?? 'unknown', health: svc.health?.state ?? 'unknown' } : null,
       data_mode: m.data_mode, shadow: m.shadow };

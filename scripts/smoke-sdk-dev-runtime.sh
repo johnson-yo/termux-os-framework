@@ -27,7 +27,8 @@ export PACKAGES_INSTALLED_DIR=$WORK/installed
 
 cleanup() {
   [ -n "$FWPID" ] && kill "$FWPID" 2>/dev/null
-  rm -rf "$WORK" "dist/releases/$ID" ".runtime/dev-data/$ID"
+  rm -rf "$WORK" "dist/releases/$ID" ".runtime/dev-data/$ID" ".runtime/dev-data/$ID@w1" \
+    ".runtime/persist/conf/sdk-smoke-dr.v1.json"
 }
 trap cleanup EXIT
 mkdir -p "$WORK/installed" "$WORK/ws"
@@ -116,45 +117,65 @@ import json; d=json.load(open('$WORK/ws/$ID/.sdk/verify.v1.json'))
 assert d['result']=='pass' and d['release_sha256']=='$SHA' and d['version']=='0.1.0'" \
   && ok "verify 記錄綁 release sha+version" || bad "verify 綁定"
 
-echo "--- 8. Dev Mount / Shadow ---"
-$SDK dev start $ID --json | jq "assert d['ok'] and d['shadow']['version']=='0.1.0'" \
-  && ok "dev start + shadow Installed 0.1.0" || bad "dev start"
-curl -s -b "$WORK/cookie" $B/packages/$ID/ | grep -q "DEV WORKSPACE" && ok "頁面注入 DEV banner" || bad "DEV banner"
-curl -s -H "$AUTH" $B/api/packages/$ID | jq "assert d['package']['source']=='dev-mount'" \
-  && ok "runtime 來源=dev-mount" || bad "dev-mount source"
-$SDK status $ID --json | jq "assert 'dev-shadowing-installed' in d['drift']" \
-  && ok "drift=dev-shadowing-installed" || bad "shadow drift"
+echo "--- 8. Dev Mount：與正式版並存 ---"
+SLUG=w1
+INST="$ID@$SLUG"
+$SDK dev start $ID --slug $SLUG --json | jq "assert d['ok'] and d['instance']=='$INST'" \
+  && ok "dev start → 派生實例 $INST" || bad "dev start"
+# 並存的核心斷言：正式版全程沒有被頂替
+curl -s -H "$AUTH" $B/api/packages/$ID | jq "assert d['package']['source']=='installed'" \
+  && ok "正式版仍在（source=installed）" || bad "正式版被頂替"
+curl -s -b "$WORK/cookie" $B/packages/$ID/ | grep -q "DEV WORKSPACE" && bad "正式版頁面被注入 DEV banner" || ok "正式版頁面乾淨"
+curl -s -b "$WORK/cookie" "$B/packages/$INST/" | grep -q "DEV WORKSPACE" && ok "工作區頁面有 DEV banner" || bad "DEV banner"
+curl -s -H "$AUTH" "$B/api/packages/$INST" | jq "assert d['package']['source']=='dev-mount'" \
+  && ok "工作區 runtime 來源=dev-mount" || bad "dev-mount source"
 
-echo "--- 9. Dev shadow 不可作正式驗證 ---"
-tf "正式 verify-device 拒 shadow" $SDK verify-device $ID
+echo "--- 9. 工作區不得佔用全域資源 ---"
+curl -s -H "$AUTH" "$B/api/packages/$INST" | jq "assert d['package']['ports'] in ([], None)" \
+  && ok "工作區不佔 port" || bad "工作區佔了 port"
+# 正式版沒有被 shadow，正式驗證就不該再被拒
+$SDK verify-device $ID --json >/dev/null 2>&1 && ok "正式 verify-device 仍可通過" || bad "正式 verify-device 被工作區影響"
 
 echo "--- 10. Web reload / backend 失敗隔離 / 資料隔離 ---"
-SEQ0=$(curl -s $B/api/dev/packages/$ID/events | jq "print(d['seq'])")
+SEQ0=$(curl -s "$B/api/dev/packages/$INST/events" | jq "print(d['seq'])")
 echo "<!-- x -->" >> "$WORK/ws/$ID/web/index.html"; sleep 1
-SEQ1=$(curl -s $B/api/dev/packages/$ID/events | jq "print(d['seq'])")
+SEQ1=$(curl -s "$B/api/dev/packages/$INST/events" | jq "print(d['seq'])")
 [ "$SEQ1" -gt "$SEQ0" ] && ok "改 web → seq bump（瀏覽器自動刷新源）" || bad "web reload seq"
 cp "$WORK/ws/$ID/package.mjs" "$WORK/pkg.bak"
 echo "not js {" >> "$WORK/ws/$ID/package.mjs"; sleep 1.6
-curl -s $B/api/dev/packages/$ID/events | jq "assert d['status']=='failed' and d['error']" \
+curl -s "$B/api/dev/packages/$INST/events" | jq "assert d['status']=='failed' and d['error']" \
   && ok "壞 backend → failed 帶錯誤" || bad "backend fail"
-curl -s -b "$WORK/cookie" $B/packages/$ID/ | grep -q "載入失敗" && ok "失敗頁顯示原因（不冒充成功）" || bad "失敗頁"
+curl -s -b "$WORK/cookie" "$B/packages/$INST/" | grep -q "載入失敗" && ok "失敗頁顯示原因（不冒充成功）" || bad "失敗頁"
+# 壞掉的工作區不得拖垮正式版——這正是並存要買到的東西
+curl -s -H "$AUTH" $B/api/packages/$ID | jq "assert d['package']['status']=='loaded'" \
+  && ok "工作區壞掉時正式版不受影響" || bad "工作區壞掉波及正式版"
 curl -s -m 2 $B/health | grep -q '"ok":true' && ok "Framework 本體存活" || bad "framework 存活"
 cp "$WORK/pkg.bak" "$WORK/ws/$ID/package.mjs"; sleep 1.6
-curl -s $B/api/dev/packages/$ID/events | jq "assert d['status']=='loaded'" \
+curl -s "$B/api/dev/packages/$INST/events" | jq "assert d['status']=='loaded'" \
   && ok "修復 → 自動重載復活" || bad "自動復活"
-curl -s -H "$AUTH" -X POST $B/api/packages/$ID/config -d '{"interval_ms":9999}' >/dev/null
-[ -f ".runtime/dev-data/$ID/conf/sdk-smoke-dr.v1.json" ] && ok "Dev 配置落隔離區（dev-data）" || bad "dev 資料隔離"
-[ ! -f ".runtime/persist/conf/sdk-smoke-dr.v1.json" ] && ok "正式 persist 未被 Dev 污染" || bad "正式資料被污染"
+curl -s -H "$AUTH" -X POST "$B/api/packages/$INST/config" -d '{"interval_ms":9999}' >/dev/null
+[ -f ".runtime/dev-data/$INST/conf/sdk-smoke-dr.v1.json" ] && ok "Dev 配置落隔離區（dev-data）" || bad "dev 資料隔離"
+# 並存後正式版全程在跑，它**本來就會**建自己的預設配置——那不是污染。
+# 要驗的是 Dev 改的值有沒有漏進正式版，所以比對內容而不是比對檔案存在與否。
+if [ -f ".runtime/persist/conf/sdk-smoke-dr.v1.json" ]; then
+  grep -q "9999" ".runtime/persist/conf/sdk-smoke-dr.v1.json" && bad "正式資料被 Dev 污染" \
+    || ok "正式 persist 有自己的配置，未含 Dev 寫入的值"
+else
+  ok "正式 persist 未被 Dev 觸碰"
+fi
 
-echo "--- 11. dev stop 恢復 ---"
-$SDK dev stop $ID --json | jq "assert d['restored']['version']=='0.1.0'" \
-  && ok "dev stop → 恢復 Installed 0.1.0" || bad "dev stop 恢復"
-curl -s -b "$WORK/cookie" $B/packages/$ID/ | grep -q "DEV WORKSPACE" && bad "停後仍有 DEV banner" || ok "恢復後無 DEV banner"
+echo "--- 11. dev stop 只移除工作區實例 ---"
+$SDK dev stop $ID --slug $SLUG --json | jq "assert d['ok'] and d['restored'] is None" \
+  && ok "dev stop（無 restore：正式版從未被移走）" || bad "dev stop"
+curl -s -H "$AUTH" "$B/api/packages/$INST" | jq "assert not d.get('ok', True)" \
+  && ok "工作區實例已消失" || bad "工作區實例殘留"
+curl -s -H "$AUTH" $B/api/packages/$ID | jq "assert d['package']['status']=='loaded'" \
+  && ok "正式版仍在服務" || bad "正式版丟失"
 [ -d "$WORK/ws/$ID" ] && ok "Workspace 保留" || bad "Workspace 被刪"
-tf "重複 stop 非零（not_mounted）" $SDK dev stop $ID
+tf "重複 stop 非零（not_mounted）" $SDK dev stop $ID --slug $SLUG
 
 echo "--- 12. 重啟不自動恢復 Dev Mount ---"
-$SDK dev start $ID >/dev/null 2>&1
+$SDK dev start $ID --slug $SLUG >/dev/null 2>&1
 stop_fw; start_fw
 curl -s -H "$AUTH" $B/api/dev/packages | jq "assert d['mounts']==[]" \
   && ok "重啟後 Dev Mount 不自動恢復" || bad "重啟恢復策略"

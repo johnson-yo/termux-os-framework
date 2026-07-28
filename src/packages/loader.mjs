@@ -98,9 +98,11 @@ export const listPackages = () => [...packages.values()].map((r) => ({
 export const getPackage = (id) => {
   const r = packages.get(id);
   if (!r) return null;
-  return { id: r.id, dir: r.dir, status: r.status, error: r.error ?? null, manifest: r.manifest ?? null,
+  return { id: r.id, packageId: r.packageId ?? r.id, workspaceSlug: r.workspaceSlug ?? null,
+    dir: r.dir, status: r.status, error: r.error ?? null, manifest: r.manifest ?? null,
     source: r.source ?? 'root', install: r.install ?? null, dev: r.dev ?? null,
     ports: getPackagePorts(id),
+    registered: { services: [...(r.registered?.services ?? [])], apps: [...(r.registered?.apps ?? [])] },
     runtime: r.status === 'loaded' ? getPackageRuntime(id) : null };
 };
 
@@ -164,8 +166,8 @@ export async function unregisterPackage(id) {
 
 /** 單包載入（dev-runtime 用）：cacheBust 給 entry import 加查詢串避開 ESM 模塊快取 */
 export async function loadSinglePackage({ dir, expectId, source, install = null,
-  contextOverrides = null, cacheBust = false }, opts) {
-  await loadCandidate({ dir, expectId, source, install, contextOverrides, cacheBust }, opts);
+  contextOverrides = null, cacheBust = false, workspaceSlug = null }, opts) {
+  await loadCandidate({ dir, expectId, source, install, contextOverrides, cacheBust, workspaceSlug }, opts);
   return packages.get(expectId) ?? null;
 }
 
@@ -175,6 +177,11 @@ export async function loadSinglePackage({ dir, expectId, source, install = null,
 function makeContext(record, config, configPath, overrides = null) {
   const id = record.id;
   const tag = overrides?.devMode ? `[dev ${id}]` : `[pkg ${id}]`;
+  // A dev instance runs alongside the released package of the same id, so every
+  // globally-keyed name it registers must be suffixed. Without this the two
+  // instances collide on service and app ids and the second one fails to load.
+  const slug = record.workspaceSlug ?? null;
+  const ns = (localId) => (slug ? `${localId}@${slug}` : localId);
   const frameworkRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
   return {
     packageId: id,
@@ -247,9 +254,10 @@ function makeContext(record, config, configPath, overrides = null) {
     },
     services: {
       register(def) {
-        const existing = getServiceDef(def.id);
+        const serviceId = ns(def.id);
+        const existing = getServiceDef(serviceId);
         if (existing) {
-          throw new Error(`duplicate service id "${def.id}": already registered by ${existing.package ?? 'core'}, rejected for ${id}`);
+          throw new Error(`duplicate service id "${serviceId}": already registered by ${existing.package ?? 'core'}, rejected for ${id}`);
         }
         const packagePorts = getPackagePorts(id);
         const portEnv = Object.fromEntries(packagePorts.flatMap((port) => {
@@ -264,6 +272,7 @@ function makeContext(record, config, configPath, overrides = null) {
         if (packagePorts[0]) portEnv.PORT = String(packagePorts[0].port);
         stageServices.push({
           ...def,
+          id: serviceId,
           command: def.command === process.execPath ? nodeExecutable() : def.command,
           package: id,
           env: {
@@ -274,18 +283,19 @@ function makeContext(record, config, configPath, overrides = null) {
             ...portEnv,
           },
         });
-        record.registered.services.push(def.id);
+        record.registered.services.push(serviceId);
       },
     },
     apps: {
       register(app) {
         if (!app?.id) throw new Error('app.id is required');
-        const existing = registeredApps.get(app.id);
+        const appId = ns(app.id);
+        const existing = registeredApps.get(appId);
         if (existing) {
-          throw new Error(`duplicate app id "${app.id}": already registered by ${existing.package}, rejected for ${id}`);
+          throw new Error(`duplicate app id "${appId}": already registered by ${existing.package}, rejected for ${id}`);
         }
-        registeredApps.set(app.id, { ...app, package: id });
-        record.registered.apps.push(app.id);
+        registeredApps.set(appId, { ...app, id: appId, package: id });
+        record.registered.apps.push(appId);
       },
     },
     capabilities: {
@@ -339,7 +349,8 @@ function makeContext(record, config, configPath, overrides = null) {
 //      開發樹須顯式 PACKAGES_DEV_DIR，測試附加根 PACKAGES_EXTRA_DIR；roots 參數（self-test/doctor）
 //      維持原始目錄掃描語義
 // ============================================================
-async function loadCandidate({ dir, expectId, source, install, contextOverrides = null, cacheBust = false },
+async function loadCandidate({ dir, expectId, source, install, contextOverrides = null, cacheBust = false,
+  workspaceSlug = null },
   { frameworkVersion, config, configPath, log }) {
   const manifestPath = path.join(dir, MANIFEST_FILENAME);
   if (!fs.existsSync(manifestPath)) {
@@ -363,18 +374,22 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
   const v = validateManifest(manifest, { frameworkVersion });
   if (!v.ok) return fail(manifest?.id && !packages.has(manifest.id) ? manifest.id : expectId, manifest, `manifest invalid: ${v.errors.join('; ')}`);
 
-  const id = manifest.id;
+  const packageId = manifest.id;
+  // A workspace mount registers under a derived instance key so the released
+  // package of the same id keeps serving. `@` is used because the existing
+  // route patterns already accept it — `#` would be read as a URL fragment.
+  const id = workspaceSlug ? `${packageId}@${workspaceSlug}` : packageId;
   if (expectId !== id) {
     return fail(packages.has(id) ? expectId : id, manifest,
       source === 'installed'
-        ? `manifest id "${id}" does not match installed package "${expectId}"`
-        : `directory name "${expectId}" must equal package id "${id}"`);
+        ? `manifest id "${packageId}" does not match installed package "${expectId}"`
+        : `directory name "${expectId}" must equal package id "${packageId}"`);
   }
   const existing = packages.get(id);
   if (existing) return fail(`${id}@${source}`, manifest, `duplicate package id "${id}": already provided by ${existing.dir} (${existing.source}), rejected for ${dir} (${source})`);
 
   const record = {
-    id, dir, manifest, source, install, status: 'loaded', error: null,
+    id, packageId, workspaceSlug, dir, manifest, source, install, status: 'loaded', error: null,
     webRoot: path.join(dir, path.dirname(manifest.entrypoints.webui)),
     registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], cleanups: [] },
   };
@@ -398,7 +413,11 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
   if (!fs.existsSync(webuiPath)) return fail(id, manifest, `webui entry not found: ${manifest.entrypoints.webui}`);
 
   try {
-    record.ports = registerPackagePorts(id, manifest.ports ?? []);
+    // A workspace instance must never take a globally-scoped claim. Ports,
+    // integrations and artifact contracts resolve to exactly one owner, so
+    // letting a dev copy claim them would make the released package's
+    // consumers resolve to the copy — silently, and only sometimes.
+    record.ports = workspaceSlug ? [] : registerPackagePorts(id, manifest.ports ?? []);
     // 029：dev 重載時 entry 加查詢串繞開 ESM 快取（子模塊靠 dev-runtime 的 generation 副本換新 URL）
     const entryUrl = pathToFileURL(backendPath).href + (cacheBust ? `?dev=${Date.now()}` : '');
     const mod = await import(entryUrl);
@@ -408,11 +427,13 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
     // 029 §12：Manifest 宣告的 integration/artifact 契約在載入成功後登記（先到先得，卸載時回收）
     record.registered.integrations = [];
     record.registered.artifactContracts = [];
-    for (const cap of manifest.integrations?.provides ?? []) {
-      if (!integrationProvides.has(cap)) { integrationProvides.set(cap, id); record.registered.integrations.push(cap); }
-    }
-    for (const a of manifest.artifacts?.provides ?? []) {
-      if (!artifactContracts.has(a.id)) { artifactContracts.set(a.id, { ...a, package: id }); record.registered.artifactContracts.push(a.id); }
+    if (!workspaceSlug) {
+      for (const cap of manifest.integrations?.provides ?? []) {
+        if (!integrationProvides.has(cap)) { integrationProvides.set(cap, id); record.registered.integrations.push(cap); }
+      }
+      for (const a of manifest.artifacts?.provides ?? []) {
+        if (!artifactContracts.has(a.id)) { artifactContracts.set(a.id, { ...a, package: id }); record.registered.artifactContracts.push(a.id); }
+      }
     }
     log(`package ${id}: loaded ${manifest.version} (${manifest.types.join(',')}) [${source}]`);
   } catch (e) {
@@ -425,7 +446,7 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
     record.status = 'failed';
     record.error = `register failed: ${String(e?.message ?? e)}`;
     // A failed Package must not reserve a port that no running Package owns.
-    try { registerPackagePorts(id, []); } catch { /* preserve the original load error */ }
+    if (!workspaceSlug) { try { registerPackagePorts(id, []); } catch { /* preserve the original load error */ } }
     packages.set(id, record);
     log(`package ${id}: FAILED — ${record.error}`);
   }

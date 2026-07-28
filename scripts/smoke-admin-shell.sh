@@ -219,7 +219,7 @@ if grep -q 'CORE_ADMIN_PAGES' "$ROOT/src/system/admin-pages.mjs" \
   && grep -q 'renderServices' "$ROOT/web/admin/app-core.js" \
   && grep -q 'renderLogs' "$ROOT/web/admin/app-core.js" \
   && grep -q 'renderRuntime' "$ROOT/web/admin/app-core.js" \
-  && grep -q 'renderSdk' "$ROOT/web/admin/app-core.js" \
+  && grep -q 'renderWorkspace' "$ROOT/web/admin/app-core.js" \
   && grep -q 'loadAdapters' "$ROOT/web/admin/app.js" \
   && grep -q 'renderDeveloper' "$ROOT/web/admin/app-core.js" \
   && grep -q 'renderFrameworkUpdate' "$ROOT/web/admin/admin-controls.js" \
@@ -233,7 +233,7 @@ if grep -q 'CORE_ADMIN_PAGES' "$ROOT/src/system/admin-pages.mjs" \
   && grep -q "target = '_blank'" "$ROOT/web/admin/admin-controls.js" \
   && ! grep -rq 'renderPlaceholder' "$ROOT/web/admin" \
   && grep -q "'/admin/packages/settings'" "$ROOT/src/system/admin-pages.mjs" \
-  && grep -q "'/admin/system/sdk'" "$ROOT/src/system/admin-pages.mjs" \
+  && grep -q "'/admin/system/workspace'" "$ROOT/src/system/admin-pages.mjs" \
   && grep -q "'/admin/system/framework-update'" "$ROOT/src/system/admin-pages.mjs"; then
   ok "Core menu registry only exposes real renderers; Package status pages are Package-owned"
 else
@@ -245,13 +245,17 @@ CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/admin/system/
 if [ "$CODE" = 404 ]; then ok "old System Packages route is removed"; else bad "old System Packages route HTTP $CODE"; fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/admin/packages/settings")"
 if [ "$CODE" = 200 ]; then ok "Package Setting is under the Packages group"; else bad "Package Setting route HTTP $CODE"; fi
+CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/admin/system/workspace")"
+if [ "$CODE" = 200 ]; then ok "Workspace page is registered under the System group"; else bad "Workspace page route HTTP $CODE"; fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/admin/system/sdk")"
-if [ "$CODE" = 200 ]; then ok "SDK page is registered under the System group"; else bad "SDK page route HTTP $CODE"; fi
-if grep -q "document.execCommand('copy')" "$ROOT/web/admin/app-core.js" \
-  && grep -q 'Copy AI Agent Prompt' "$ROOT/web/admin/app-core.js"; then
-  ok "SDK prompt copy supports LAN HTTP fallback"
+if [ "$CODE" = 404 ]; then ok "retired SDK page is gone, not left as a placeholder"; else bad "retired SDK route HTTP $CODE"; fi
+# A workspace serves pages at an instance-scoped URL nobody can guess, so the view
+# must list them explicitly; assert the renderer really emits per-page open buttons.
+if curl -sf -b "$COOKIE" "$BASE/api/admin/workspaces" | grep -q '"workspaces"' \
+  && grep -q "Open \${page.title}" "$ROOT/web/admin/app-core.js"; then
+  ok "Workspace view exposes every page of a mounted workspace"
 else
-  bad "SDK prompt copy fallback"
+  bad "Workspace view page links"
 fi
 curl -sf -b "$COOKIE" "$BASE/api/stage/services" >"$WORK/stage.json"
 if node -e 'const d=require(process.argv[1]); const s=(d.services||[]).find(x=>x.id==="example-counter");

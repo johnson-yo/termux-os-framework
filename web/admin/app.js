@@ -22,7 +22,7 @@ const PAGE_RENDERERS = {
   runtime: renderRuntime,
   system: renderSystem,
   administration: renderAdministration,
-  sdk: renderSdk,
+  workspace: renderWorkspace,
   package_settings: loadPackageSettings,
   adapters: loadAdapters,
   packages: loadPackageManager,

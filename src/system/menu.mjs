@@ -53,7 +53,7 @@ if (process.argv.includes('--self-test')) {
   t('core pages stay visible to every authenticated session', flat.some((x) => x.path === '/admin/system/administration'));
   t('Package Setting lives under Packages', flat.find((x) => x.path === '/admin/packages/settings')?.parent === '/admin/packages');
   t('Framework Update lives under System', flat.find((x) => x.path === '/admin/system/framework-update')?.parent === '/admin/system');
-  t('SDK lives under System', flat.find((x) => x.path === '/admin/system/sdk')?.parent === '/admin/system');
+  t('Workspace lives under System', flat.find((x) => x.path === '/admin/system/workspace')?.parent === '/admin/system');
   t('developer resources visible to authenticated users', flat.some((x) => x.path === '/admin/system/developer'));
   const pkg = { id: 'github.termux-os.service.example', status: 'loaded', manifest: { menu: [{
     parent: '/admin/status', path: '/packages/github.termux-os.service.example/', title: 'Example', order: 40,

@@ -60,6 +60,7 @@ import {
 } from './system/package-settings.mjs';
 import { updatePackagePortSettings } from './system/port-registry.mjs';
 import { sdkGuideSnapshot } from './system/sdk-guide.mjs';
+import { workspaceSnapshot } from './system/workspace-view.mjs';
 import {
   beginSession, endSession, listSessions, recoverStaleSessions, setSessionRoot,
 } from './apps/session.mjs';
@@ -894,6 +895,15 @@ const server = http.createServer(async (req, res) => {
       } catch (error) { return packageSettingError(error); }
     }
   }
+  if (url === '/api/admin/workspaces' && req.method === 'GET') {
+    if (!hasPermission(auth, 'read')) return json(res, 401, { ok: false, error: 'unauthorized' });
+    try {
+      const stages = await stage.listServices();
+      return json(res, 200, workspaceSnapshot({ services: stages }), { 'Cache-Control': 'no-store' });
+    } catch (error) {
+      return json(res, 500, { ok: false, error: 'workspace_view_unavailable', detail: String(error?.message ?? error) });
+    }
+  }
   if (url === '/api/admin/sdk-guide' && req.method === 'GET') {
     if (!hasPermission(auth, 'read')) return json(res, 401, { ok: false, error: 'unauthorized' });
     try {
@@ -1298,7 +1308,11 @@ const server = http.createServer(async (req, res) => {
       if (!b?.package_id || !b?.workspace) {
         return json(res, 400, { ok: false, error: 'package_id and workspace required' });
       }
-      const r = await devMount(b.package_id, { workspace: b.workspace, dataMode: b.data_mode === 'live' ? 'live' : 'isolated' });
+      const r = await devMount(b.package_id, {
+        workspace: b.workspace,
+        dataMode: b.data_mode === 'live' ? 'live' : 'isolated',
+        slug: b.slug ?? null,
+      });
       return json(res, r.ok ? 200 : 400, r);
     }
     const m = url.match(/^\/api\/dev\/packages\/([\w.@-]+)\/(stop|reload)$/);

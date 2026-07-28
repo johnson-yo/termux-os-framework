@@ -34,8 +34,9 @@ export const CORE_ADMIN_PAGES = [
     description: 'Manage the Browser Session, System Key, login password, and reachable control-center addresses.', renderer: 'administration' },
   { path: '/admin/system/framework-update', parent: '/admin/system', title: 'Framework Update', order: 30,
     description: 'Upload a Framework update file; it is checked first, and a failed update restores the previous version.', renderer: 'framework_update' },
-  { path: '/admin/system/sdk', parent: '/admin/system', title: 'SDK', order: 40,
-    description: 'Copy the current Framework contract as a ready-to-use prompt for an AI Agent.', renderer: 'sdk' },
+  { path: '/admin/system/workspace', parent: '/admin/system', title: 'Workspace', order: 40,
+    description: 'Packages under development on this device. Every page a workspace serves is listed with a direct link, so nothing has to be guessed from a URL convention.',
+    renderer: 'workspace' },
   { path: '/admin/system/developer', parent: '/admin/system', title: 'Developer resources', order: 50,
     description: 'Open the public Package developer portal for submission, review, and history.', renderer: 'developer_resources' },
 ];

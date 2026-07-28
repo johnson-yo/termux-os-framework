@@ -4,6 +4,27 @@ All notable public changes will be recorded here after the first tagged release.
 
 ## Unreleased
 
+
+- A Workspace now runs **alongside** the released package of the same id instead of
+  displacing it. Dev Mount registers under a derived instance key `<package-id>@<slug>`,
+  with its own service ids and persist root, and never takes a globally-scoped claim
+  (ports, integrations, artifact contracts) — those resolve to exactly one owner, so a
+  development copy claiming them would silently redirect the released package's consumers.
+  A broken workspace can no longer take the working copy down with it, and both can be
+  compared page by page.
+- `dev stop` no longer restores anything, because nothing was displaced.
+- Dev Runtime control endpoints accept either the instance id or the bare package id when
+  a package has exactly one workspace; two workspaces of the same package require `--slug`
+  rather than silently acting on whichever came first.
+- Replaced the SDK prompt page with **System → Workspace**: one card per package under
+  development, listing every page it serves as a direct link. A workspace serves pages at
+  `/packages/<id>@<slug>/`, which cannot be guessed, so the Framework states them instead
+  of leaving a newcomer to derive them from a naming convention. The Agent-contract API
+  (`/api/admin/sdk-guide`) is unchanged.
+
+### Earlier unreleased notes
+
+
 - Prepared release 0.2.3 with an explicit Package public-file boundary,
   session-bound Terminal tickets, and an explicit LAN exposure confirmation.
 - Established Framework Core as an independent Apache-2.0 repository.

@@ -56,10 +56,11 @@ const saveState = () => {
 };
 
 const publicMount = (m) => ({
-  package_id: m.package_id, workspace: m.workspace, started_at: m.started_at,
+  package_id: m.package_id, instance_id: m.instance_id, workspace_slug: m.workspace_slug,
+  workspace: m.workspace, started_at: m.started_at,
   source_hash: m.source_hash, data_mode: m.data_mode,
-  shadow: m.shadow ? { version: m.shadow.version, source: m.shadow.source,
-    sha256: m.shadow.install?.archive_sha256 ?? null } : null,
+  // Coexistence removed shadowing; the field stays so older clients keep parsing.
+  shadow: null,
   watch_mode: m.watch_mode ?? null, seq: m.seq, last_error: m.last_error ?? null,
 });
 
@@ -81,12 +82,37 @@ export function initDevRuntime(cfg) {
 }
 
 export const listDevMounts = () => [...mounts.values()].map(publicMount);
-export const getDevMount = (id) => (mounts.has(id) ? publicMount(mounts.get(id)) : null);
+
+/**
+ * Mounts are keyed by instance id (`<package-id>@<slug>`), but callers that
+ * only ever ran one workspace per package still pass the bare package id.
+ * Accept both: exact key first, then the package's sole mount. Ambiguity
+ * (two workspaces of the same package) returns null so the caller must be
+ * explicit rather than silently acting on whichever one came first.
+ */
+export function resolveMountKey(idOrInstance) {
+  if (mounts.has(idOrInstance)) return idOrInstance;
+  const owned = [...mounts.values()].filter((m) => m.package_id === idOrInstance);
+  return owned.length === 1 ? owned[0].instance_id : null;
+}
+
+export const getDevMount = (id) => {
+  const key = resolveMountKey(id);
+  return key ? publicMount(mounts.get(key)) : null;
+};
+
+/**
+ * Exact-key check. It must NOT resolve a bare package id to its workspace
+ * mount: this answers "is *this* record a workspace instance", and it decides
+ * whether the DEV banner is injected and whether package mutations are refused.
+ * Resolving loosely here marks the released package as a dev mount — its page
+ * gets the banner and its lifecycle actions get refused.
+ */
 export const isDevMounted = (id) => mounts.has(id);
 
 /** 瀏覽器輪詢口：seq 變了就刷新（web 改動/重載都會 bump） */
 export const devEvents = (id) => {
-  const m = mounts.get(id);
+  const m = mounts.get(resolveMountKey(id) ?? id);
   if (!m) return null;
   const r = _getRecord(id);
   return { seq: m.seq, status: r?.status ?? 'unknown', error: r?.error ?? null };
@@ -106,10 +132,15 @@ async function stopPackageServices(id) {
   return wasRunning;
 }
 
-export async function devMount(id, { workspace, dataMode = 'isolated' }) {
+/** Workspace slug: URL- and id-safe, derived from the requested name or the workspace dir. */
+export function toSlug(value) {
+  return String(value ?? '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+}
+
+export async function devMount(id, { workspace, dataMode = 'isolated', slug: requested = null }) {
   if (!CFG) return { ok: false, error: 'dev_runtime_not_initialized' };
-  if (mounts.has(id)) return { ok: false, error: 'already_mounted', fix: `dev reload ${id} 或先 dev stop` };
   const ws = path.resolve(workspace);
+  const slug = toSlug(requested ?? path.basename(ws)) || 'dev';
 
   // 先驗後動：Manifest 缺失/ID 不符在動任何現場之前拒絕
   const manifestPath = path.join(ws, 'termux-os.package.json');
@@ -123,36 +154,35 @@ export async function devMount(id, { workspace, dataMode = 'isolated' }) {
     return { ok: false, error: 'manifest_id_mismatch', detail: `workspace manifest id=${manifest.id}, requested ${id}` };
   }
 
-  // Shadow（029 §7.3）：暫時接管，Installed Root 與 Desired State 一概不動
-  let shadow = null;
-  let restartServices = [];
-  const existing = _getRecord(id);
-  if (existing) {
-    restartServices = await stopPackageServices(id);
-    const rec = await unregisterPackage(id);
-    shadow = { dir: rec.dir, source: rec.source, install: rec.install,
-      version: rec.manifest?.version ?? null };
+  // Coexistence: the workspace loads as its own instance `<id>@<slug>`, so the
+  // released package keeps serving throughout. Nothing is stopped, unregistered
+  // or shadowed — a developer can compare the two side by side, and a broken
+  // workspace can never take the working copy down with it.
+  const instanceId = `${id}@${slug}`;
+  if (_getRecord(instanceId)) {
+    return { ok: false, error: 'already_mounted', fix: `dev reload ${instanceId} 或先 dev stop` };
   }
 
-  const gen = newGeneration(id, ws);
-  const overrides = { devMode: true, ...(dataMode === 'live' ? {} : { persistRoot: devDataRoot(id) }) };
+  const gen = newGeneration(instanceId, ws);
+  // A workspace instance always gets its own persist root. `live` would mean
+  // writing the released package's persisted config, which is exactly the
+  // cross-contamination coexistence is meant to remove.
+  const overrides = { devMode: true, persistRoot: devDataRoot(instanceId) };
   const record = await loadSinglePackage(
-    { dir: gen, expectId: id, source: 'dev-mount', contextOverrides: overrides, cacheBust: true }, CFG);
+    { dir: gen, expectId: instanceId, source: 'dev-mount', contextOverrides: overrides,
+      cacheBust: true, workspaceSlug: slug }, CFG);
 
   const m = {
-    package_id: id, workspace: ws, started_at: new Date().toISOString(),
-    source_hash: hashWorkspace(ws), data_mode: dataMode, gen, shadow,
-    restart_services: restartServices, seq: 1, last_error: record?.error ?? null,
+    package_id: id, instance_id: instanceId, workspace_slug: slug,
+    workspace: ws, started_at: new Date().toISOString(),
+    source_hash: hashWorkspace(ws), data_mode: dataMode, gen, shadow: null,
+    restart_services: [], seq: 1, last_error: record?.error ?? null,
   };
-  mounts.set(id, m);
+  mounts.set(instanceId, m);
   if (record) record.dev = publicMount(m);
   if (record?.status === 'loaded') {
     // web 資源直讀 Workspace（S4 live 編輯）；backend 跑 generation 副本
     record.webRoot = path.join(ws, path.dirname(record.manifest.entrypoints.webui));
-    // shadow 前在跑的同名 Service 由 dev 版接管
-    for (const sid of restartServices) {
-      if (record.registered.services.includes(sid)) await stage.startService(sid);
-    }
   }
   startWatcher(m);
   saveState();
@@ -160,16 +190,18 @@ export async function devMount(id, { workspace, dataMode = 'isolated' }) {
     error: record?.error ?? null, mount: publicMount(m) };
 }
 
-export async function devReload(id, { reason = 'manual' } = {}) {
-  const m = mounts.get(id);
+export async function devReload(idOrInstance, { reason = 'manual' } = {}) {
+  const id = resolveMountKey(idOrInstance);
+  const m = id ? mounts.get(id) : null;
   if (!m) return { ok: false, error: 'not_mounted' };
   const wasRunning = await stopPackageServices(id);
   await unregisterPackage(id);
   const oldGen = m.gen;
   m.gen = newGeneration(id, m.workspace);
-  const overrides = { devMode: true, ...(m.data_mode === 'live' ? {} : { persistRoot: devDataRoot(id) }) };
+  const overrides = { devMode: true, persistRoot: devDataRoot(id) };
   const record = await loadSinglePackage(
-    { dir: m.gen, expectId: id, source: 'dev-mount', contextOverrides: overrides, cacheBust: true }, CFG);
+    { dir: m.gen, expectId: id, source: 'dev-mount', contextOverrides: overrides,
+      cacheBust: true, workspaceSlug: m.workspace_slug }, CFG);
   fs.rmSync(oldGen, { recursive: true, force: true });
   m.source_hash = hashWorkspace(m.workspace);
   m.seq += 1;
@@ -186,23 +218,19 @@ export async function devReload(id, { reason = 'manual' } = {}) {
   return { ok: record?.status === 'loaded', status: record?.status ?? 'failed', error: record?.error ?? null };
 }
 
-export async function devUnmount(id) {
-  const m = mounts.get(id);
+export async function devUnmount(idOrInstance) {
+  const id = resolveMountKey(idOrInstance);
+  const m = id ? mounts.get(id) : null;
   if (!m) return { ok: false, error: 'not_mounted' };
   stopWatcher(m);
   await stopPackageServices(id);
   await unregisterPackage(id);
   fs.rmSync(path.join(genRoot(), id), { recursive: true, force: true });
-  let restored = null;
-  if (m.shadow) {
-    const rec = await loadSinglePackage(
-      { dir: m.shadow.dir, expectId: id, source: m.shadow.source, install: m.shadow.install }, CFG);
-    restored = { version: m.shadow.version, status: rec?.status ?? 'failed' };
-    await stage.restoreDesiredServices(); // desired=running 者拉回，其餘不動
-  }
+  // Nothing to restore: coexistence means the released package was never
+  // displaced, so unmounting only removes the workspace instance.
   mounts.delete(id);
   saveState();
-  return { ok: true, restored, workspace_kept: m.workspace };
+  return { ok: true, restored: null, workspace_kept: m.workspace };
 }
 
 // ============================================================
@@ -223,7 +251,7 @@ function onFsChange(m, relPath) {
   if (!kind) return;
   if (kind === 'web') { m.seq += 1; return; }
   clearTimeout(m.debounce);
-  m.debounce = setTimeout(() => { devReload(m.package_id, { reason: `file change: ${relPath}` }); }, 600);
+  m.debounce = setTimeout(() => { devReload(m.instance_id, { reason: `file change: ${relPath}` }); }, 600);
 }
 
 function snapshotMtimes(dir) {
