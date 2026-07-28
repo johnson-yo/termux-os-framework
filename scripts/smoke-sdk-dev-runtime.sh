@@ -141,6 +141,14 @@ curl -s -H "$AUTH" $B/api/stage/services | jq "assert any(s['id']=='sdk-smoke-dr
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST "$B/api/stage/services/sdk-smoke-dr@$SLUG/restart")
 [ "$CODE" = 200 ] && ok "可用實例 id 控制工作區 service" || bad "實例 service 控制 HTTP $CODE"
 
+# 視圖必須真的列出已掛載的實例。先前這裡用了回傳 Response 的 api() 而非 apiData()，
+# 於是頁面永遠顯示「沒有工作區」——API 正確、畫面錯誤，只查 API 抓不到。
+curl -s -H "$AUTH" $B/api/admin/workspaces \
+  | jq "assert any(w['instance_id']=='$INST' and w['pages'] for w in d['workspaces'])" \
+  && ok "工作區視圖列出實例與其頁面" || bad "工作區視圖未列出實例"
+grep -q "apiData('/api/admin/workspaces')" "$ROOT/web/admin/app-core.js" \
+  && ok "視圖用 apiData 解析（api 回傳的是 Response）" || bad "工作區視圖用錯 API helper"
+
 echo "--- 9. 工作區不得佔用全域資源 ---"
 curl -s -H "$AUTH" "$B/api/packages/$INST" | jq "assert d['package']['ports'] in ([], None)" \
   && ok "工作區不佔 port" || bad "工作區佔了 port"

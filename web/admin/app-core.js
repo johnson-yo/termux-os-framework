@@ -688,7 +688,7 @@ function renderLogs() {
  * shown right next to it so it is obvious both are running.
  */
 async function renderWorkspace() {
-  const data = await api('/api/admin/workspaces');
+  const data = await apiData('/api/admin/workspaces');
   const nodes = [];
 
   const intro = section('Workspace');

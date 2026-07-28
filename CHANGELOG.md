@@ -4,6 +4,11 @@ All notable public changes will be recorded here after the first tagged release.
 
 ## Unreleased
 
+- Fixed the Workspace page rendering "No workspace mounted" while the API returned the
+  mount: it read `api()`, which resolves to a `Response`, instead of `apiData()`, which
+  parses it. The API was right and the screen was wrong, so checking the API alone could
+  not find it; the smoke now asserts the rendered view and the helper it uses.
+
 - Service identity is instance-scoped end to end. Namespacing only the registration
   was not enough: a Package builds its own runtime paths from its literal service id,
   so two instances read and wrote the same status file while appearing isolated.
