@@ -1180,12 +1180,17 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readBody(req);
       const info = frameworkRegistryInfo({ repository: FRAMEWORK_REGISTRY_REPOSITORY, currentVersion: FRAMEWORK_VERSION });
-      const selection = info.selection;
-      if (!info.available || !selection || !info.update_available) {
-        throw Object.assign(new Error('no newer verified Framework version is available'), { code: 'framework_update_not_available' });
+      // 版本由呼叫方指定，而不是硬綁 latest。「已是最新」不等於「無事可做」：
+      // 檔案損壞要能重裝當前版本，出問題要能裝回指定的舊版，而 last-good 只有一格。
+      const wanted = typeof body?.version === 'string' && body.version ? body.version : info.latest_version;
+      const entry = (info.versions ?? []).find((item) => item.version === wanted);
+      const selection = entry?.selection ?? (wanted === info.latest_version ? info.selection : null);
+      if (!info.available || !selection) {
+        throw Object.assign(new Error(`no verified Framework archive for ${wanted ?? 'latest'}`), { code: 'framework_update_not_available' });
       }
-      if (body?.confirm_version !== info.latest_version) {
-        throw Object.assign(new Error('confirmed Framework version does not match the Registry'), { code: 'confirmation_mismatch' });
+      // 確認值必須等於**請求的**版本：這道閘門是防誤點，不是防舊版。
+      if (body?.confirm_version !== wanted) {
+        throw Object.assign(new Error('confirmed Framework version does not match the requested one'), { code: 'confirmation_mismatch' });
       }
       const remote = await downloadFrameworkFromRegistry(selection);
       upload = await storeFrameworkRemoteDownload(remote.response, remote.filename, {

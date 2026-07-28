@@ -532,3 +532,16 @@ main:not(.content) > h1 { font-size: 1.35rem; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .package-upgrade-banner { margin: 8px 0 0; }
+
+/* Framework 版本列表：每行一个版本 + 一个动作按钮，窄屏时按钮换行占满。 */
+.version-list { margin-top: 12px; border-top: 1px solid var(--line); }
+.version-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap; padding: 9px 0; border-bottom: 1px solid var(--line);
+}
+.version-label { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.version-name { font-family: ui-monospace, monospace; font-weight: 600; }
+.version-meta { color: var(--muted); font-size: 12px; }
+@media (max-width: 620px) {
+  .version-row > button { flex: 1 1 100%; }
+}

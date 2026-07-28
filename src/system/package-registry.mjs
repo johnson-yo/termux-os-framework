@@ -1,7 +1,8 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
  * [INPUT]: A configured public Package Registry endpoint and structured Package selections.
- * [OUTPUT]: A cached catalog, pre-download Package details, three-stage source resolution, and a streamed archive response.
+ * [OUTPUT]: A cached catalog, pre-download Package details, the full verified Framework version list,
+ *           three-stage source resolution, and a streamed archive response.
  * [POS]: src/system/package-registry.mjs in termux-os-framework.
  * [PROTOCOL]: Registry requests accept structured source identifiers only; arbitrary URLs and credentials are forbidden.
  */
@@ -277,6 +278,34 @@ export function frameworkRegistryInfo({ repository, currentVersion } = {}) {
       kind: 'source_tar', file: file.name,
     } : null,
     file: file ?? null,
+    // 全部已驗證版本，而不只是 latest。「已是最新」不等於「無事可做」——
+    // 檔案損壞要能重裝當前版本，出問題要能裝回指定的舊版；
+    // last-good 只有一格，連更兩次就夠不著更早的版本了。
+    versions: project.versions
+      .map((item) => {
+        // status 缺席代表 Registry 沒表態（舊目錄），沿用 latest 路徑的寬鬆處理；
+        // 明確標成非 verified 的版本不列出，免得使用者按下去才被安裝器拒絕。
+        if (item.status && item.status !== 'verified') return null;
+        const archive = item.files.find((f) => f.kind === 'source_tar' && f.name.endsWith('.tar.gz'));
+        if (!archive) return null;
+        return {
+          version: item.version,
+          published_at: item.published_at ?? null,
+          size: archive.size ?? null,
+          sha256: archive.sha256 ?? null,
+          // 相對當前版本的方向，讓 UI 不必自己再實作一次版本比較
+          relation: currentVersion
+            ? (compareVersions(item.version, currentVersion) > 0 ? 'newer'
+              : compareVersions(item.version, currentVersion) < 0 ? 'older' : 'current')
+            : 'unknown',
+          selection: {
+            source: 'github', repository: project.repository, version: item.version,
+            upstream_ref: item.upstream_ref, kind: 'source_tar', file: archive.name,
+          },
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => compareVersions(b.version, a.version)),
   };
 }
 
@@ -536,7 +565,11 @@ if (process.argv.includes('--self-test')
     }, {
       source: frameworkSelected.source, repository: frameworkSelected.repository, display_name: 'Example Framework',
       types: ['framework'], latest_version: frameworkSelected.version, latest_verified_version: frameworkSelected.version,
-      versions: [{ version: frameworkSelected.version, status: 'verified', files: [{ kind: frameworkSelected.kind, name: frameworkSelected.file, size: payload.length, sha256: actualSha }] }],
+      versions: [
+        { version: frameworkSelected.version, status: 'verified', published_at: '2026-01-02T00:00:00.000Z', files: [{ kind: frameworkSelected.kind, name: frameworkSelected.file, size: payload.length, sha256: actualSha }] },
+        { version: '0.1.0', status: 'verified', published_at: '2026-01-01T00:00:00.000Z', files: [{ kind: frameworkSelected.kind, name: frameworkSelected.file, size: payload.length, sha256: actualSha }] },
+        { version: '0.3.0', status: 'pending', published_at: '2026-01-03T00:00:00.000Z', files: [{ kind: frameworkSelected.kind, name: frameworkSelected.file, size: payload.length, sha256: actualSha }] },
+      ],
     }],
   };
   configurePackageRegistry({
@@ -581,6 +614,16 @@ if (process.argv.includes('--self-test')
   const frameworkInfo = frameworkRegistryInfo({ repository: frameworkSelected.repository, currentVersion: '0.1.0' });
   test('Framework catalog exposes a newer typed release', frameworkInfo.available && frameworkInfo.update_available
     && frameworkInfo.selection?.version === frameworkSelected.version);
+  // 版本列表是「已是最新時這頁還能做什麼」的基礎：重裝當前版本、裝回舊版。
+  const versionList = frameworkInfo.versions ?? [];
+  test('Framework catalog lists every verified version, newest first',
+    versionList.map((item) => item.version).join(',') === `${frameworkSelected.version},0.1.0`);
+  test('each listed version carries its direction relative to the running one',
+    versionList[0].relation === 'newer' && versionList[1].relation === 'current');
+  test('a listed version can be installed directly from its own selection',
+    versionList[1].selection?.version === '0.1.0' && versionList[1].selection?.kind === 'source_tar');
+  test('versions the Registry has not verified are not offered',
+    !versionList.some((item) => item.version === '0.3.0'));
   const frameworkResult = await downloadFrameworkFromRegistry(frameworkSelected);
   test('Framework download requires the framework project type', frameworkResult.expected_sha256 === actualSha);
   let typeRejected = false;

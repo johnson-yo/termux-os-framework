@@ -1,7 +1,8 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
  * [INPUT]: Runtime inputs documented by this file, its public API, and adjacent documentation.
- * [OUTPUT]: Mobile Package Manager cards, pre-download details, and explicit safety-confirmed install actions.
+ * [OUTPUT]: Mobile Package Manager cards, pre-download details, a Framework version list whose rows
+ *           update / reinstall / downgrade, and explicit safety-confirmed install actions.
  * [POS]: web/admin/admin-controls.js in termux-os-framework.
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
@@ -122,28 +123,40 @@ async function runFrameworkRollback(lastGood, currentBuild) {
   await loadFrameworkUpdate();
 }
 
-async function runFrameworkRegistryUpdate(registry, currentBuild) {
-  const file = registry.file ?? {};
-  const accepted = await confirmAction({
-    title: 'Install Framework update',
-    label: 'Download and update',
-    details: [
-      ['Current version', currentBuild ?? registry.current_version ?? 'unknown'],
-      ['New version', registry.latest_version],
-      ['Source', `${registry.repository} · ${registry.selection?.upstream_ref ?? 'verified Registry source'}`],
-      ['Size', formatBytes(file.size)],
-      ['File SHA-256', file.sha256 ?? 'not available'],
+// 一个版本能做的三件事，取决于它相对当前版本的位置。措辞必须说清后果——
+// 「降级」不是「更新」的反向操作，旧版可能读不懂当前配置。
+const FRAMEWORK_VERSION_ACTIONS = {
+  newer: { label: '更新', variant: 'primary', title: '更新 Framework' },
+  current: { label: '重新安装', variant: '', title: '重新安装当前版本' },
+  older: { label: '降级', variant: 'danger', title: '降级 Framework' },
+  unknown: { label: '安装', variant: '', title: '安装此版本' },
+};
+
+async function runFrameworkRegistryUpdate(registry, currentBuild, entry = null) {
+  const target = entry ?? { version: registry.latest_version, relation: 'newer',
+    size: registry.file?.size ?? null, sha256: registry.file?.sha256 ?? null,
+    selection: registry.selection };
+  const action = FRAMEWORK_VERSION_ACTIONS[target.relation] ?? FRAMEWORK_VERSION_ACTIONS.unknown;
+  const details = [
+    ['Current version', currentBuild ?? registry.current_version ?? 'unknown'],
+    [target.relation === 'older' ? '降级到' : target.relation === 'current' ? '重新安装' : 'New version', target.version],
+    ['Source', `${registry.repository} · ${target.selection?.upstream_ref ?? 'verified Registry source'}`],
+    ['Size', formatBytes(target.size)],
+    ['File SHA-256', target.sha256 ?? 'not available'],
     ['Update path', 'download through Package Registry, then independent installer'],
-      ['Preserved', 'Framework configuration, credentials, Packages, models and caches'],
-      ['Failure behavior', 'installer restores the previous runtime before reporting failure'],
-    ],
-  });
+    ['Preserved', 'Framework configuration, credentials, Packages, models and caches'],
+    ['Failure behavior', 'installer restores the previous runtime before reporting failure'],
+  ];
+  if (target.relation === 'older') {
+    details.push(['⚠ 降级风险', '旧版本可能读不懂当前版本写下的配置；如果起不来，用下方 Restore previous version 退回。']);
+  }
+  const accepted = await confirmAction({ title: action.title, label: action.label, details });
   if (!accepted) return;
   try {
     const result = await apiData('/api/admin/framework-update/registry', {
-      method: 'POST', body: JSON.stringify({ confirm_version: registry.latest_version }),
+      method: 'POST', body: JSON.stringify({ version: target.version, confirm_version: target.version }),
     });
-    frameworkUpdateNotice = { kind: 'good', text: `Downloaded ${registry.latest_version}; ${jobLabel(result.job)} is installing it.` };
+    frameworkUpdateNotice = { kind: 'good', text: `Downloaded ${target.version}; ${jobLabel(result.job)} is installing it.` };
   } catch (error) {
     if (error?.data?.manual?.release_url) {
       await showManualDownloadDialog({
@@ -215,35 +228,53 @@ function renderFrameworkUpdate(data) {
     registry.body.append(
       valueRow('Source', frameworkCatalog.repository),
       valueRow('Current version', frameworkCatalog.current_version ?? data.current_build ?? 'unknown'),
-      valueRow('Latest verified version', frameworkCatalog.latest_version),
-      valueRow('Archive SHA-256', frameworkCatalog.file?.sha256 ?? 'n/a'),
     );
+
+    // 掛載中的 Dev Runtime 會擋下更新。把「停止全部挂载」直接放在這裡——
+    // 讓使用者為了更新而去別的頁面翻找（或更糟，去開 Termux）是把流程做了一半。
     const controls = document.createElement('div'); controls.className = 'button-row';
-    if (frameworkCatalog.update_available) {
-      // 掛載中的 Dev Runtime 會擋下更新。把「停止全部挂载」直接放在這裡——
-      // 讓使用者為了更新而去別的頁面翻找（或更糟，去開 Termux）是把流程做了一半。
-      if (data.dev_mounts?.length) {
-        controls.append(actionButton(`停止全部挂载（${data.dev_mounts.length}）`, '', async () => {
-          for (const mount of data.dev_mounts) {
-            try {
-              await apiData(`/api/dev/packages/${encodeURIComponent(mount.instance_id ?? mount.package_id)}/stop`,
-                { method: 'POST', body: '{}' });
-            } catch (error) {
-              frameworkUpdateNotice = { kind: 'bad', text: `停止 ${mount.package_id} 失败：${error.message ?? error}` };
-            }
+    if (data.dev_mounts?.length) {
+      controls.append(actionButton(`停止全部挂载（${data.dev_mounts.length}）`, '', async () => {
+        for (const mount of data.dev_mounts) {
+          try {
+            await apiData(`/api/dev/packages/${encodeURIComponent(mount.instance_id ?? mount.package_id)}/stop`,
+              { method: 'POST', body: '{}' });
+          } catch (error) {
+            frameworkUpdateNotice = { kind: 'bad', text: `停止 ${mount.package_id} 失败：${error.message ?? error}` };
           }
-          frameworkUpdateNotice ??= { kind: 'good', text: '已停止全部挂载；Workspace 的项目都保留着，现在可以更新。' };
-          await loadFrameworkUpdate();
-        }, !canWrite()));
-      }
-      controls.append(actionButton('Download and update', 'primary',
-        () => runFrameworkRegistryUpdate(frameworkCatalog, data.current_build),
-        !canWrite() || Boolean(data.active_job) || data.engine_locked));
-    } else {
-      controls.append(text('p', 'Framework is up to date.', 'status good'));
+        }
+        frameworkUpdateNotice ??= { kind: 'good', text: '已停止全部挂载；Workspace 的项目都保留着，现在可以更新。' };
+        await loadFrameworkUpdate();
+      }, !canWrite()));
     }
     controls.append(refreshRegistryButton);
     registry.body.append(controls);
+
+    // 列出全部已驗證版本，而不只是 latest。「已經是最新」不代表這頁沒事可做：
+    // 檔案壞了要能重裝當前版本，新版有問題要能挑一個舊版裝回去。
+    const busy = !canWrite() || Boolean(data.active_job) || data.engine_locked;
+    const versions = frameworkCatalog.versions ?? [];
+    if (!versions.length) {
+      registry.body.append(text('p', 'The cached catalog lists no verified archive for this project.', 'empty'));
+    } else {
+      const list = document.createElement('div'); list.className = 'version-list';
+      for (const entry of versions) {
+        const row = document.createElement('div'); row.className = 'version-row';
+        const label = document.createElement('div'); label.className = 'version-label';
+        const name = text('span', entry.version, 'version-name');
+        label.append(name);
+        if (entry.relation === 'current') label.append(text('span', '当前', 'status good'));
+        const meta = [];
+        if (entry.published_at) meta.push(String(entry.published_at).slice(0, 10));
+        if (entry.size) meta.push(formatBytes(entry.size));
+        if (meta.length) label.append(text('span', meta.join(' · '), 'version-meta'));
+        const action = FRAMEWORK_VERSION_ACTIONS[entry.relation] ?? FRAMEWORK_VERSION_ACTIONS.unknown;
+        row.append(label, actionButton(action.label, action.variant,
+          () => runFrameworkRegistryUpdate(frameworkCatalog, data.current_build, entry), busy));
+        list.append(row);
+      }
+      registry.body.append(list);
+    }
   }
   update.body.append(registry.card);
 
