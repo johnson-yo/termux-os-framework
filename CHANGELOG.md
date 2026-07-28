@@ -4,6 +4,39 @@ All notable public changes will be recorded here after the first tagged release.
 
 ## Unreleased
 
+- The control center is now operable without a shell. Changing the bind address is a
+  toggle under System -> Administration, and because a bind only takes effect at startup
+  it sits next to a Restart button; an update blocked by an active Dev Runtime offers to
+  stop those mounts in place. Both previously ended in an instruction to run a command,
+  which is not a usable answer for someone who never opens Termux.
+- Workspace lists every project under the workspace root, not only the mounted ones. A
+  workspace is a directory on disk and mounting is one of its properties, so listing only
+  mounts meant a project the user had just created was invisible until they ran `ls`.
+  Projects can be created from a template, packed to a browser download, mounted and
+  deleted from the page.
+- Workspace moved into the Packages group, and the Developer resources page — one
+  external link — folded into the Workspace header as "Share your App".
+- A workspace instance is allocated its own ports again. Ports are keyed by package id
+  and an instance has its own id, so the allocator already avoided the released package's
+  port; denying them outright meant any package that needs a port could not run in a
+  workspace at all, failing with "did not assign the HTTP port". Integrations and
+  artifact contracts remain off limits: those resolve by capability name to one owner.
+- Installed and Available now resolve package identity the same way. The manifest records
+  a full repository URL while the Registry uses `owner/repo`, so comparing them directly
+  never matched and official packages showed their publisher instead.
+- Installed cards carry one row of six fixed actions -- Open, Setting, Update, Dev,
+  Rollback, Uninstall -- with unavailable ones disabled in place rather than removed, so
+  a button never moves. Update upgrades from the Registry without leaving the page; Dev
+  copies the installed version into a workspace and mounts it.
+- Download on an Available card no longer waits for Details to be opened. The value of
+  declared permissions is that they can be read, not that a click is forced; they now sit
+  behind a disclosure, which also states plainly when a package declared nothing.
+- The catalog refresh became a panel-level action. Framework Update and Packages already
+  shared one cached catalog, so leaving the only refresh inside a tab meant the other page
+  could never see fresh data. The framework itself is filtered out of the installable list.
+- Package-owned pages open in a new tab, and Recent operations appears once, under
+  Status -> Logs, instead of on every package page.
+
 - Workspace data no longer lands on shared storage. A Package under development may write
   audio or images, and anything under `/sdcard` is indexed by the Android media scanner and
   appears in the user's gallery; development output must not be able to pollute the device

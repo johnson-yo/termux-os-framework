@@ -24,6 +24,10 @@ export const CORE_ADMIN_PAGES = [
     description: 'Manage installed Packages, choose verified Packages from the catalog, or install one from a file.', renderer: 'packages' },
   { path: '/admin/packages/settings', parent: '/admin/packages', title: 'Package Setting', order: 20,
     description: 'Edit Package ports and visibility, then restart, disable, or enable each Package.', renderer: 'package_settings' },
+  // 工作區屬於 Packages：它管理的是本機的包項目，與 System 的設備/框架設定無關。
+  { path: '/admin/packages/workspace', parent: '/admin/packages', title: 'Workspace', order: 30,
+    description: 'Package projects on this device. Mounting runs a project alongside the released package of the same id; every page it serves is listed with a direct link.',
+    renderer: 'workspace' },
   { path: '/admin/adapters', title: 'Adapters', order: 50, default_child: '/admin/adapters/overview' },
   { path: '/admin/adapters/overview', parent: '/admin/adapters', title: 'Adapter Catalog', order: 10,
     description: 'Inspect installed bridges between Packages, devices, engines, and external APIs.', renderer: 'adapters' },
@@ -34,11 +38,6 @@ export const CORE_ADMIN_PAGES = [
     description: 'Manage the Browser Session, System Key, login password, and reachable control-center addresses.', renderer: 'administration' },
   { path: '/admin/system/framework-update', parent: '/admin/system', title: 'Framework Update', order: 30,
     description: 'Upload a Framework update file; it is checked first, and a failed update restores the previous version.', renderer: 'framework_update' },
-  { path: '/admin/system/workspace', parent: '/admin/system', title: 'Workspace', order: 40,
-    description: 'Packages under development on this device. A workspace runs alongside the released package of the same id, and every page it serves is listed with a direct link.',
-    renderer: 'workspace' },
-  { path: '/admin/system/developer', parent: '/admin/system', title: 'Developer resources', order: 50,
-    description: 'Open the public Package developer portal for submission, review, and history.', renderer: 'developer_resources' },
 ];
 
 export const coreAdminPage = (pathname) => CORE_ADMIN_PAGES.find((page) => page.path === pathname) ?? null;

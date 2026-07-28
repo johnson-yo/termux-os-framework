@@ -143,19 +143,32 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST "$B/api/stage/s
 
 # 視圖必須真的列出已掛載的實例。先前這裡用了回傳 Response 的 api() 而非 apiData()，
 # 於是頁面永遠顯示「沒有工作區」——API 正確、畫面錯誤，只查 API 抓不到。
+# 工作區是磁碟上的目錄，掛載只是其屬性之一——已掛載的必須出現，且帶得出它的頁面
 curl -s -H "$AUTH" $B/api/admin/workspaces \
-  | jq "assert any(w['instance_id']=='$INST' and w['pages'] for w in d['workspaces'])" \
-  && ok "工作區視圖列出實例與其頁面" || bad "工作區視圖未列出實例"
+  | jq "assert any(p['mounted'] and p['mount']['instance_id']=='$INST' and p['mount']['pages'] for p in d['projects'])" \
+  && ok "工作區視圖列出已掛載專案與其頁面" || bad "工作區視圖未列出實例"
 grep -q "apiData('/api/admin/workspaces')" "$ROOT/web/admin/app-core.js" \
   && ok "視圖用 apiData 解析（api 回傳的是 Response）" || bad "工作區視圖用錯 API helper"
 # 版面必須與其它管理頁一致：用共用的 valueRow，而不是自造一套 kv-grid
-grep -q "valueRow('Instance', ws.instance_id)" "$ROOT/web/admin/app-core.js" \
+grep -q "valueRow('Workspace root', data.root)" "$ROOT/web/admin/app-core.js" \
   && ! grep -q "kv-grid" "$ROOT/web/admin/app-core.js" \
   && ok "工作區卡片沿用共用 valueRow 版式" || bad "工作區卡片版式與其它頁不一致"
+# 未掛載的專案也必須看得見，否則使用者只能開 shell 執行 ls 才知道有什麼
+curl -s -H "$AUTH" $B/api/admin/workspaces | jq "assert 'root' in d and 'projects' in d" \
+  && ok "視圖以磁碟為準（root + projects）" || bad "工作區視圖仍以掛載為準"
 
 echo "--- 9. 工作區不得佔用全域資源 ---"
-curl -s -H "$AUTH" "$B/api/packages/$INST" | jq "assert d['package']['ports'] in ([], None)" \
-  && ok "工作區不佔 port" || bad "工作區佔了 port"
+# 端口按 package id 分配，工作區實例有自己的 id——它**應該**拿到端口，只是不能與正式版相同。
+# 先前一律不給，導致需要端口的包在工作區裡根本起不來（register failed: did not assign port）。
+curl -s -H "$AUTH" "$B/api/packages/$INST" > "$WORK/inst.json"
+curl -s -H "$AUTH" "$B/api/packages/$ID" > "$WORK/rel.json"
+python3 -c "
+import json,sys
+inst=json.load(open('$WORK/inst.json'))['package'].get('ports') or []
+rel=json.load(open('$WORK/rel.json'))['package'].get('ports') or []
+ip={p['port'] for p in inst}; rp={p['port'] for p in rel}
+assert not (ip & rp), f'workspace shares a port with the release: {ip & rp}'
+" && ok "工作區端口與正式版不重疊" || bad "工作區與正式版端口衝突"
 # 正式版沒有被 shadow，正式驗證就不該再被拒
 $SDK verify-device $ID --json >/dev/null 2>&1 && ok "正式 verify-device 仍可通過" || bad "正式 verify-device 被工作區影響"
 

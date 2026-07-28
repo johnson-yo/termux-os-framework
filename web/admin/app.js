@@ -27,7 +27,6 @@ const PAGE_RENDERERS = {
   adapters: loadAdapters,
   packages: loadPackageManager,
   framework_update: loadFrameworkUpdate,
-  developer_resources: renderDeveloperResources,
 };
 
 async function loadPage() {

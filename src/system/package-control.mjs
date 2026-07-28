@@ -330,6 +330,8 @@ export function packageManagerSnapshot(loaderPackages = []) {
       target: active.active_target ?? 'generic',
       previous_version: active.previous_version ?? null,
       previous_target: active.previous_target ?? null,
+      // Dev 按鈕要把已安裝的版本複製成工作區專案，需要知道它的 Installed Root 位置。
+      installed_dir: dir,
       archive_sha256: active.archive_sha256 ?? null,
       installed_at: active.installed_at ?? null,
       types: manifest?.types ?? loaded?.types ?? [],

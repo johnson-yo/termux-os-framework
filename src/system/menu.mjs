@@ -53,8 +53,10 @@ if (process.argv.includes('--self-test')) {
   t('core pages stay visible to every authenticated session', flat.some((x) => x.path === '/admin/system/administration'));
   t('Package Setting lives under Packages', flat.find((x) => x.path === '/admin/packages/settings')?.parent === '/admin/packages');
   t('Framework Update lives under System', flat.find((x) => x.path === '/admin/system/framework-update')?.parent === '/admin/system');
-  t('Workspace lives under System', flat.find((x) => x.path === '/admin/system/workspace')?.parent === '/admin/system');
-  t('developer resources visible to authenticated users', flat.some((x) => x.path === '/admin/system/developer'));
+  // 工作區管理的是本機的包項目，屬於 Packages；與 System 的設備/框架設定無關。
+  t('Workspace lives under Packages', flat.find((x) => x.path === '/admin/packages/workspace')?.parent === '/admin/packages');
+  // Developer resources 只有一個外部連結，不值得占一個分頁——已併入 Workspace 標題行。
+  t('retired developer resources page is gone', !flat.some((x) => x.path === '/admin/system/developer'));
   const pkg = { id: 'github.termux-os.service.example', status: 'loaded', manifest: { menu: [{
     parent: '/admin/status', path: '/packages/github.termux-os.service.example/', title: 'Example', order: 40,
   }] } };

@@ -531,7 +531,7 @@ ensure_no_dev_mounts() {
   mounts="$(active_dev_mounts)"
   [ -z "$mounts" ] || {
     err "active Dev Runtime: $mounts"
-    err "先執行 ./sdk/termux-os-sdk dev stop <package-id>，Workspace 不會被刪"
+    err "請到 Packages → Workspace 停止挂载後再更新；Workspace 的專案不會被刪"
     return 1
   }
 }

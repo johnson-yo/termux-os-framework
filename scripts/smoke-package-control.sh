@@ -271,9 +271,25 @@ else
 fi
 
 echo "--- 5. UI contract ---"
-if grep -q 'Installed (' "$ROOT/web/admin/admin-controls.js" && grep -q 'Install from file' "$ROOT/web/admin/admin-controls.js" \
+# Installed 卡片必須是一排六格且位置固定——按鈕隨狀態消失會讓版位跳動
+if grep -q "six-up" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "grid-template-columns: repeat(6, 1fr)" "$ROOT/web/admin/style.css" \
+  && grep -q "startPackageUpgrade" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "startPackageDev" "$ROOT/web/admin/admin-controls.js"; then
+  ok "Installed cards expose six fixed actions including Update and Dev"
+else
+  bad "Installed card action row"
+fi
+# Dev 需要 Installed Root 的位置才能派生副本
+grep -q "installed_dir: dir" "$ROOT/src/system/package-control.mjs" \
+  && ok "installed_dir is exposed for deriving a workspace" || bad "installed_dir missing"
+
+# 分頁標題：Available 的計數沒有資訊量（列表本身就看得到）；
+# Installed 的括號改為**可升級數**，那才是需要一眼看到的。
+if grep -q "upgradable ? \`Installed (\${upgradable})\`" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "'Available'" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q 'Install from file' "$ROOT/web/admin/admin-controls.js" \
   && grep -q 'Pending install' "$ROOT/web/admin/admin-controls.js" \
-  && grep -q 'Available (' "$ROOT/web/admin/admin-controls.js" \
   && grep -q '/api/admin/package-registry/refresh' "$ROOT/web/admin/admin-controls.js" \
   && grep -q 'confirm-dialog' "$ROOT/web/admin/index.html" && grep -q 'package-grid' "$ROOT/web/admin/style.css"; then
   ok "Installed/Pending install/Available/Install from file + explicit confirmation UI present"

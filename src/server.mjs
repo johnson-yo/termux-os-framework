@@ -9,6 +9,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { registerAction, listActions, performScene } from './theatre/runtime.mjs';
 import { acts, scenes, scripts } from './theatre/catalog.mjs';
@@ -60,7 +61,9 @@ import {
 } from './system/package-settings.mjs';
 import { updatePackagePortSettings } from './system/port-registry.mjs';
 import { sdkGuideSnapshot } from './system/sdk-guide.mjs';
-import { workspaceSnapshot } from './system/workspace-view.mjs';
+import {
+  workspaceSnapshot, createWorkspace, packWorkspace, deleteWorkspace,
+} from './system/workspace-view.mjs';
 import {
   beginSession, endSession, listSessions, recoverStaleSessions, setSessionRoot,
 } from './apps/session.mjs';
@@ -895,13 +898,104 @@ const server = http.createServer(async (req, res) => {
       } catch (error) { return packageSettingError(error); }
     }
   }
+  if (url === '/api/admin/restart' && req.method === 'POST') {
+    if (!hasPermission(auth, 'write')) return json(res, 401, { ok: false, error: 'unauthorized' });
+    if (!fs.existsSync(FRAMEWORK_CONTROL_PATH)) {
+      return json(res, 500, { ok: false, error: 'controller_missing', detail: FRAMEWORK_CONTROL_PATH });
+    }
+    // 使用者不該為了讓設定生效而去開 Termux。回應先發出去，重啟才動——
+    // 否則進程在寫回應之前就沒了，瀏覽器只會看到連線中斷。
+    json(res, 202, { ok: true, restarting: true, note: '控制台會在數秒後恢復；請稍候重新整理。' });
+    setTimeout(() => {
+      spawn('bash', [FRAMEWORK_CONTROL_PATH, 'restart'], {
+        detached: true, stdio: 'ignore', cwd: os.homedir(),
+      }).unref();
+    }, 250);
+    return undefined;
+  }
+  if (url === '/api/admin/network' && req.method === 'GET') {
+    if (!hasPermission(auth, 'read')) return json(res, 401, { ok: false, error: 'unauthorized' });
+    return json(res, 200, {
+      ok: true,
+      host: CFG.server?.host ?? '127.0.0.1',
+      port: Number(CFG.server?.port) || 8980,
+      lan_enabled: (CFG.server?.host ?? '127.0.0.1') === '0.0.0.0',
+      // 生效需要重啟：HOST 在進程啟動時就綁定了，改配置不會重新 bind。
+      restart_required: (CFG.server?.host ?? '127.0.0.1') !== HOST,
+      running_host: HOST,
+    }, { 'Cache-Control': 'no-store' });
+  }
+  if (url === '/api/admin/network' && req.method === 'POST') {
+    if (!hasPermission(auth, 'write')) return json(res, 401, { ok: false, error: 'unauthorized' });
+    const body = await readBody(req);
+    if (typeof body?.lan_enabled !== 'boolean') {
+      return json(res, 400, { ok: false, error: 'lan_enabled_required' });
+    }
+    // 只允許這兩個值。開放監聽是不可逆的暴露——同一 WiFi 下任何設備都能連上管理台，
+    // 唯一的防線是登入密碼——所以不接受任意位址，避免綁到意料之外的介面。
+    const host = body.lan_enabled ? '0.0.0.0' : '127.0.0.1';
+    try {
+      CFG.server = { ...(CFG.server ?? {}), host };
+      fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(CFG, null, 2)}\n`);
+    } catch (error) {
+      return json(res, 500, { ok: false, error: 'config_write_failed', detail: String(error?.message ?? error) });
+    }
+    return json(res, 200, {
+      ok: true, host, lan_enabled: body.lan_enabled,
+      restart_required: host !== HOST,
+      note: host === HOST ? null : 'Restart the Framework for the new bind address to take effect.',
+    });
+  }
   if (url === '/api/admin/workspaces' && req.method === 'GET') {
     if (!hasPermission(auth, 'read')) return json(res, 401, { ok: false, error: 'unauthorized' });
     try {
       const stages = await stage.listServices();
-      return json(res, 200, workspaceSnapshot({ services: stages }), { 'Cache-Control': 'no-store' });
+      return json(res, 200, workspaceSnapshot({ services: stages, config: CFG }), { 'Cache-Control': 'no-store' });
     } catch (error) {
       return json(res, 500, { ok: false, error: 'workspace_view_unavailable', detail: String(error?.message ?? error) });
+    }
+  }
+  if (url === '/api/admin/workspaces' && req.method === 'POST') {
+    if (!hasPermission(auth, 'write')) return json(res, 401, { ok: false, error: 'unauthorized' });
+    const body = await readBody(req);
+    if (!body?.slug) return json(res, 400, { ok: false, error: 'slug_required' });
+    if (!body.from_dir && !body.package_id) {
+      return json(res, 400, { ok: false, error: 'package_id_required', detail: 'Creating from a template needs the new package id.' });
+    }
+    const result = createWorkspace({
+      slug: body.slug, packageId: body.package_id, type: body.type, name: body.name,
+      fromDir: body.from_dir ?? null, config: CFG,
+    });
+    return json(res, result.ok ? 200 : 400, result);
+  }
+  {
+    const m = url.match(/^\/api\/admin\/workspaces\/([\w.@-]+)\/pack$/);
+    if (m && req.method === 'POST') {
+      if (!hasPermission(auth, 'write')) return json(res, 401, { ok: false, error: 'unauthorized' });
+      const result = packWorkspace({ slug: m[1], config: CFG });
+      if (!result.ok) return json(res, 400, result);
+      // 產物走瀏覽器下載：框架不碰共享儲存，字節由瀏覽器交給使用者的「下載」目錄。
+      try {
+        const body = fs.readFileSync(result.archive);
+        res.writeHead(200, {
+          'Content-Type': 'application/gzip',
+          'Content-Length': body.length,
+          'Content-Disposition': `attachment; filename="${result.filename}"`,
+          'Cache-Control': 'no-store',
+        });
+        res.end(body);
+      } finally {
+        fs.rmSync(result.cleanup, { recursive: true, force: true });
+      }
+      return undefined;
+    }
+  }
+  {
+    const m = url.match(/^\/api\/admin\/workspaces\/([\w.@-]+)$/);
+    if (m && req.method === 'DELETE') {
+      if (!hasPermission(auth, 'write')) return json(res, 401, { ok: false, error: 'unauthorized' });
+      const result = deleteWorkspace({ slug: m[1], config: CFG });
+      return json(res, result.ok ? 200 : 400, result);
     }
   }
   if (url === '/api/admin/sdk-guide' && req.method === 'GET') {
@@ -1069,10 +1163,17 @@ const server = http.createServer(async (req, res) => {
   };
   if (url === '/api/admin/framework-update' && req.method === 'GET') {
     if (!hasPermission(auth, 'read')) return json(res, 401, { ok: false, error: 'unauthorized' });
-    return json(res, 200, frameworkUpdateSnapshot({
-      currentBuild: deployId(),
-      registry: frameworkRegistryInfo({ repository: FRAMEWORK_REGISTRY_REPOSITORY, currentVersion: FRAMEWORK_VERSION }),
-    }));
+    return json(res, 200, {
+      ...frameworkUpdateSnapshot({
+        currentBuild: deployId(),
+        registry: frameworkRegistryInfo({ repository: FRAMEWORK_REGISTRY_REPOSITORY, currentVersion: FRAMEWORK_VERSION }),
+      }),
+      // 掛載中的 Dev Runtime 會擋下更新。頁面要能就地把它們停掉，
+      // 否則使用者只會看到一句「先去停止挂载」卻沒有可點的地方。
+      dev_mounts: listDevMounts().map((m) => ({
+        package_id: m.package_id, instance_id: m.instance_id, workspace: m.workspace,
+      })),
+    });
   }
   if (url === '/api/admin/framework-update/registry' && req.method === 'POST') {
     let upload = null;

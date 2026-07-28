@@ -221,7 +221,6 @@ if grep -q 'CORE_ADMIN_PAGES' "$ROOT/src/system/admin-pages.mjs" \
   && grep -q 'renderRuntime' "$ROOT/web/admin/app-core.js" \
   && grep -q 'renderWorkspace' "$ROOT/web/admin/app-core.js" \
   && grep -q 'loadAdapters' "$ROOT/web/admin/app.js" \
-  && grep -q 'renderDeveloper' "$ROOT/web/admin/app-core.js" \
   && grep -q 'renderFrameworkUpdate' "$ROOT/web/admin/admin-controls.js" \
   && grep -q 'package_settings' "$ROOT/web/admin/app.js" \
   && grep -q 'loadPackageSettings' "$ROOT/web/admin/admin-controls.js" \
@@ -233,7 +232,7 @@ if grep -q 'CORE_ADMIN_PAGES' "$ROOT/src/system/admin-pages.mjs" \
   && grep -q "target = '_blank'" "$ROOT/web/admin/admin-controls.js" \
   && ! grep -rq 'renderPlaceholder' "$ROOT/web/admin" \
   && grep -q "'/admin/packages/settings'" "$ROOT/src/system/admin-pages.mjs" \
-  && grep -q "'/admin/system/workspace'" "$ROOT/src/system/admin-pages.mjs" \
+  && grep -q "'/admin/packages/workspace'" "$ROOT/src/system/admin-pages.mjs" \
   && grep -q "'/admin/system/framework-update'" "$ROOT/src/system/admin-pages.mjs"; then
   ok "Core menu registry only exposes real renderers; Package status pages are Package-owned"
 else
@@ -245,15 +244,96 @@ CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/admin/system/
 if [ "$CODE" = 404 ]; then ok "old System Packages route is removed"; else bad "old System Packages route HTTP $CODE"; fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/admin/packages/settings")"
 if [ "$CODE" = 200 ]; then ok "Package Setting is under the Packages group"; else bad "Package Setting route HTTP $CODE"; fi
+CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/admin/packages/workspace")"
+if [ "$CODE" = 200 ]; then ok "Workspace page sits in the Packages group"; else bad "Workspace page route HTTP $CODE"; fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/admin/system/workspace")"
-if [ "$CODE" = 200 ]; then ok "Workspace page is registered under the System group"; else bad "Workspace page route HTTP $CODE"; fi
+if [ "$CODE" = 404 ]; then ok "Workspace no longer answers under System"; else bad "stale System Workspace route HTTP $CODE"; fi
+CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/admin/system/developer")"
+if [ "$CODE" = 404 ]; then ok "retired Developer resources page is gone"; else bad "retired developer route HTTP $CODE"; fi
+# Package 自有頁面必須用新分頁開，否則使用者從自己的 App 回不到管理台
+if grep -q "link.target = '_blank'" "$ROOT/web/admin/app-core.js" \
+  && grep -q "!href.startsWith('/admin/')" "$ROOT/web/admin/app-core.js"; then
+  ok "Package-owned menu entries open in a new tab"
+else
+  bad "Package menu entries reuse the admin tab"
+fi
+# 目錄刷新必須是面板級：Framework Update 與 Packages 共用同一份快取，
+# 入口埋在 Available 分頁裡會讓另一頁永遠拿不到最新資料
+if grep -q "panel.head?.append(actionButton('更新列表'" "$ROOT/web/admin/admin-controls.js" \
+  && ! grep -q "actionButton('Refresh list'" "$ROOT/web/admin/admin-controls.js"; then
+  ok "list refresh is a panel-level action, not buried in a tab"
+else
+  bad "list refresh placement"
+fi
+# Framework 不是可安裝的 Package，不得混進 Available
+grep -q "item.types?.includes('framework')" "$ROOT/web/admin/admin-controls.js" \
+  && ok "framework is filtered out of the installable list" || bad "framework leaks into Available"
+# Installed 與 Available 必須用同一套官方身份映射
+grep -q "officialRepositories.has(key)" "$ROOT/web/admin/admin-controls.js" \
+  && ok "Official maintainers map into Installed titles too" || bad "Official mapping is tab-local"
+
+# 安全資訊的價值在可查不在強制：Download 不得被 Details 門禁擋住
+if ! grep -q "|| !publicDetailsLoaded" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "registry-disclosure" "$ROOT/web/admin/admin-controls.js"; then
+  ok "Download is available without opening Details first"
+else
+  bad "Download still gated behind Details"
+fi
+# 恆定的檔名沒有資訊量
+grep -q "valueRow('Source archive', formatBytes(file.size))" "$ROOT/web/admin/admin-controls.js" \
+  && ok "Source archive shows size, not the constant filename" || bad "Source archive still prints source.tar.gz"
+
+# 綁定位址必須能從介面改，且改完要說「需重啟」——HOST 在啟動時就綁定了
+CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/api/admin/network")"
+if [ "$CODE" = 200 ]; then ok "network access is readable from the control center"; else bad "network endpoint HTTP $CODE"; fi
+curl -sf -b "$COOKIE" "$BASE/api/admin/network" | grep -q '"lan_enabled"' \
+  && ok "bind address reports whether LAN access is on" || bad "lan_enabled missing"
+# 寫入必須先過 CSRF——瀏覽器 session 的寫請求沒有 token 就該在參數校驗之前被擋下
+CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" -X POST -H 'Content-Type: application/json' \
+  --data '{"host":"example-invalid"}' "$BASE/api/admin/network")"
+if [ "$CODE" = 403 ]; then ok "network writes require CSRF before anything else"; else bad "network write bypassed CSRF (HTTP $CODE)"; fi
+# 只接受 loopback / 0.0.0.0 兩種：綁到意料之外的介面比不能改更危險。
+# 用 System Key 走 API 路徑驗參數校驗本身。
+CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AUTH_TOKEN" \
+  -X POST -H 'Content-Type: application/json' \
+  --data '{"host":"example-invalid"}' "$BASE/api/admin/network")"
+if [ "$CODE" = 400 ]; then ok "arbitrary bind addresses are refused"; else bad "network endpoint accepts arbitrary host (HTTP $CODE)"; fi
+grep -q "Allow access from the local network" "$ROOT/web/admin/app-core.js" \
+  && ok "Administration exposes the LAN toggle" || bad "LAN toggle missing from Administration"
+
+# 設定生效需要重啟，而重啟必須能在瀏覽器裡完成——使用者不該為此去開 Termux
+CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AUTH_TOKEN" \
+  -X POST -H 'Content-Type: application/json' --data '{}' "$BASE/api/admin/restart")"
+if [ "$CODE" = 202 ] || [ "$CODE" = 500 ]; then ok "restart is reachable from the control center"; else bad "restart endpoint HTTP $CODE"; fi
+grep -q "重启框架" "$ROOT/web/admin/app-core.js" \
+  && ok "Administration exposes a restart button" || bad "no restart button"
+# Manifest 寫完整 URL，Registry 用 owner/repo——不正規化就永遠對不上
+grep -q "function normalizeRepository" "$ROOT/web/admin/admin-controls.js" \
+  && ok "repository identities are normalised before matching" || bad "repository comparison is format-sensitive"
+
+# 更新被 Dev Runtime 擋下時，必須就地能停——不得把使用者推去命令行
+grep -q "停止全部挂载" "$ROOT/web/admin/admin-controls.js" \
+  && ok "Framework Update can stop blocking dev mounts in place" || bad "no in-place stop for dev mounts"
+curl -sf -b "$COOKIE" "$BASE/api/admin/framework-update" | grep -q '"dev_mounts"' \
+  && ok "framework update reports blocking dev mounts" || bad "dev_mounts missing from update payload"
+# 任何面向使用者的阻擋訊息都不得要求開 Termux
+if grep -q "termux-os-sdk dev stop" "$ROOT/scripts/framework.sh"; then
+  bad "update guard still tells the user to run a CLI command"
+else
+  ok "update guard points at the control center, not a shell"
+fi
+
+# Recent operations 只該出現一次
+JOBCALLS="$(grep -c "renderJobs(" "$ROOT/web/admin/app-core.js" "$ROOT/web/admin/admin-controls.js" | awk -F: '{s+=$2} END {print s}')"
+if [ "$JOBCALLS" = 2 ]; then ok "Recent operations is rendered from exactly one page"; else bad "renderJobs referenced $JOBCALLS times"; fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/admin/system/sdk")"
 if [ "$CODE" = 404 ]; then ok "retired SDK page is gone, not left as a placeholder"; else bad "retired SDK route HTTP $CODE"; fi
 # A workspace serves pages at an instance-scoped URL nobody can guess, so the view
 # must list them explicitly; assert the renderer really emits per-page open buttons.
-if curl -sf -b "$COOKIE" "$BASE/api/admin/workspaces" | grep -q '"workspaces"' \
-  && grep -q "Open \${page.title}" "$ROOT/web/admin/app-core.js"; then
-  ok "Workspace view exposes every page of a mounted workspace"
+# 工作區的頁面掛在 /packages/<id>@<slug>/，猜不出來——必須逐一列成可點連結
+if curl -sf -b "$COOKIE" "$BASE/api/admin/workspaces" | grep -q '"projects"' \
+  && grep -q "pageLink(\`打开 \${page.title}\`" "$ROOT/web/admin/app-core.js"; then
+  ok "Workspace view exposes every page of a mounted project"
 else
   bad "Workspace view page links"
 fi

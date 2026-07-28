@@ -75,9 +75,17 @@ function renderNavigation(nodes) {
       list.className = 'nav-children';
       for (const child of node.children) {
         const link = document.createElement('a');
-        link.href = child.default_child ?? child.path;
+        const href = child.default_child ?? child.path;
+        link.href = href;
         link.textContent = child.title;
-        if (location.pathname === link.getAttribute('href')) link.classList.add('active');
+        // Package 自有頁面不在 /admin/ 下，它們是獨立的 WebUI——用新分頁開，
+        // 免得使用者從自己的 App 回不到管理台。core 頁面仍是同分頁導航。
+        if (!href.startsWith('/admin/')) {
+          link.target = '_blank';
+          link.rel = 'noopener';
+        } else if (location.pathname === href) {
+          link.classList.add('active');
+        }
         link.addEventListener('click', () => setNavigationOpen(false));
         list.append(link);
       }
@@ -119,7 +127,8 @@ const section = (title, href = null) => {
   const body = document.createElement('div');
   body.className = 'panel-body';
   card.append(head, body);
-  return { card, body };
+  // 暴露 head，讓呼叫方能在標題行右側掛按鈕（例如 Workspace 的 Share your App）
+  return { card, head, body };
 };
 
 const componentError = (body, component) => {
@@ -560,6 +569,60 @@ async function renderAdministration() {
   });
   password.body.append(passwordForm, valueRow('Minimum length', `${credentials.login_password?.minimum_length ?? 16} characters`));
 
+  // 網路可達性放在「Reachable addresses」之前：先決定綁在哪，那份清單才有意義。
+  const network = section('Network access');
+  const net = await apiData('/api/admin/network').catch(() => null);
+  if (!net) {
+    network.body.append(text('p', 'Could not read the current bind address.', 'alert error'));
+  } else {
+    network.body.append(
+      text('p', 'Loopback only means this control center answers on this device alone. Allowing LAN access lets any device on the same network reach it, with the login password as the only barrier.', 'description'),
+      valueRow('Configured bind', `${net.host}:${net.port}`),
+      valueRow('Currently listening on', net.running_host),
+    );
+    if (net.restart_required) {
+      network.body.append(text('p', 'The configured address differs from the running one. Restart to apply it.', 'alert warning'));
+    }
+    // 生效需要重啟，而重啟必須能在瀏覽器裡完成——讓使用者為了套用一個設定去開 Termux，
+    // 等於把這個開關做了一半。
+    const restartRow = document.createElement('div');
+    restartRow.className = 'button-row';
+    restartRow.append(actionButton('重启框架', net.restart_required ? 'primary' : '', async () => {
+      if (!confirm('重启 Framework？\n\n控制台会短暂中断，数秒后恢复。')) return;
+      try {
+        await apiData('/api/admin/restart', { method: 'POST', body: '{}' });
+        administrationNotice = { kind: 'good', text: '正在重启；数秒后请重新整理页面。' };
+      } catch (error) {
+        administrationNotice = { kind: 'bad', text: `重启失败：${error.message ?? error}` };
+      }
+      renderAdministration();
+    }, !canWrite()));
+    network.body.append(restartRow);
+    const toggle = document.createElement('label');
+    toggle.className = 'enable-toggle';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = net.lan_enabled;
+    input.disabled = !canWrite();
+    input.addEventListener('change', async () => {
+      input.disabled = true;
+      try {
+        const result = await apiData('/api/admin/network', {
+          method: 'POST', body: JSON.stringify({ lan_enabled: input.checked }),
+        });
+        administrationNotice = { kind: result.restart_required ? 'warning' : 'good',
+          text: result.restart_required
+            ? `Bind address set to ${result.host}. Restart the Framework to apply it.`
+            : `Bind address is ${result.host}.` };
+      } catch (error) {
+        administrationNotice = { kind: 'bad', text: `Network access: ${error.message ?? error}` };
+      }
+      renderAdministration();
+    });
+    toggle.append(input, text('span', 'Allow access from the local network (0.0.0.0)'));
+    network.body.append(toggle);
+  }
+
   const addresses = section('Reachable addresses');
   if (!access.addresses?.length) addresses.body.append(text('p', 'No non-loopback address is currently reported.', 'empty'));
   for (const item of access.addresses ?? []) {
@@ -568,7 +631,7 @@ async function renderAdministration() {
     link.append(text('b', item.admin_url), text('span', item.kind));
     addresses.body.append(link);
   }
-  replacePage(panel.card, password.card, addresses.card);
+  replacePage(panel.card, password.card, network.card, addresses.card);
 }
 
 async function copyText(textValue) {
@@ -674,66 +737,164 @@ function createObservationPanel(title = 'Log observation') {
   return { card: panel.card, cleanup: () => clearInterval(state.timer) };
 }
 
-function renderLogs() {
+async function renderLogs() {
   const observation = createObservationPanel('Logs');
-  replacePage(observation.card); pageCleanup = observation.cleanup;
+  // Package 生命週期作業只在這裡出現一次；先前每個 Package 頁面各掛一份，
+  // 同一批作業重複四處，要查失敗原因時反而不知道看哪一份。
+  let jobs = null;
+  try {
+    jobs = renderJobs(await apiData('/api/admin/package-manager'));
+  } catch { /* 作業列表拿不到不該讓日誌頁整頁失敗 */ }
+  replacePage(observation.card, jobs);
+  pageCleanup = observation.cleanup;
+}
+
+/** 公開開發者入口。唯一有意義的一項，不值得占一個分頁，掛在 Workspace 標題行上。 */
+function shareYourAppLink() {
+  const link = document.createElement('a');
+  link.href = 'https://package.termux-os.com/dev/';
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.className = 'button-link';
+  link.textContent = 'Share your App';
+  return link;
 }
 
 /**
- * Workspace page: one card per package under development on this device.
+ * Workspace page: one card per project directory under the workspace root.
  *
- * A workspace instance serves its pages at `/packages/<id>@<slug>/`, which nobody can
- * guess. Listing every page as a real button is the whole point of this view — a newcomer
- * should never have to derive a URL from a naming convention, and the released copy is
- * shown right next to it so it is obvious both are running.
+ * A workspace is a directory on disk; mounting is one of its properties, not its
+ * existence. Listing only mounted projects meant a project the user had just created
+ * was invisible until mounted, so the only way to know what existed was to open a
+ * shell and run ls. Everything under the root is listed, and a mount living outside
+ * the root is listed too so adopting the standard root loses nothing.
  *
- * The Shell already renders the page title and its registry description, so this view
- * adds no heading of its own and uses valueRow() like every other administration page.
+ * The Shell renders the page title and its registry description, so this view adds no
+ * heading of its own and uses valueRow() like every other administration page.
  */
 async function renderWorkspace() {
   const data = await apiData('/api/admin/workspaces');
+  const nodes = [];
 
-  if (!data.workspaces?.length) {
-    const empty = section('No workspace mounted');
-    empty.body.append(
-      text('p', 'Start one from a package workspace directory:', 'description'),
-      valueRow('Command', 'termux-os-sdk dev start <package-id> --slug <name>'),
-    );
-    if (data.mountable?.length) {
-      empty.body.append(valueRow('Installed packages', data.mountable.map((m) => m.package_id).join(', ')));
-    }
-    replacePage(empty.card);
+  const head = section('Projects');
+  head.head?.append(actionButton('新建项目', 'primary', () => promptCreateWorkspace(data)), shareYourAppLink());
+  head.body.append(valueRow('Workspace root', data.root));
+  if (!data.root_exists) {
+    head.body.append(text('p', '这个目录还不存在，新建第一个项目时会自动创建。', 'empty'));
+  }
+  nodes.push(head.card);
+
+  if (!data.projects?.length) {
+    const empty = section('No project yet');
+    empty.body.append(text('p', '用「新建项目」从框架模板生成一个，或在已安装的 Package 卡片上点 Dev 派生一份。', 'empty'));
+    nodes.push(empty.card);
+    replacePage(...nodes);
     return;
   }
 
-  const cards = data.workspaces.map((ws) => {
-    const card = section(`${ws.package_id} · ${ws.slug}`);
-    card.body.append(
-      valueRow('Instance', ws.instance_id),
-      valueRow('Version', ws.version),
-      valueRow('Status', ws.error ? `${ws.status} — ${ws.error}` : ws.status),
-      valueRow('Workspace', ws.workspace),
-      valueRow('Watch', `${ws.watch_mode} · ${ws.seq ?? 0} reloads`),
-    );
-    if (ws.released) card.body.append(valueRow('Released alongside', `${ws.released.version} (${ws.released.status})`));
-    if (ws.services?.length) {
-      card.body.append(valueRow('Services', ws.services.map((sv) => `${sv.id} (${sv.state})`).join(', ')));
+  for (const project of data.projects) {
+    const card = section(project.name ? `${project.name} · ${project.slug}` : project.slug);
+    card.body.append(valueRow('Path', project.path + (project.external ? '（在 workspace root 之外）' : '')));
+    if (!project.valid) {
+      card.body.append(text('p', `不是可掛載的專案：${project.invalid_reason}`, 'alert warning'));
+    } else {
+      card.body.append(
+        valueRow('Package', `${project.package_id}${project.version ? ` · ${project.version}` : ''}`),
+        valueRow('Size', formatBytes(project.size_bytes)),
+      );
+    }
+    const mount = project.mount;
+    card.body.append(valueRow('State', mount
+      ? `mounted @${mount.slug} · ${mount.status}${mount.error ? ` — ${mount.error}` : ''}`
+      : 'not mounted'));
+    if (mount) card.body.append(valueRow('Watch', `${mount.watch_mode} · ${mount.seq ?? 0} reloads`));
+    if (project.released) {
+      card.body.append(valueRow('Released alongside', `${project.released.version} (${project.released.status})`));
+    }
+    if (mount?.services?.length) {
+      card.body.append(valueRow('Services', mount.services.map((sv) => `${sv.id} (${sv.state})`).join(', ')));
     }
 
-    // Every page as a real button. Instance URLs cannot be guessed, so they are stated.
     const row = document.createElement('div');
     row.className = 'button-row';
-    for (const page of ws.pages ?? []) {
-      row.append(pageLink(`Open ${page.title}`, page.url, 'button-link primary-link'));
+    if (mount) {
+      for (const page of mount.pages ?? []) {
+        row.append(pageLink(`打开 ${page.title}`, page.url, 'button-link primary-link'));
+      }
+      if (project.released) row.append(pageLink(`打开正式版 ${project.released.version}`, project.released.url, 'button-link'));
+      row.append(actionButton('停止挂载', '', () => workspaceMount(project, false)));
+    } else {
+      row.append(actionButton('挂载', 'primary', () => workspaceMount(project, true), !project.valid));
     }
-    if (ws.released) {
-      row.append(pageLink(`Open released ${ws.released.version}`, ws.released.url, 'button-link'));
-    }
-    if (row.childElementCount) card.body.append(row);
-    return card.card;
-  });
+    row.append(actionButton('打包', '', () => workspacePack(project), !project.valid || project.external));
+    row.append(actionButton('删除', 'danger-text', () => workspaceDelete(project), Boolean(mount) || project.external));
+    card.body.append(row);
+    nodes.push(card.card);
+  }
 
-  replacePage(...cards);
+  replacePage(...nodes);
+}
+
+async function workspaceMount(project, mount) {
+  try {
+    if (mount) {
+      await apiData('/api/dev/packages', { method: 'POST', body: JSON.stringify({
+        package_id: project.package_id, workspace: project.path, slug: project.slug,
+      }) });
+    } else {
+      await apiData(`/api/dev/packages/${encodeURIComponent(project.mount.instance_id)}/stop`, { method: 'POST', body: '{}' });
+    }
+    await refreshAdminNavigation();
+  } catch (error) {
+    alert(`${mount ? '挂载' : '停止挂载'}失败：${error.message ?? error}`);
+  }
+  return renderWorkspace();
+}
+
+/** 打包產物走瀏覽器下載：框架不碰共享儲存，字節由瀏覽器交給使用者的「下載」目錄。 */
+async function workspacePack(project) {
+  try {
+    const response = await api(`/api/admin/workspaces/${encodeURIComponent(project.slug)}/pack`, { method: 'POST', body: '{}' });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.detail ?? detail.error ?? `HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `${project.package_id ?? project.slug}.tar.gz`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+  } catch (error) {
+    alert(`打包失败：${error.message ?? error}`);
+  }
+}
+
+async function workspaceDelete(project) {
+  if (!confirm(`删除项目 ${project.slug}？\n\n${project.path}\n\n目录会被永久移除，此操作不可撤销。`)) return;
+  try {
+    await apiData(`/api/admin/workspaces/${encodeURIComponent(project.slug)}`, { method: 'DELETE' });
+  } catch (error) {
+    alert(`删除失败：${error.message ?? error}`);
+  }
+  return renderWorkspace();
+}
+
+/** 模板由框架擁有：它保證每個新專案都申報了框架管理所需的欄位。 */
+async function promptCreateWorkspace() {
+  const packageId = prompt('新项目的 Package ID\n例如 github.termux-os.service.my-thing');
+  if (!packageId) return undefined;
+  const type = prompt('类型：service / app / adapter / asset', 'service');
+  if (!type) return undefined;
+  const slug = packageId.split('.').pop();
+  try {
+    await apiData('/api/admin/workspaces', { method: 'POST', body: JSON.stringify({
+      slug, package_id: packageId, type, name: slug,
+    }) });
+  } catch (error) {
+    alert(`新建失败：${error.message ?? error}`);
+  }
+  return renderWorkspace();
 }
 
 const pageLink = (label, href, className) => {
@@ -745,21 +906,6 @@ const pageLink = (label, href, className) => {
   link.textContent = label;
   return link;
 };
-
-function renderDeveloperResources() {
-  const panel = section('Developer resources');
-  panel.body.append(
-    text('p', 'Package submissions, review requests, decisions, and review history belong on the public developer portal. This administration page only provides the entry point.', 'description'),
-  );
-  const link = document.createElement('a');
-  link.href = 'https://package.termux-os.com/dev/';
-  link.target = '_blank';
-  link.rel = 'noopener';
-  link.className = 'button-link primary-link';
-  link.textContent = 'Open developer portal';
-  panel.body.append(link, text('p', 'The user-facing Admin API does not expose developer submission details.', 'muted'));
-  replacePage(panel.card);
-}
 
 const actionButton = (label, className, handler, disabled = false) => {
   const button = document.createElement('button');

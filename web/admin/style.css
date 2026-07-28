@@ -505,3 +505,30 @@ main:not(.content) > h1 { font-size: 1.35rem; }
   .data-table .table-actions::before { width: 100%; }
   .data-table .table-actions > * { flex: 1 1 92px; margin: 0; text-align: center; }
 }
+
+/* ── Available 卡片的詳細資訊（ℹ️）──────────────
+   安全資訊預設收起：可查即可，不必擋在下載前面。 */
+.registry-disclosure { margin-top: 8px; }
+.registry-disclosure > summary {
+  list-style: none; cursor: pointer; user-select: none;
+  font-size: .78rem; color: var(--muted); padding: 2px 0;
+}
+.registry-disclosure > summary::-webkit-details-marker { display: none; }
+.registry-disclosure > summary:hover,
+.registry-disclosure > summary:focus-visible { color: var(--text); }
+.registry-disclosure[open] > summary { color: var(--text); }
+.registry-details { margin-top: 6px; }
+
+/* ── Installed 卡片：一排六格 ─────────────────
+   位置固定、等寬、字級自適應。按鈕隨狀態消失會讓版位跳動，
+   使用者每次都要重新找同一個按鈕在哪。 */
+.button-row.six-up {
+  display: grid; grid-template-columns: repeat(6, 1fr);
+  gap: 4px; justify-content: stretch; margin-top: 10px;
+}
+.button-row.six-up > * {
+  min-width: 0; width: 100%; text-align: center;
+  padding: 5px 2px; font-size: clamp(.6rem, 2.1vw, .74rem);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.package-upgrade-banner { margin: 8px 0 0; }

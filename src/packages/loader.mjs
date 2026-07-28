@@ -422,11 +422,13 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
   if (!fs.existsSync(webuiPath)) return fail(id, manifest, `webui entry not found: ${manifest.entrypoints.webui}`);
 
   try {
-    // A workspace instance must never take a globally-scoped claim. Ports,
-    // integrations and artifact contracts resolve to exactly one owner, so
-    // letting a dev copy claim them would make the released package's
-    // consumers resolve to the copy — silently, and only sometimes.
-    record.ports = workspaceSlug ? [] : registerPackagePorts(id, manifest.ports ?? []);
+    // Ports are keyed by package id, and a workspace instance has its own id, so the
+    // allocator hands it a different port and avoids the released one by construction.
+    // Denying ports outright was wrong: a package that needs one could not run at all
+    // in a workspace — it failed to register with "did not assign the HTTP port".
+    // The globally-scoped claims are integrations and artifact contracts, which resolve
+    // by capability name to exactly one owner; those a workspace still must not take.
+    record.ports = registerPackagePorts(id, manifest.ports ?? []);
     // 029：dev 重載時 entry 加查詢串繞開 ESM 快取（子模塊靠 dev-runtime 的 generation 副本換新 URL）
     const entryUrl = pathToFileURL(backendPath).href + (cacheBust ? `?dev=${Date.now()}` : '');
     const mod = await import(entryUrl);
@@ -455,7 +457,7 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
     record.status = 'failed';
     record.error = `register failed: ${String(e?.message ?? e)}`;
     // A failed Package must not reserve a port that no running Package owns.
-    if (!workspaceSlug) { try { registerPackagePorts(id, []); } catch { /* preserve the original load error */ } }
+    try { registerPackagePorts(id, []); } catch { /* preserve the original load error */ }
     packages.set(id, record);
     log(`package ${id}: FAILED — ${record.error}`);
   }

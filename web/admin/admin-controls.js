@@ -220,6 +220,22 @@ function renderFrameworkUpdate(data) {
     );
     const controls = document.createElement('div'); controls.className = 'button-row';
     if (frameworkCatalog.update_available) {
+      // 掛載中的 Dev Runtime 會擋下更新。把「停止全部挂载」直接放在這裡——
+      // 讓使用者為了更新而去別的頁面翻找（或更糟，去開 Termux）是把流程做了一半。
+      if (data.dev_mounts?.length) {
+        controls.append(actionButton(`停止全部挂载（${data.dev_mounts.length}）`, '', async () => {
+          for (const mount of data.dev_mounts) {
+            try {
+              await apiData(`/api/dev/packages/${encodeURIComponent(mount.instance_id ?? mount.package_id)}/stop`,
+                { method: 'POST', body: '{}' });
+            } catch (error) {
+              frameworkUpdateNotice = { kind: 'bad', text: `停止 ${mount.package_id} 失败：${error.message ?? error}` };
+            }
+          }
+          frameworkUpdateNotice ??= { kind: 'good', text: '已停止全部挂载；Workspace 的项目都保留着，现在可以更新。' };
+          await loadFrameworkUpdate();
+        }, !canWrite()));
+      }
       controls.append(actionButton('Download and update', 'primary',
         () => runFrameworkRegistryUpdate(frameworkCatalog, data.current_build),
         !canWrite() || Boolean(data.active_job) || data.engine_locked));
@@ -288,6 +304,61 @@ async function loadFrameworkUpdate() {
     replacePage(reconnect);
     frameworkUpdatePollTimer = setTimeout(() => loadFrameworkUpdate(), 1500);
   }
+}
+
+/**
+ * 就地升級：走與 Available 相同的 registry 下載，下載完成後由既有的 check/install
+ * 作業鏈接手。跳去 Available 讓使用者自己找同一個包，只是多兩次點擊。
+ */
+async function startPackageUpgrade(item, targetVersion) {
+  const entry = registryByRepository.get(normalizeRepository(item.repository));
+  const version = entry?.versions?.find((v) => v.version === targetVersion) ?? entry?.versions?.[0];
+  const file = version?.files?.find((f) => f.kind === 'source_tar' && f.name.endsWith('.tar.gz'));
+  if (!file) {
+    packageNotice = { kind: 'bad', text: `${item.name} ${targetVersion} 沒有可用的來源封存。` };
+    return loadPackageManager();
+  }
+  try {
+    await apiData('/api/admin/package-registry/download', {
+      method: 'POST',
+      body: JSON.stringify({
+        source: entry.source, repository: entry.repository,
+        version: version.version, kind: file.kind, file: file.name,
+      }),
+    });
+    packageNotice = { kind: 'good', text: `已下載 ${item.name} ${targetVersion}；檢查通過後即可安裝。` };
+  } catch (error) {
+    packageNotice = { kind: 'bad', text: `升級 ${item.name}：${error.message ?? error}` };
+  }
+  return loadPackageManager();
+}
+
+/** 把已安裝的版本派生成工作區專案並掛載——開發從一個能跑的副本開始，而不是空目錄。 */
+async function startPackageDev(item) {
+  const slug = String(item.id).split('.').pop();
+  try {
+    let created;
+    try {
+      created = await apiData('/api/admin/workspaces', {
+        method: 'POST',
+        body: JSON.stringify({ slug, package_id: item.id, from_dir: item.installed_dir }),
+      });
+    } catch (error) {
+      // 專案已存在是**正常**情況：再點一次 Dev 應該掛上既有副本，而不是報一個
+      // 只有路徑的紅字讓人猜發生了什麼。
+      if (error?.data?.error !== 'already_exists') throw error;
+      created = { path: error.data.detail };
+      packageNotice = { kind: 'good', text: `Workspace 已有 ${slug}，直接掛載既有副本。` };
+    }
+    await apiData('/api/dev/packages', {
+      method: 'POST',
+      body: JSON.stringify({ package_id: item.id, workspace: created.path, slug }),
+    });
+    packageNotice = { kind: 'good', text: `已在 Workspace 建立並掛載 ${slug}；正式版仍在服務。` };
+  } catch (error) {
+    packageNotice = { kind: 'bad', text: `建立開發副本：${error.message ?? error}` };
+  }
+  return loadPackageManager();
 }
 
 async function startInstalledAction(item, action) {
@@ -402,8 +473,34 @@ function packageMatches(item) {
 
 const packageSettingAnchor = (id) => `package-setting-${String(id).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 
+/**
+ * Registry 以 repository 為鍵，Installed 記錄也帶 repository——用它把兩邊對上。
+ * 先前 Installed 只讀 manifest 的 publisher，Available 才查 official 名單，
+ * 於是同一個 Package 在兩個分頁顯示不同的身份。
+ */
+let officialRepositories = new Set();
+
+/**
+ * Manifest 寫的是完整 URL（https://github.com/owner/repo），Registry 用的是 owner/repo。
+ * 直接比對永遠不相等——先正規化成 owner/repo 再比。
+ */
+function normalizeRepository(value) {
+  if (!value) return null;
+  return String(value)
+    .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
+    .replace(/\.git$/i, '')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
+
+function isOfficialPackage(item) {
+  const key = normalizeRepository(item.repository);
+  return Boolean(key && officialRepositories.has(key));
+}
+
 function packageAdminName(item) {
   const title = item.admin_title ?? item.name ?? item.id;
+  if (isOfficialPackage(item)) return `${title} [Official]`;
   return item.publisher ? `${title} [${item.publisher}]` : title;
 }
 
@@ -498,11 +595,27 @@ function renderPackageCard(item) {
   const meta = document.createElement('div'); meta.className = 'package-meta';
   meta.append(valueRow('Runtime', item.runtime ?? 'n/a'), valueRow('API ports', item.ports?.length ? item.ports.map((p) => `${p.id}:${p.port}`).join(', ') : 'none'));
   card.append(meta);
-  const actions = document.createElement('div'); actions.className = 'button-row package-card-actions';
-  if (item.webui) actions.append(packageOpenLink(item.webui, { newTab: true }));
+  // 有新版本時，卡片先給一條橫幅——按鈕在一排六格裡，不橫幅的話很容易被略過。
+  const upgrade = packageUpgrade(item);
+  if (upgrade) {
+    card.append(text('p', `有新版本 ${upgrade}（目前 ${item.version}）`, 'alert warning package-upgrade-banner'));
+  }
+  // 六格等寬、位置固定：不可用的置灰而不是消失，否則按鈕會隨狀態跳位，
+  // 使用者每次都要重新找「Uninstall」在哪。
+  const actions = document.createElement('div');
+  actions.className = 'button-row package-card-actions six-up';
+  actions.append(item.webui
+    ? packageOpenLink(item.webui, { newTab: true })
+    : actionButton('Open', '', () => {}, true));
   actions.append(packageSettingLink(item));
-  if (item.previous_version) actions.append(actionButton('Rollback', '', () => startInstalledAction(item, 'rollback')));
-  actions.append(actionButton('Uninstall', 'danger-text', () => startInstalledAction(item, 'uninstall')));
+  actions.append(actionButton('Update', 'primary',
+    () => startPackageUpgrade(item, upgrade), !canWrite() || !upgrade));
+  actions.append(actionButton('Dev', '',
+    () => startPackageDev(item), !canWrite() || !item.installed_dir));
+  actions.append(actionButton('Rollback', '',
+    () => startInstalledAction(item, 'rollback'), !canWrite() || !item.previous_version));
+  actions.append(actionButton('Uninstall', 'danger-text',
+    () => startInstalledAction(item, 'uninstall'), !canWrite()));
   card.append(actions);
   const details = document.createElement('details'); details.className = 'inline-details';
   details.append(Object.assign(document.createElement('summary'), { textContent: 'Version details' }),
@@ -522,7 +635,7 @@ async function loadAdapters() {
       const grid = document.createElement('div'); grid.className = 'package-grid';
       grid.append(...adapters.map(renderPackageCard)); panel.body.append(grid);
     }
-    replacePage(panel.card, renderJobs(data));
+    replacePage(panel.card);
   } catch (error) {
     const panel = section('Adapter catalog');
     panel.body.append(text('p', `Could not load Adapters: ${error.message ?? error}`, 'alert error'));
@@ -600,6 +713,42 @@ function packageUploadStatus(upload) {
   })[upload.status] ?? String(upload.status ?? 'Unknown').replaceAll('_', ' ');
 }
 
+/**
+ * Installed 版本與 Registry 最新已驗證版本的比對結果。
+ * 回傳可升級的目標版本，或 null。比較用數字段而非字串，避免 0.10 < 0.9。
+ */
+let registryByRepository = new Map();
+
+function compareSemver(a, b) {
+  const pa = String(a).split('.').map(Number);
+  const pb = String(b).split('.').map(Number);
+  for (let i = 0; i < 3; i += 1) {
+    const x = Number.isFinite(pa[i]) ? pa[i] : 0;
+    const y = Number.isFinite(pb[i]) ? pb[i] : 0;
+    if (x !== y) return x - y;
+  }
+  return 0;
+}
+
+function packageUpgrade(item) {
+  if (!item.repository) return null;
+  const entry = registryByRepository.get(normalizeRepository(item.repository));
+  const latest = entry?.latest_verified_version ?? entry?.latest_version;
+  if (!latest || !item.version) return null;
+  return compareSemver(latest, item.version) > 0 ? latest : null;
+}
+
+/** 每次拿到 package-manager 快照時重建索引；官方名單與可升級判定都靠它。 */
+function indexRegistry(data) {
+  registryByRepository = new Map();
+  officialRepositories = new Set();
+  for (const entry of data.registry?.packages ?? []) {
+    const key = normalizeRepository(entry.repository);
+    registryByRepository.set(key, entry);
+    if (entry.official?.length) officialRepositories.add(key);
+  }
+}
+
 function registryDisplayName(item) {
   const name = item.display_name ?? item.repository;
   return item.official?.length ? `${name} [Official]` : name;
@@ -629,25 +778,20 @@ function renderRegistryDetails(container, details) {
   appendSection('License', details.license);
   appendSection('AI disclosure', details.ai_disclosure);
   if (details.official?.length) appendSection('Official maintainers', details.official);
-  if (!rows.length) rows.push(text('p', 'No additional public details were declared.', 'empty'));
+  // 這些欄位大多來自上游 Registry，未填就是空。只剩一個 Official 時要說清楚
+  // 「是上游沒申報」，而不是讓人以為介面漏顯示了。
+  if (rows.length <= (details.official?.length ? 1 : 0)) {
+    rows.push(text('p',
+      '此 Package 未申報依賴、權限、網路、資料存取、能力、連接埠或授權等公開資訊。',
+      'empty'));
+  }
   container.append(...rows);
 }
 
 function renderRegistry(data) {
   const wrap = document.createElement('div');
   const registry = data.registry ?? { status: 'not_fetched', packages: [] };
-  wrap.append(text('p', 'These verified Packages are available to install. Open Details first, then download and check the package before installing it.', 'description'));
-  const controls = document.createElement('div'); controls.className = 'button-row';
-  controls.append(actionButton('Refresh list', 'primary', async () => {
-    try {
-      await apiData('/api/admin/package-registry/refresh', { method: 'POST', body: '{}' });
-      packageNotice = { kind: 'good', text: 'Available package list refreshed.' };
-    } catch (error) {
-      packageNotice = { kind: 'bad', text: `Registry refresh: ${error.message ?? error}` };
-    }
-    await loadPackageManager();
-  }, !canWrite() || Boolean(data.active_job)));
-  wrap.append(controls);
+  wrap.append(text('p', 'These verified Packages are available to install. Open ℹ️ on a card to read what it declares before installing.', 'description'));
   if (registry.status !== 'ready' && registry.status !== 'stale') {
     wrap.append(text('p', 'The catalog has not been loaded on this device yet.', 'empty'));
     return wrap;
@@ -663,7 +807,14 @@ function renderRegistry(data) {
     return wrap;
   }
   const grid = document.createElement('div'); grid.className = 'package-grid registry-grid';
-  for (const item of registry.packages) {
+  // Framework 不是可安裝的 Package——它有自己的更新流程（System → Framework Update）。
+  // 混在包列表裡只會讓人誤以為可以像裝包一樣裝它。
+  const installable = registry.packages.filter((item) => !item.types?.includes('framework'));
+  if (!installable.length) {
+    wrap.append(text('p', 'The Registry returned no installable Packages.', 'empty'));
+    return wrap;
+  }
+  for (const item of installable) {
     const card = document.createElement('article'); card.className = 'panel package-card registry-card';
     const version = item.versions?.find((entry) => entry.version === (item.latest_verified_version ?? item.latest_version)) ?? item.versions?.[0];
     const file = version?.files?.find((entry) => entry.kind === 'source_tar' && entry.name.endsWith('.tar.gz'));
@@ -672,7 +823,8 @@ function renderRegistry(data) {
     card.append(valueRow('Latest verified', version?.version ?? item.latest_verified_version ?? 'n/a'),
       valueRow('Published', item.latest_verified_published_at ?? version?.published_at ?? 'n/a'));
     if (file) {
-      card.append(valueRow('Source archive', `${file.name} · ${formatBytes(file.size)}`));
+      // 檔名恆為 source.tar.gz，沒有資訊量；大小有。
+      card.append(valueRow('Source archive', formatBytes(file.size)));
       const detailBox = document.createElement('div'); detailBox.className = 'registry-details'; detailBox.hidden = true;
       const selection = { source: item.source, repository: item.repository, version: version.version, kind: file.kind, file: file.name };
       let publicDetailsLoaded = false;
@@ -701,24 +853,30 @@ function renderRegistry(data) {
           packageNotice = { kind: 'bad', text: `Registry download: ${error.message ?? error}` };
         }
         await loadPackageManager();
-      }, !canWrite() || Boolean(data.active_job) || !publicDetailsLoaded);
-      const detailsButton = actionButton('Details', '', async () => {
-        detailsButton.disabled = true;
+      }, !canWrite() || Boolean(data.active_job));
+      // 安全資訊的價值在**可查**，不在**強制**。先前 Download 被 Details 門禁擋住，
+      // 效果只是多一次點擊，沒有人因此真的讀了權限。改為預設收起、隨時可展開。
+      const disclosure = document.createElement('details');
+      disclosure.className = 'info registry-disclosure';
+      const summary = document.createElement('summary');
+      summary.textContent = 'ℹ️ 詳細資訊';
+      summary.title = '依賴、權限、網路與授權';
+      disclosure.append(summary, detailBox);
+      detailBox.hidden = false;
+      disclosure.addEventListener('toggle', async () => {
+        if (!disclosure.open || publicDetailsLoaded) return;
+        detailBox.replaceChildren(text('p', '讀取中…', 'empty'));
         try {
           const result = await apiData('/api/admin/package-registry/details', { method: 'POST', body: JSON.stringify(selection) });
           renderRegistryDetails(detailBox, { ...result.details, official: item.official });
-          detailBox.hidden = false;
           publicDetailsLoaded = true;
-          download.disabled = !canWrite() || Boolean(data.active_job);
-          detailsButton.textContent = 'Refresh';
         } catch (error) {
-          packageNotice = { kind: 'bad', text: `Package details: ${error.message ?? error}` };
+          detailBox.replaceChildren(text('p', `讀取詳細資訊失敗：${error.message ?? error}`, 'alert error'));
         }
-        detailsButton.disabled = false;
-      }, !canWrite() || Boolean(data.active_job));
+      });
       const actions = document.createElement('div'); actions.className = 'button-row';
-      actions.append(detailsButton, download);
-      card.append(detailBox, actions);
+      actions.append(download);
+      card.append(disclosure, actions);
     } else {
       card.append(text('p', 'No pinned source archive is available for this version.', 'empty'));
     }
@@ -769,6 +927,11 @@ function renderUpload(data) {
   return wrap;
 }
 
+/**
+ * Package 生命週期作業。**只在 Status → Logs 出現一次**——
+ * 每個頁面各掛一份的話，同一批作業會在四處重複，而使用者要找失敗原因時
+ * 反而不知道該看哪一份。
+ */
 function renderJobs(data) {
   const panel = section('Recent operations');
   const fold = document.createElement('details'); fold.className = 'collapsible-panel';
@@ -798,6 +961,7 @@ function renderJobs(data) {
 
 function renderPackageManager(data) {
   if (packagePollTimer) { clearTimeout(packagePollTimer); packagePollTimer = null; }
+  indexRegistry(data);
   packageReconnectSince = 0;
   const panel = section('Package Manager');
   panel.body.append(text('p', 'Installed shows what is on this device. Available shows verified Packages you can install. You can also install a package from a file.', 'description'));
@@ -812,6 +976,17 @@ function renderPackageManager(data) {
     filters.append(button);
   }
   toolbar.append(search, filters);
+  // 目錄刷新是**面板級**動作：Framework Update 與 Packages 讀的是同一份快取，
+  // 把入口埋在 Available 分頁裡，等於讓另一個頁面永遠拿不到最新資料。
+  panel.head?.append(actionButton('更新列表', 'primary', async () => {
+    try {
+      const result = await apiData('/api/admin/package-registry/refresh', { method: 'POST', body: '{}' });
+      packageNotice = { kind: 'good', text: `列表已更新（registry ${result.registry_version ?? '?'}）。` };
+    } catch (error) {
+      packageNotice = { kind: 'bad', text: `更新列表失敗：${error.message ?? error}` };
+    }
+    await loadPackageManager();
+  }, !canWrite() || Boolean(data.active_job)));
   const tabs = document.createElement('div');
   tabs.className = 'tabs';
   const content = document.createElement('div');
@@ -820,8 +995,11 @@ function renderPackageManager(data) {
     registry: () => renderRegistry(data),
     upload: () => renderUpload(data),
   };
-  for (const [id, label] of [['installed', `Installed (${data.packages?.length ?? 0})`],
-    ['registry', `Available (${data.registry?.packages?.length ?? 0})`],
+  // Installed 的括號改為**可升級數**——包總數在列表裡一眼可見，不需要重複；
+  // 真正需要一眼看到的是「有幾個該更新」。為 0 時不顯示括號，避免噪音。
+  const upgradable = (data.packages ?? []).filter(packageUpgrade).length;
+  for (const [id, label] of [['installed', upgradable ? `Installed (${upgradable})` : 'Installed'],
+    ['registry', 'Available'],
     ['upload', 'Install from file']]) {
     const button = actionButton(label, packageTab === id ? 'active' : '', () => {
       packageTab = id;
@@ -834,7 +1012,7 @@ function renderPackageManager(data) {
   if (!views[packageTab]) packageTab = 'installed';
   content.append(views[packageTab]());
   panel.body.append(toolbar, tabs, content);
-  replacePage(panel.card, renderJobs(data));
+  replacePage(panel.card);
   if (data.active_job) packagePollTimer = setTimeout(() => loadPackageManager(), 1500);
 }
 
