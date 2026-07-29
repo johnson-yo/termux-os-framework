@@ -67,6 +67,26 @@ sys.exit(0 if d["device"]=="smoke-device" and d["git_commit"] else 1)' \
   && ok "device 與 build 可見（§17：當前 commit 可見）" || bad "device/build 可見"
 
 echo "--- 3. 頁面入口（§2：用戶不該猜隱藏路徑）---"
+# 全新安裝的設備還沒有人認領憑證。密碼是隨機生成寫進私有檔案的，只有本機瀏覽器能看到它，
+# 所以這裡的入口是 Setup 而不是登入框——否則使用者得開 Termux 打指令才進得去。
+C=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/admin")
+[ "$C" = 302 ] && ok "未認領的設備 /admin → Setup" || bad "未認領的設備 /admin → Setup" "http=$C"
+C=$(curl -s -o "$WORK/setup.html" -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/admin/setup")
+[ "$C" = 200 ] && grep -q 'setup.js' "$WORK/setup.html" \
+  && ok "Setup 頁可直接開啟" || bad "Setup 頁可直接開啟" "http=$C"
+SU=$(curl -s -m 3 "http://127.0.0.1:$PORT/api/admin/setup")
+echo "$SU" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+sys.exit(0 if d.get("ok") and d.get("step")=="setup" and d.get("admin_password") and d.get("setup_token") else 1)' \
+  && ok "Setup 只對本機交出生成的憑證" || bad "Setup 交出憑證" "$SU"
+# 完成後才回到一般的登入流程；沒有這一步，更新完的設備會一直停在 Setup。
+TOKEN=$(echo "$SU" | python3 -c 'import json,sys; print(json.load(sys.stdin)["setup_token"])')
+curl -s -m 3 -X POST -H 'Content-Type: application/json' \
+  -d "{\"setup_token\":\"$TOKEN\",\"use_previous_config\":true}" \
+  "http://127.0.0.1:$PORT/api/admin/setup" >/dev/null
+C=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/api/admin/setup")
+[ "$C" = 404 ] && ok "認領後 Setup 不再交出憑證" || bad "認領後 Setup 關閉" "http=$C"
 C=$(curl -s -o "$WORK/admin.html" -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/admin")
 [ "$C" = 200 ] && grep -q 'Administrator password' "$WORK/admin.html" \
   && ok "/admin → Browser Login" || bad "/admin → Browser Login" "http=$C"

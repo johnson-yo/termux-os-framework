@@ -21,4 +21,29 @@ from the stable Package ID: `admin_title`, `publisher`, `license`, and the
 optional `release.repository`. Administration may display that metadata, but
 must never derive or expose credentials, private paths, or device identity.
 
+Configuration is never read as stored. `config-migrate.mjs` builds the running version's
+configuration from that version's defaults, transplanting every value the device already had by its
+own key path. There is no version-to-version mapping table: such a table has to be correct for every
+pair of versions anyone might upgrade between, and is silently wrong the moment someone skips a
+release. A key that keeps its meaning keeps its path; a key that changes meaning gets a new path and
+counts as new. Keys the running version no longer declares are preserved, not dropped.
+
+The stored file holds overrides only — what differs from this version's defaults, plus undeclared
+keys. Materialising defaults into the file means a later release can never change one, because the
+old value is sitting there waiting to be transplanted back over the new default.
+
+The update boundary check compares those settings, not the file's bytes. Hashing bytes made "this
+version added a key" indistinguishable from "someone edited a setting", which made migration and the
+boundary check mutually exclusive and left a device that had fallen far enough behind unable to
+update at all. Credentials are outside the fingerprint and outside the stored configuration: the
+server resolves them at startup, so serialising the live configuration object would write the
+administrator password into the persistent tree.
+
+`setup-state.mjs` decides what a browser sees at `/admin`. A device whose credentials nobody has
+claimed shows the setup step rather than a login form, because the password is generated into a
+private file and the product assumes the user never opens Termux. Both the setup step and the
+post-update review reveal credentials, so both answer local requests only; every other origin gets
+the login form regardless of state. Whoever reaches the panel over the network is not the person
+holding the phone.
+
 Credentials and browser sessions stay in Termux-private storage. Administration code must not expose secrets. Device verification must report the exact installed release it inspected.

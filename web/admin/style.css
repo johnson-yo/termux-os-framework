@@ -545,3 +545,43 @@ main:not(.content) > h1 { font-size: 1.35rem; }
 @media (max-width: 620px) {
   .version-row > button { flex: 1 1 100%; }
 }
+
+/* Setup：安装或更新后唯一一次把生成的凭证交给用户的地方。比登录卡宽，因为它要放下
+   密码、System Key 和这一版对配置做了什么，而这些都不该折叠到看不见。 */
+.setup-card { width: 100%; }
+.login-wrap:has(.setup-card) { width: min(560px, 100%); }
+.setup-block { display: grid; gap: 8px; padding: 14px 0; border-top: 1px solid var(--line); }
+.setup-block:first-of-type { border-top: 0; padding-top: 4px; }
+.setup-block h2 { margin: 0; font-size: .95rem; }
+.setup-hint { margin: 0; color: var(--muted); font-size: .82rem; line-height: 1.5; }
+.secret-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.secret {
+  flex: 1 1 200px; min-width: 0; padding: 9px 10px;
+  border: 1px solid #bcc6cf; border-radius: 5px; background: #f6f8fa;
+  font: .85rem ui-monospace, monospace; word-break: break-all;
+}
+.secret-row .copy {
+  flex: 0 0 auto; padding: 8px 12px; border: 1px solid #bcc6cf;
+  border-radius: 5px; background: #fff; cursor: pointer; font-size: .82rem;
+}
+.setup-check { display: flex; align-items: center; gap: 8px; font-size: .88rem; font-weight: 650; }
+.setup-check input { width: auto; }
+#config-detail { font-size: .82rem; color: var(--muted); }
+#config-detail summary { cursor: pointer; padding: 4px 0; }
+#config-detail-body p { margin: 6px 0; line-height: 1.6; word-break: break-all; }
+#config-detail-body code { font: .78rem ui-monospace, monospace; }
+
+/* 安装提示：贴在内容区顶部，随时可关掉。它是建议，不是必须回答的问题。 */
+.install-bar {
+  grid-area: content;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 12px; padding: 10px 12px;
+  border: 1px solid var(--line); border-left: 3px solid var(--accent, #18212b);
+  border-radius: 6px; background: #fff; font-size: .85rem;
+}
+.install-bar span { flex: 1 1 200px; }
+.install-bar button {
+  padding: 7px 12px; border: 1px solid #bcc6cf; border-radius: 5px;
+  background: #fff; cursor: pointer; font-size: .82rem;
+}
+.install-bar button.primary { background: #18212b; color: #fff; border-color: #18212b; }

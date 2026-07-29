@@ -474,7 +474,9 @@ export async function register(context) {
   // build this path from the same constant read and write each other's status file.
   const SERVICE_ID = context.services.id('${v.SERVICE_ID}');
   const STATUS_FILE = path.join(context.frameworkRoot, \`.runtime/services/\${SERVICE_ID}/status.json\`);
-  const CONFIG_FILE = path.join(context.persistRoot, 'conf/${v.SHORT}.v1.json');
+  // 設定放在 Package 自己的 config/ 下，不在 Framework 的持久樹裡：
+  // 這樣它同時活過 Framework 更新與本 Package 的升級。
+  const CONFIG_FILE = context.configFile('${v.SHORT}.v1.json');
 
   context.services.register({
     id: '${v.SERVICE_ID}',
@@ -729,7 +731,8 @@ import { loadConfig, saveConfig } from './adapter/config.mjs';
 import { makeActions } from './adapter/actions.mjs';
 
 export async function register(context) {
-  const CONF = path.join(context.persistRoot, 'conf/${v.SHORT}.v1.json');
+  // 同上：Package 的設定歸 Package 自己保管。
+  const CONF = context.configFile('${v.SHORT}.v1.json');
   const cfg = () => loadConfig(CONF);
   for (const a of makeActions(cfg)) context.actions.register(a);
 

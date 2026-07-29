@@ -9,7 +9,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FRAMEWORK_VERSION="$(node -p "require('./package.json').version" 2>/dev/null)"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/framework-installer-smoke.XXXXXX")"
+WORK="${SMOKE_KEEP_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/framework-installer-smoke.XXXXXX")}"
 HOME_FAKE="$WORK/home"
 RUNTIME="$HOME_FAKE/.termux-os/framework"
 PERSIST="$WORK/persist"

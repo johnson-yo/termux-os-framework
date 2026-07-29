@@ -14,7 +14,8 @@ const EDITABLE = { interval_ms: 'number' };
 
 export async function register(context) {
   const STATUS_FILE = path.join(context.frameworkRoot, '.runtime/services/example-counter/status.json');
-  const CONFIG_FILE = path.join(context.persistRoot, 'conf/example-counter.v1.json');
+  // Package 的設定歸 Package 自己保管，不放進 Framework 的持久樹。
+  const CONFIG_FILE = context.configFile('example-counter.v1.json');
 
   context.services.register({
     id: 'example-counter',

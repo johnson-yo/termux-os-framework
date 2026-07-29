@@ -28,7 +28,14 @@ export function resolveInstalledPackages(root = installedRoot()) {
   for (const id of dirs) {
     const dir = path.join(root, id);
     const activePath = path.join(dir, ACTIVE_FILENAME);
-    if (!fs.existsSync(activePath)) continue; // 無 active.json = 非安裝包目錄，跳過
+    if (!fs.existsSync(activePath)) {
+      // 沒有 active.json 就不是安裝包目錄。但一個有 versions/ 的目錄顯然曾經是——
+      // 靜默跳過會讓使用者在管理台上看不到它，卻又刪不掉、裝不回，只能開 shell 才查得出原因。
+      if (fs.existsSync(path.join(dir, 'versions'))) {
+        errors.push({ id, dir, error: `${ACTIVE_FILENAME} is missing; the Package cannot be loaded until it is reinstalled` });
+      }
+      continue;
+    }
     let active;
     try {
       active = JSON.parse(fs.readFileSync(activePath, 'utf8'));
@@ -49,7 +56,8 @@ export function resolveInstalledPackages(root = installedRoot()) {
       errors.push({ id, dir, error: `active version directory missing: versions/${active.active_version}` });
       continue;
     }
-    entries.push({ id, dir: versionDir, active });
+    // packageRoot 跨版本存在，versionDir 不是：Package 自己的設定要放在前者之下才活得過升級。
+    entries.push({ id, dir: versionDir, packageRoot: dir, active });
   }
   return { entries, errors };
 }

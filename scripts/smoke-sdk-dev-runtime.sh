@@ -190,7 +190,8 @@ cp "$WORK/pkg.bak" "$WORK/ws/$ID/package.mjs"; sleep 1.6
 curl -s "$B/api/dev/packages/$INST/events" | jq "assert d['status']=='loaded'" \
   && ok "修復 → 自動重載復活" || bad "自動復活"
 curl -s -H "$AUTH" -X POST "$B/api/packages/$INST/config" -d '{"interval_ms":9999}' >/dev/null
-[ -f ".runtime/dev-data/$INST/conf/sdk-smoke-dr.v1.json" ] && ok "Dev 配置落隔離區（dev-data）" || bad "dev 資料隔離"
+# Package 的設定改放 config/（正式版在自己的 Package 根下，工作區在自己的隔離資料區下）。
+[ -f ".runtime/dev-data/$INST/config/sdk-smoke-dr.v1.json" ] && ok "Dev 配置落隔離區（dev-data）" || bad "dev 資料隔離"
 # 工作區資料一律不得落共享存儲：包在開發中寫出的音訊/圖片會被媒體掃描器收進相簿
 [ ! -e "/sdcard/termux-os/framework/dev/$INST" ] && ok "Dev 資料未落 /sdcard（避免被媒體掃描）" || bad "Dev 資料落到共享存儲"
 # 並存後正式版全程在跑，它**本來就會**建自己的預設配置——那不是污染。

@@ -1,0 +1,65 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  [INPUT]: /api/admin/setup, which answers local requests only.
+  [OUTPUT]: The one screen that hands the user their generated credentials, and records that they saw them.
+  [POS]: web/admin/setup.html in termux-os-framework. Shown at /admin/setup instead of the login form.
+  [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
+-->
+
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Setup — Termux-OS</title>
+  <link rel="stylesheet" href="/admin/style.css">
+</head>
+<body class="login-page">
+  <main class="login-wrap">
+    <section class="login-card setup-card" id="setup-card" aria-busy="true">
+      <p class="eyebrow">TERMUX-OS</p>
+      <h1 id="setup-title">Setup</h1>
+      <p class="description" id="setup-lead">正在读取本机凭证…</p>
+
+      <div id="setup-body" hidden>
+        <div class="setup-block">
+          <h2>登录密码</h2>
+          <p class="setup-hint">这台设备为你生成的密码。请先记下来——之后只有登录后才能再看到。</p>
+          <div class="secret-row">
+            <code id="setup-password" class="secret"></code>
+            <button type="button" class="copy" data-copy="setup-password">复制</button>
+          </div>
+          <label for="new-password">改成自己的密码（可留空沿用上面的）</label>
+          <input id="new-password" type="password" autocomplete="new-password" placeholder="至少 12 个字符">
+        </div>
+
+        <div class="setup-block">
+          <h2>System Key</h2>
+          <p class="setup-hint">给 API、包与外部程序使用的令牌，不用于登录。</p>
+          <div class="secret-row">
+            <code id="setup-token" class="secret"></code>
+            <button type="button" class="copy" data-copy="setup-token">复制</button>
+          </div>
+        </div>
+
+        <div class="setup-block" id="config-block">
+          <h2>配置</h2>
+          <label class="setup-check">
+            <input id="use-previous" type="checkbox" checked>
+            <span id="use-previous-label">使用上一版本的配置</span>
+          </label>
+          <p class="setup-hint" id="config-summary"></p>
+          <details id="config-detail" hidden>
+            <summary>看看具体搬了什么</summary>
+            <div id="config-detail-body"></div>
+          </details>
+        </div>
+
+        <button class="primary" type="button" id="setup-done">完成，进入控制台</button>
+        <p class="alert error" id="setup-error" hidden></p>
+      </div>
+    </section>
+  </main>
+  <script src="/admin/setup.js"></script>
+</body>
+</html>

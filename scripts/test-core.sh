@@ -29,6 +29,8 @@ for file in \
   src/system/package-settings.mjs \
   src/system/package-control.mjs \
   src/system/package-registry.mjs \
+  src/system/config-migrate.mjs \
+  src/system/setup-state.mjs \
   src/system/node-runtime.mjs \
   src/system/sdk-guide.mjs \
   src/system/menu.mjs \

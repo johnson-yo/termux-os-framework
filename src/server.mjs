@@ -32,6 +32,8 @@ import {
   hasPermission, loginBrowser, logoutBrowser, sessionCookie, updateBrowserAuth, verifyBrowserPassword,
 } from './system/auth.mjs';
 import { adminMenuHasPath, buildAdminMenu } from './system/menu.mjs';
+import { configOverrides, migrateConfig, migrationChangedConfig } from './system/config-migrate.mjs';
+import { configureSetupState, isLoopbackAddress, readSetupState, setupDecision, writeSetupState } from './system/setup-state.mjs';
 import {
   configurePackageControl, discardPackageUpload, getPackageJob, getPackageUpload,
   packageManagerSnapshot, startPackageJob, storePackageRemoteDownload, storePackageUpload, updatePackageUpload,
@@ -73,8 +75,54 @@ import {
 // ============================================================
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const CONFIG_PATH = path.resolve(process.env.CONFIG || path.join(ROOT, 'config/defaults/framework.v1.json'));
-const CFG = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+const CONFIG_DEFAULTS_PATH = path.join(ROOT, 'config/defaults/framework.v1.json');
+
+// 配置永遠不按原樣讀。舊版本的 conf 缺少本版新增的鍵時，過去會在第一次裸取上拋錯，
+// 安裝器隨即回滾——落後越多的設備越更新不上去。改為以本版 defaults 為骨架、
+// 按鍵路徑把使用者設過的值搬過來，於是「更新」不再依賴「設備上的 conf 有多新」。
+function loadConfiguration() {
+  const stored = (() => {
+    try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { return null; }
+  })();
+  // conf 就是 defaults 本身時（開發機直接跑源碼樹）沒有東西要遷移。
+  const defaults = JSON.parse(fs.readFileSync(CONFIG_DEFAULTS_PATH, 'utf8'));
+  // conf 就是 defaults 本身時（開發機直接跑源碼樹）沒有東西要遷移，也不該回寫。
+  if (CONFIG_PATH === CONFIG_DEFAULTS_PATH) return { config: stored ?? defaults, report: null, defaults };
+  const { config, report } = migrateConfig(defaults, stored, { defaultsVersion: FRAMEWORK_VERSION_RAW });
+  if (stored === null || migrationChangedConfig(report)) {
+    // 先留一份原件再覆寫：遷移報告說了什麼，使用者要能對照原始檔案自己核。
+    // 檔名記的是「被哪一版遷移之前的樣子」，固定不變，所以重啟不會堆出一串備份。
+    if (stored !== null) {
+      try { fs.copyFileSync(CONFIG_PATH, `${CONFIG_PATH}.pre-${FRAMEWORK_VERSION_RAW}`); }
+      catch { /* 備份失敗不該擋住啟動 */ }
+    }
+    try {
+      fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+      fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(configOverrides(config, defaults), null, 2)}\n`);
+    } catch (error) {
+      console.warn('[config] 遷移結果無法寫回，本次以記憶體中的配置運行:', error.message);
+    }
+  }
+  return { config, report, defaults };
+}
+const FRAMEWORK_VERSION_RAW = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version ?? '0.0.0';
+const { config: CFG, report: CONFIG_MIGRATION, defaults: CONFIG_DEFAULTS } = loadConfiguration();
+
+/**
+ * 唯一的 conf 寫入口。啟動時 CFG.auth 會被填成真正的 token 與密碼，而 conf 位於 /sdcard——
+ * 直接序列化 CFG（先前 LAN 開關與 updateIntegration 都這麼做）等於把管理員憑證寫進共享儲存。
+ * 落盤的永遠是「檔案裡本來配置了什麼」，不是「這次運行解析出了什麼」。
+ */
+function persistConfiguration() {
+  // 落盤的是「與本版預設不同的部分」，而不是整個運行期配置：預設值一旦寫進檔案，
+  // 日後改預設就再也到不了已安裝的設備，更新邊界檢查也會把它誤判成使用者改動。
+  const onDisk = { ...configOverrides(CFG, CONFIG_DEFAULTS), auth: CONFIGURED_AUTH };
+  if (!Object.keys(CONFIGURED_AUTH).length) delete onDisk.auth;
+  fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(onDisk, null, 2)}\n`);
+  return onDisk;
+}
 const configuredAuth = CFG.auth ?? {};
+const CONFIGURED_AUTH = JSON.parse(JSON.stringify(configuredAuth));
 const AUTH_FILE = process.env.FRAMEWORK_AUTH_FILE || defaultAuthFile();
 const privateAuth = configuredAuth.admin_token && (configuredAuth.admin_password || configuredAuth.admin_token)
   ? {}
@@ -108,6 +156,13 @@ const PACKAGE_CONTROL_ROOT = process.env.PACKAGE_CONTROL_ROOT
   || path.join(path.dirname(CONFIG_PATH), 'package-control');
 const PACKAGE_SETTINGS_PATH = process.env.PACKAGE_SETTINGS_PATH
   || path.join(path.dirname(CONFIG_PATH), '..', 'package-settings.v1.json');
+// Setup 進度不是使用者的設定，所以不放進 conf/——那棵樹要參與更新邊界比對。
+// 用持久根而不是「conf 的上一層」：後者假設了 conf 一定在子目錄裡，一旦不是，
+// 狀態檔就會落到共享目錄，讓不相干的兩套安裝互相覆蓋彼此的 Setup 進度。
+const SETUP_STATE_PATH = process.env.SETUP_STATE_PATH
+  || (process.env.FRAMEWORK_PERSIST
+    ? path.join(process.env.FRAMEWORK_PERSIST, 'setup-state.v1.json')
+    : path.join(path.dirname(CONFIG_PATH), 'setup-state.v1.json'));
 const FRAMEWORK_UPDATE_ROOT = process.env.FRAMEWORK_UPDATE_ROOT
   || path.resolve(path.dirname(CONFIG_PATH), '..', 'updates');
 const FRAMEWORK_CONTROL_PATH = process.env.FRAMEWORK_CONTROL_PATH || path.join(os.homedir(), 'framework.sh');
@@ -120,7 +175,7 @@ const PACKAGE_REGISTRY_URL = process.env.PACKAGE_REGISTRY_URL
 const FRAMEWORK_REGISTRY_REPOSITORY = process.env.FRAMEWORK_REGISTRY_REPOSITORY
   || CFG.integrations?.package_registry?.framework_repository || 'johnson-yo/termux-os-framework';
 
-const FRAMEWORK_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version ?? '0.0.0';
+const FRAMEWORK_VERSION = FRAMEWORK_VERSION_RAW;
 const FEATURE_SCHEMA = 'termux-os.framework-features.v1';
 const FEATURES = Object.freeze({
   admin_integrity: 1,
@@ -151,6 +206,9 @@ configurePortRegistry({
   end: Number(process.env.PACKAGE_PORT_END) || 9999,
 });
 configurePackageSettings({ path: PACKAGE_SETTINGS_PATH });
+configureSetupState({ path: SETUP_STATE_PATH, version: FRAMEWORK_VERSION });
+// 只活在本次進程內：Setup 走完就沒有用途了，沒有必要持久化。
+const SETUP_TOKEN = generateAuthToken();
 process.env.PORT_REGISTRY_PATH ||= PORT_REGISTRY_PATH;
 configurePackageControl({
   root: PACKAGE_CONTROL_ROOT,
@@ -216,6 +274,8 @@ const MIME = {
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.svg': 'image/svg+xml',
 };
 
 // 靜態文件：全部映射進 rootDir，路徑越界一律 404（/admin 與 /packages/<id>/ 共用）
@@ -272,6 +332,21 @@ DEV WORKSPACE — 載入失敗（Framework 本體正常）</div>
 
 // 030 Browser Session：Installed Package 是不可变 Release，不为认证迁移重打十个包。
 // Host 在返回 HTML 时注入同源 session 请求上下文并隐藏旧 token 输入；Package 原文件与 SHA 不变。
+// PWA：/admin 是使用者的日常入口，桌面圖示讓它不必先開瀏覽器再找網址。
+// Service Worker 的 scope 只有 /admin/，並且把版本帶進 URL——否則更新後仍會拿到舊版本的 shell。
+const pwaInjection = () => `<link rel="manifest" href="/admin/manifest.webmanifest">
+<link rel="icon" href="/admin/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#18212b">
+<script>if('serviceWorker'in navigator){window.addEventListener('load',function(){
+navigator.serviceWorker.register('/admin/sw.js?v=${encodeURIComponent(FRAMEWORK_VERSION)}',{scope:'/admin'}).catch(function(){});});}</script>`;
+
+function injectPwa(html) {
+  if (html.includes('/admin/manifest.webmanifest')) return html;
+  return html.includes('</head>')
+    ? html.replace('</head>', `${pwaInjection()}\n</head>`)
+    : `${pwaInjection()}\n${html}`;
+}
+
 function injectBrowserSession(html) {
   let out = html.replace(/(<input\b[^>]*\bid=["']token["'][^>]*\bvalue=)(["'])[^"']*\2/gi, '$1""');
   if (!out.includes('/admin/session.js')) {
@@ -298,6 +373,11 @@ function servePackageHtml(res, webRoot, rel) {
 }
 
 const ADMIN_FILES = new Map([
+  ['/admin/manifest.webmanifest', 'manifest.webmanifest'],
+  ['/admin/icon.svg', 'icon.svg'],
+  ['/admin/sw.js', 'sw.js'],
+  ['/admin/setup', 'setup.html'],
+  ['/admin/setup.js', 'setup.js'],
   ['/admin/login', 'login.html'],
   ['/admin/login.js', 'login.js'],
   ['/admin/session.js', 'session.js'],
@@ -306,7 +386,15 @@ const ADMIN_FILES = new Map([
   ['/admin/app.js', 'app.js'],
   ['/admin/style.css', 'style.css'],
 ]);
-const serveAdminFile = (res, file) => serveStatic(res, path.join(ROOT, 'web/admin'), file);
+// Admin 的 HTML 一律帶上 PWA 標頭：使用者的入口只有這一個，不該有「哪一頁能安裝」的差別。
+const serveAdminFile = (res, file) => {
+  if (!file.endsWith('.html')) return serveStatic(res, path.join(ROOT, 'web/admin'), file);
+  const full = path.join(ROOT, 'web/admin', file);
+  if (!fs.existsSync(full)) return json(res, 404, { ok: false, error: 'not found' });
+  const body = injectPwa(fs.readFileSync(full, 'utf8'));
+  res.writeHead(200, { 'Content-Type': MIME['.html'] });
+  res.end(body);
+};
 const authed = (req, permission = 'read') => hasPermission(authenticateRequest(req), permission);
 
 const readBody = (req) => new Promise((resolve) => {
@@ -343,8 +431,8 @@ setSessionRoot(ROOT);
 setObservationRoot(ROOT);
 setObservationServices(() => stageServices.map((s) => s.id));
 // 029：Dev Runtime 先清殘留（重啟不自動恢復 Dev Mount）再載正式 Packages
-initDevRuntime({ frameworkRoot: ROOT, frameworkVersion: FRAMEWORK_VERSION, config: CFG, configPath: CONFIG_PATH, log: console.log });
-await loadPackages({ frameworkVersion: FRAMEWORK_VERSION, config: CFG, configPath: CONFIG_PATH });
+initDevRuntime({ frameworkRoot: ROOT, frameworkVersion: FRAMEWORK_VERSION, config: CFG, configPath: CONFIG_PATH, saveConfig: persistConfiguration, log: console.log });
+await loadPackages({ frameworkVersion: FRAMEWORK_VERSION, config: CFG, configPath: CONFIG_PATH, saveConfig: persistConfiguration });
 
 // 025 §8：Session 只操作 Stage 管的 framework 自有 Service（§8.4 邊界：不碰 Android/Termux/APK/Core）
 const sessionDeps = {
@@ -747,6 +835,69 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // Setup 只回應本機請求，而且只在尚未認領或本版尚未確認時存在。它是唯一會在未登入的情況下
+  // 顯示密碼的地方——安裝完成後使用者手上只有這台手機，沒有別的途徑知道系統替他生成了什麼。
+  const setupContext = () => ({
+    local: isLoopbackAddress(req.socket?.remoteAddress),
+    state: readSetupState(),
+  });
+  if (url === '/api/admin/setup' && req.method === 'GET') {
+    const { local, state } = setupContext();
+    const decision = setupDecision({ state, local, migrationChanged: Boolean(CONFIG_MIGRATION && migrationChangedConfig(CONFIG_MIGRATION)) });
+    if (decision === 'none') return json(res, 404, { ok: false, error: 'setup_not_available' }, { 'Cache-Control': 'no-store' });
+    return json(res, 200, {
+      ok: true,
+      step: decision,
+      version: FRAMEWORK_VERSION,
+      editable: credentialsEditable,
+      setup_token: SETUP_TOKEN,
+      admin_password: CFG.auth.admin_password,
+      system_key: CFG.auth.admin_token,
+      // 遷移已經在啟動時發生過了（不然服務起不來），這裡呈現的是它做了什麼，
+      // 以及「不要沿用舊配置」這個選項會撤銷掉什麼。
+      migration: CONFIG_MIGRATION ? {
+        from_schema: CONFIG_MIGRATION.from_schema,
+        transplanted: CONFIG_MIGRATION.transplanted,
+        defaulted: CONFIG_MIGRATION.defaulted,
+        coerced: CONFIG_MIGRATION.coerced,
+        kept: CONFIG_MIGRATION.kept,
+        has_previous: CONFIG_MIGRATION.transplanted.length > 0 || CONFIG_MIGRATION.kept.length > 0,
+      } : null,
+    }, { 'Cache-Control': 'no-store' });
+  }
+  if (url === '/api/admin/setup' && req.method === 'POST') {
+    const { local, state } = setupContext();
+    const decision = setupDecision({ state, local, migrationChanged: Boolean(CONFIG_MIGRATION && migrationChangedConfig(CONFIG_MIGRATION)) });
+    if (decision === 'none') return json(res, 404, { ok: false, error: 'setup_not_available' });
+    const body = await readBody(req);
+    // 這個端點在未登入時可用，所以不受一般寫入路徑的 CSRF 保護。設備上任何網頁都能對
+    // 127.0.0.1 發 POST，但跨來源腳本讀不到 GET 的回應，因此拿不到這個值。
+    if (body?.setup_token !== SETUP_TOKEN) return json(res, 403, { ok: false, error: 'setup_token_invalid' });
+    const password = body?.password;
+    let restartRequired = false;
+    if (typeof password === 'string' && password.length > 0) {
+      if (!credentialsEditable) return json(res, 409, { ok: false, error: 'credentials_managed_externally' });
+      if (password.length < AUTH_PASSWORD_MIN_LENGTH) {
+        return json(res, 400, { ok: false, error: 'login_password_too_short', detail: `Login password must be at least ${AUTH_PASSWORD_MIN_LENGTH} characters.` });
+      }
+      const next = writeAuthFile(AUTH_FILE, { admin_password: password });
+      CFG.auth.admin_password = next.admin_password;
+      updateBrowserAuth({ password: next.admin_password, apiToken: CFG.auth.admin_token, invalidateSessions: true });
+    }
+    // 不沿用舊配置＝把檔案清成「沒有任何覆蓋項」，重啟後一切走本版預設。
+    if (body?.use_previous_config === false) {
+      const before = JSON.stringify(configOverrides(CFG, CONFIG_DEFAULTS));
+      try {
+        fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+        fs.writeFileSync(CONFIG_PATH, `${JSON.stringify({ schema: CONFIG_DEFAULTS.schema }, null, 2)}\n`);
+      } catch (error) {
+        return json(res, 500, { ok: false, error: 'config_write_failed', detail: String(error?.message ?? error) });
+      }
+      restartRequired = before !== '{"schema":"' + CONFIG_DEFAULTS.schema + '"}' && before !== '{}';
+    }
+    writeSetupState({ claimed_at: state.claimed_at ?? new Date().toISOString(), acknowledged_version: FRAMEWORK_VERSION });
+    return json(res, 200, { ok: true, restart_required: restartRequired }, { 'Cache-Control': 'no-store' });
+  }
   // 所有 API 写操作：Bearer token 自带 write；Browser Session 必须同时有 write + CSRF。
   if (url.startsWith('/api/') && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
     if (!auth) return json(res, 401, { ok: false, error: 'unauthorized' });
@@ -936,7 +1087,7 @@ const server = http.createServer(async (req, res) => {
     const host = body.lan_enabled ? '0.0.0.0' : '127.0.0.1';
     try {
       CFG.server = { ...(CFG.server ?? {}), host };
-      fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(CFG, null, 2)}\n`);
+      persistConfiguration();
     } catch (error) {
       return json(res, 500, { ok: false, error: 'config_write_failed', detail: String(error?.message ?? error) });
     }
@@ -1512,15 +1663,38 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, await overviewReport());
   }
 
+  // 剛裝好或剛更新完的設備上，登入頁是一堵沒有鑰匙的門：密碼是隨機生成寫進私有檔案的，
+  // 取得它的唯一方法是開 Termux 打指令。所以本機瀏覽器先看到 Setup，而不是登入框。
+  const setupStep = () => setupDecision({
+    state: readSetupState(),
+    local: isLoopbackAddress(req.socket?.remoteAddress),
+    migrationChanged: Boolean(CONFIG_MIGRATION && migrationChangedConfig(CONFIG_MIGRATION)),
+  });
+
   // 登录页与它的最小静态资源公开；统一 Shell 只接受 Browser Session。
+  if (url === '/admin/setup') {
+    return setupStep() === 'none' ? redirect(res, '/admin/login') : serveAdminFile(res, 'setup.html');
+  }
+  if (url === '/admin/setup.js') return serveAdminFile(res, 'setup.js');
   if (url === '/admin/login') {
+    if (setupStep() !== 'none') return redirect(res, '/admin/setup');
     if (auth?.kind === 'session') return redirect(res, '/admin/status/overview');
     return serveAdminFile(res, 'login.html');
   }
-  if (url === '/admin/login.js' || url === '/admin/style.css') {
+  // 登入前就要拿得到：瀏覽器是在顯示登入頁或 Setup 頁時去抓 manifest、圖示與 Service Worker 的。
+  if (['/admin/login.js', '/admin/style.css', '/admin/manifest.webmanifest', '/admin/icon.svg'].includes(url)) {
     return serveAdminFile(res, ADMIN_FILES.get(url));
   }
+  if (url === '/admin/sw.js') {
+    // 腳本在 /admin/ 之下，預設最大 scope 就是 /admin/，涵蓋不到不帶斜線的 /admin。
+    // 這個標頭把 scope 放寬到 /admin，讓入口本身也受控制。
+    const file = path.join(ROOT, 'web/admin', 'sw.js');
+    if (!fs.existsSync(file)) return json(res, 404, { ok: false, error: 'not found' });
+    res.writeHead(200, { 'Content-Type': MIME['.js'], 'Service-Worker-Allowed': '/admin' });
+    return res.end(fs.readFileSync(file));
+  }
   if (url === '/admin' || url === '/admin/') {
+    if (setupStep() !== 'none') return redirect(res, '/admin/setup');
     return auth?.kind === 'session'
       ? redirect(res, '/admin/status/overview')
       : serveAdminFile(res, 'login.html');

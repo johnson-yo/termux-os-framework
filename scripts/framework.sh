@@ -68,12 +68,19 @@ ensure_auth() {
 }
 
 # 持久配置只在不存在時從 runtime default 建立；已存在絕不覆蓋。
+# conf 只記錄「與本版預設不同的部分」。把整份預設複製進去看似方便，但那些值日後會被
+# 當成使用者的選擇搬到新版本上，於是改預設永遠到不了已安裝的設備；Framework 啟動時
+# 會把預設與這裡的覆蓋項合併，所以一個只有 schema 的檔案就是完整可用的配置。
 ensure_config() {
   [ -f "$CONF" ] && return 0
   local def="$RUNTIME/config/defaults/framework.v1.json"
   [ -f "$def" ] || { say "default config 尚未部署，跳過配置初始化"; return 0; }
   mkdir -p "$(dirname "$CONF")"
-  cp "$def" "$CONF" && say "已建立 $CONF"
+  node -e '
+    const fs = require("fs");
+    const schema = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).schema;
+    fs.writeFileSync(process.argv[2], `${JSON.stringify({ schema }, null, 2)}\n`);
+  ' "$def" "$CONF" && say "已建立 $CONF"
 }
 
 cmd_bootstrap() {
@@ -215,8 +222,14 @@ core_check() {
   local expected="${1:-$(current_build)}" allow_legacy="${2:-0}" token password body code
   local features browser_session package_manager cookie login csrf
   port_up || { err "core-check: /health 失敗"; return 1; }
-  [ "$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$BASE_URL/admin")" = 200 ] \
-    || { err "core-check: /admin 不可用"; return 1; }
+  # 尚未認領憑證的設備上 /admin 會導向 Setup。要驗的是「入口在」，不是「入口是登入頁」——
+  # 綁死 200 會讓每一次更新在剛裝好的設備上都失敗。
+  local admin_code
+  admin_code="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$BASE_URL/admin")"
+  case "$admin_code" in
+    200|302) ;;
+    *) err "core-check: /admin 不可用 (http=$admin_code)"; return 1 ;;
+  esac
   token="$(admin_token)"
   [ -n "$token" ] || { err "core-check: admin token 不可讀"; return 1; }
   body="$(curl -sf -m 8 -H "Authorization: Bearer $token" "$BASE_URL/api/admin/status")" \
@@ -495,12 +508,33 @@ installed_truth() {
   ) | sha256sum | awk '{print $1}'
 }
 
+# 邊界比對的是「使用者設了什麼」，不是檔案的位元組。新版本為自己新增的鍵不算越界，
+# 使用者的值被改動仍然會被抓到——否則「conf 不許變」與「新版本需要新鍵」永遠互斥，
+# 落後太多版的設備就再也更新不上去。Package 自己的 conf 仍逐位元組比對。
+conf_fingerprint() {
+  local dir="$PERSIST/conf" main="$PERSIST/conf/framework.v1.json"
+  [ -d "$dir" ] || { echo missing; return; }
+  {
+    if [ -f "$main" ]; then
+      node "$RUNTIME/scripts/conf-fingerprint.mjs" "$main" 2>/dev/null || printf unreadable
+      printf '\n'
+    fi
+    (
+      cd "$dir" || exit 1
+      while IFS= read -r -d '' file; do
+        case "$file" in ./framework.v1.json|./framework.v1.json.pre-*|./setup-state.v1.json) continue ;; esac
+        sha256sum "$file"
+      done < <(find . -type f -print0 | LC_ALL=C sort -z)
+    )
+  } | sha256sum | awk '{print $1}'
+}
+
 snapshot_boundaries() {
   local out="$1"
   {
     echo "installed_inventory=$(tree_inventory "$INSTALLED_ROOT")"
     echo "installed_truth=$(installed_truth "$INSTALLED_ROOT")"
-    echo "persistent_conf=$(tree_content "$PERSIST/conf")"
+    echo "persistent_conf=$(conf_fingerprint)"
     echo "persistent_data_root=$([ -d "$PERSIST/data" ] && echo present || echo missing)"
     echo "assets=$(tree_inventory "$ASSET_ROOT")"
     echo "observations=$(tree_content "$RUNTIME/.runtime/observations")"

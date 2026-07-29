@@ -32,6 +32,35 @@ let administrationNotice = null;
 const flatMenu = (nodes) => nodes.flatMap((node) => [node, ...flatMenu(node.children ?? [])]);
 const canWrite = () => window.TermuxOS.session?.permissions?.includes('write') === true;
 
+// PWA 安裝提示。beforeinstallprompt 只在瀏覽器認為可安裝時才觸發——例如 127.0.0.1 這種
+// 安全上下文；用 LAN 位址開啟時不會有，所以這條提示不會出現，也不該假裝可以裝。
+let installPrompt = null;
+const INSTALL_DISMISSED = 'termux-os.install-dismissed';
+
+function setupInstallPrompt() {
+  const bar = document.getElementById('install-bar');
+  if (!bar) return;
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault();
+    installPrompt = event;
+    if (localStorage.getItem(INSTALL_DISMISSED) !== '1') bar.hidden = false;
+  });
+  window.addEventListener('appinstalled', () => { bar.hidden = true; installPrompt = null; });
+  document.getElementById('install-dismiss')?.addEventListener('click', () => {
+    localStorage.setItem(INSTALL_DISMISSED, '1');
+    bar.hidden = true;
+  });
+  document.getElementById('install-accept')?.addEventListener('click', async () => {
+    if (!installPrompt) return;
+    bar.hidden = true;
+    installPrompt.prompt();
+    // 使用者拒絕就不要再纏著他；瀏覽器本身也不會再觸發同一次提示。
+    const choice = await installPrompt.userChoice.catch(() => null);
+    if (choice?.outcome === 'dismissed') localStorage.setItem(INSTALL_DISMISSED, '1');
+    installPrompt = null;
+  });
+}
+
 function setNavigationOpen(open) {
   document.body.classList.toggle('nav-open', open);
   $('menu-button').setAttribute('aria-expanded', String(open));

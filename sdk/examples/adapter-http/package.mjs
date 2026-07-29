@@ -12,7 +12,8 @@ import { loadConfig, saveConfig } from './adapter/config.mjs';
 import { makeActions } from './adapter/actions.mjs';
 
 export async function register(context) {
-  const CONF = path.join(context.persistRoot, 'conf/example-http.v1.json');
+  // Package 的設定歸 Package 自己保管，不放進 Framework 的持久樹。
+  const CONF = context.configFile('example-http.v1.json');
   const cfg = () => loadConfig(CONF);
   for (const a of makeActions(cfg)) context.actions.register(a);
 

@@ -1,0 +1,15 @@
+{
+  "name": "Termux-OS Control Panel",
+  "short_name": "Termux-OS",
+  "description": "Manage runtime state, Packages, Services and Framework updates on this phone.",
+  "start_url": "/admin",
+  "scope": "/admin",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#e9eef2",
+  "theme_color": "#18212b",
+  "icons": [
+    { "src": "/admin/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/admin/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

@@ -56,6 +56,14 @@ done
 echo "=== 030 Admin Session + Shell smoke（隔离、不连手机）==="
 echo "--- 1. 公开登录入口 / 受保护页面 ---"
 if curl -sf "$BASE/health" >/dev/null; then ok "temporary Framework started"; else bad "temporary Framework started"; fi
+# 這套 smoke 測的是登入之後的 Shell，所以先把 Setup 走完，讓 /admin 回到一般的登入入口。
+# （未認領的設備上 /admin 會先導向 Setup，那條路徑由 smoke-user-access.sh 覆蓋。）
+SETUP_TOKEN=$(curl -sf "$BASE/api/admin/setup" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("setup_token",""))' 2>/dev/null || true)
+if [ -n "$SETUP_TOKEN" ]; then
+  curl -sf -X POST -H 'Content-Type: application/json' \
+    -d "{\"setup_token\":\"$SETUP_TOKEN\",\"use_previous_config\":true}" "$BASE/api/admin/setup" >/dev/null || true
+fi
 if curl -sf "$BASE/admin" | grep -q 'Administrator password'; then ok "/admin shows Login without session"; else bad "/admin shows Login without session"; fi
 if ! curl -sf "$BASE/admin" | grep -Eq 'admin token|id=\"token\"'; then ok "Login contains no fixed API token"; else bad "Login contains no fixed API token"; fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/admin/status/overview")"
@@ -186,10 +194,16 @@ if grep -q 'name=\"viewport\"' "$ROOT/web/admin/index.html" \
 else
   bad "Shell has explicit mobile layout"
 fi
-if ! grep -rqE 'localStorage|id="token"' "$ROOT/web/admin"; then
+# 這條守的是「瀏覽器裡不留長期憑證」。原本靠「完全不准出現 localStorage」來保證，
+# 但那也擋掉了與憑證無關的偏好（例如安裝提示關掉沒有）。改成逐一檢查每一處
+# localStorage/sessionStorage 的鍵名：只有明確列出的偏好可以存，其餘一律不合格。
+ALLOWED_STORAGE_KEY='INSTALL_DISMISSED|termux-os.install-dismissed'
+STORAGE_HITS=$(grep -rnE 'localStorage|sessionStorage' "$ROOT/web/admin" || true)
+BAD_STORAGE=$(echo "$STORAGE_HITS" | grep -vE "$ALLOWED_STORAGE_KEY" | grep -E 'localStorage|sessionStorage' || true)
+if [ -z "$BAD_STORAGE" ] && ! grep -rq 'id="token"' "$ROOT/web/admin"; then
   ok "Admin WebUI stores no long-lived token"
 else
-  bad "Admin WebUI stores no long-lived token"
+  bad "Admin WebUI stores no long-lived token" "$BAD_STORAGE"
 fi
 
 if grep -q 'Reconnecting to Framework' "$ROOT/web/admin/admin-controls.js" \

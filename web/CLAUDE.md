@@ -1,6 +1,6 @@
 # Web directory contract
 
-This directory contains the Framework-owned administration shell. It uses the HttpOnly browser session and CSRF APIs, stores no long-lived credential in browser storage, and renders only real Core pages plus Package-owned menu entries. Keep it responsive, accessible, dependency-free, and English by default.
+This directory contains the Framework-owned administration shell. It uses the HttpOnly browser session and CSRF APIs, stores no credential in browser storage — only named interface preferences such as whether the install prompt was dismissed — and renders only real Core pages plus Package-owned menu entries. Keep it responsive, accessible, dependency-free, and English by default.
 
 The Packages group exposes `Package Setting` as its operational control page.
 Its writes use the authenticated Admin API: port edits are persisted before a
@@ -22,3 +22,18 @@ Package cards render the Package's `admin.title` with its public `publisher`
 suffix when present. The public `name` remains searchable metadata. A valid
 HTTPS `release.repository` on GitHub is rendered as an accessible GitHub
 source link; the shell never invents a repository URL from a Package ID.
+
+`setup.html` is the entry a freshly installed or freshly updated device shows instead of the login
+form. It presents the generated administrator password and System Key once, offers to replace the
+password, and asks whether to keep the previous version's settings. The server only answers it for
+local requests, so the page must never be reachable from another machine; the same applies to the
+post-update review it also renders.
+
+The shell is installable. `manifest.webmanifest` and `sw.js` are served under `/admin`, and every
+administration HTML response carries the manifest link and the worker registration, so the entry
+point does not depend on which page the user happened to open first. The worker caches the shell
+only and never an API response: a control panel showing yesterday's service states is worse than one
+that admits it cannot reach the Framework, because the user acts on what it shows. Its cache name
+carries the Framework version, or an updated device would keep running the previous release's
+JavaScript against the new API. Installation requires a secure context, so it is offered on
+`127.0.0.1` and not over a LAN address; the prompt simply does not appear there.

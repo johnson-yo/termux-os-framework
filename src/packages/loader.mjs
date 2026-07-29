@@ -174,7 +174,20 @@ export async function loadSinglePackage({ dir, expectId, source, install = null,
 // ============================================================
 // Package Context —— register(context) 能看到的全部能力（021 §5：不開放 Framework 內部對象）
 // ============================================================
-function makeContext(record, config, configPath, overrides = null) {
+/**
+ * Where a Package keeps its own settings: `config/` under the Package root, beside `versions/`
+ * rather than inside one, so upgrading the Package does not discard what the user configured.
+ * A workspace instance is deliberately given its own directory — it exists to try changes out,
+ * and writing them into the released Package's settings is what coexistence is meant to prevent.
+ */
+function packageConfigRoot(record, overrides) {
+  if (overrides?.persistRoot) return path.join(overrides.persistRoot, 'config');
+  if (record.packageRoot) return path.join(record.packageRoot, 'config');
+  // 原始目錄掃描（self-test / doctor）沒有安裝根，就落在包目錄旁邊。
+  return path.join(record.dir, 'config');
+}
+
+function makeContext(record, config, configPath, overrides = null, saveConfig = null) {
   const id = record.id;
   const tag = overrides?.devMode ? `[dev ${id}]` : `[pkg ${id}]`;
   // A dev instance runs alongside the released package of the same id, so every
@@ -192,6 +205,29 @@ function makeContext(record, config, configPath, overrides = null) {
     // 029：Dev Mount 默認注入隔離資料區（overrides.persistRoot），不碰正式 config/data
     persistRoot: overrides?.persistRoot ?? (fs.existsSync('/sdcard/termux-os')
       ? '/sdcard/termux-os/framework' : path.join(frameworkRoot, '.runtime/persist')),
+    // Package 自己的設定檔位置。過去 SDK 模板教大家寫 persistRoot/conf/<名字>，也就是
+    // Framework 自己的 conf 目錄：於是 Package 的設定跟著 Framework 的持久樹走，重裝
+    // Framework 就可能連 Package 的設定一起丟，而更新邊界檢查也在逐位元組盯著那棵樹。
+    // 現在放在 Package 根目錄下的 config/，與 versions/ 平行——所以它同時活過
+    // Framework 更新與 Package 自身升級。舊位置存在時第一次取用就搬過來，不用誰去改。
+    configRoot: packageConfigRoot(record, overrides),
+    configFile(name = `${record.packageId ?? id}.v1.json`) {
+      const root = packageConfigRoot(record, overrides);
+      const target = path.join(root, name);
+      if (!fs.existsSync(target)) {
+        const legacy = path.join(overrides?.persistRoot
+          ?? (fs.existsSync('/sdcard/termux-os') ? '/sdcard/termux-os/framework' : path.join(frameworkRoot, '.runtime/persist')),
+        'conf', name);
+        if (fs.existsSync(legacy)) {
+          fs.mkdirSync(root, { recursive: true });
+          fs.copyFileSync(legacy, target);
+          // 舊檔留著不刪：降級回舊版本的 Package 仍然要讀得到它。
+          console.log(tag, `moved configuration from ${legacy} to ${target}`);
+        }
+      }
+      fs.mkdirSync(root, { recursive: true });
+      return target;
+    },
     // framework 級配置的受限寫口：只許 patch 自己相關的 integrations 子樹（android-app 等 Adapter 用）；
     // in-memory 同步更新（Action 閉包持同一對象引用，保存即生效），並持久化到當前 CONFIG 文件
     frameworkConfig: {
@@ -203,7 +239,9 @@ function makeContext(record, config, configPath, overrides = null) {
           if (!allowed.includes(k)) throw new Error(`integration field "${k}" not updatable`);
         }
         Object.assign(config.integrations[name], patch);
-        if (configPath) fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+        // 交給 Framework 落盤：它知道哪些欄位是運行期解析出來的，不可寫入檔案。
+        if (saveConfig) saveConfig();
+        else if (configPath) fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
         return config.integrations[name];
       },
     },
@@ -359,8 +397,8 @@ function makeContext(record, config, configPath, overrides = null) {
 //      維持原始目錄掃描語義
 // ============================================================
 async function loadCandidate({ dir, expectId, source, install, contextOverrides = null, cacheBust = false,
-  workspaceSlug = null },
-  { frameworkVersion, config, configPath, log }) {
+  workspaceSlug = null, packageRoot = null },
+  { frameworkVersion, config, configPath, saveConfig, log }) {
   const manifestPath = path.join(dir, MANIFEST_FILENAME);
   if (!fs.existsSync(manifestPath)) {
     if (source === 'installed') {
@@ -398,7 +436,7 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
   if (existing) return fail(`${id}@${source}`, manifest, `duplicate package id "${id}": already provided by ${existing.dir} (${existing.source}), rejected for ${dir} (${source})`);
 
   const record = {
-    id, packageId, workspaceSlug, dir, manifest, source, install, status: 'loaded', error: null,
+    id, packageId, workspaceSlug, dir, packageRoot, manifest, source, install, status: 'loaded', error: null,
     webRoot: path.join(dir, path.dirname(manifest.entrypoints.webui)),
     registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], cleanups: [] },
   };
@@ -434,7 +472,7 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
     const mod = await import(entryUrl);
     if (typeof mod.register !== 'function') throw new Error('backend must export async function register(context)');
     packages.set(id, record); // 先入表：register 內的衝突錯誤能指回本 Package
-    await mod.register(makeContext(record, config, configPath, contextOverrides));
+    await mod.register(makeContext(record, config, configPath, contextOverrides, saveConfig));
     // 029 §12：Manifest 宣告的 integration/artifact 契約在載入成功後登記（先到先得，卸載時回收）
     record.registered.integrations = [];
     record.registered.artifactContracts = [];
@@ -472,8 +510,8 @@ const scanRawRoot = (root, source) => {
   return dirs.map((dirname) => ({ dir: path.join(root, dirname), expectId: dirname, source, install: null }));
 };
 
-export async function loadPackages({ roots, frameworkVersion, config = {}, configPath = null, log = console.log } = {}) {
-  const opts = { frameworkVersion, config, configPath, log };
+export async function loadPackages({ roots, frameworkVersion, config = {}, configPath = null, saveConfig = null, log = console.log } = {}) {
+  const opts = { frameworkVersion, config, configPath, saveConfig, log };
   const candidates = [];
 
   if (roots) {
@@ -486,7 +524,7 @@ export async function loadPackages({ roots, frameworkVersion, config = {}, confi
       log(`package ${e.id}: FAILED — ${e.error}`);
     }
     for (const en of entries) {
-      candidates.push({ dir: en.dir, expectId: en.id, source: 'installed',
+      candidates.push({ dir: en.dir, expectId: en.id, source: 'installed', packageRoot: en.packageRoot,
         install: { version: en.active.active_version, previous_version: en.active.previous_version ?? null,
           archive_sha256: en.active.archive_sha256 ?? null, installed_at: en.active.installed_at ?? null } });
     }

@@ -44,6 +44,8 @@ async function loadPage() {
 }
 
 async function boot() {
+  // 先掛監聽再等後端：beforeinstallprompt 可能在頁面剛載入時就觸發，晚一步就永遠收不到。
+  setupInstallPrompt();
   await window.TermuxOS.ready;
   const [menuResponse, statusResponse] = await Promise.all([
     api('/api/admin/menu'),

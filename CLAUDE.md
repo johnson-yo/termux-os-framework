@@ -46,6 +46,14 @@ There is deliberately no first-party `packages/` directory. Package source is de
 - Keep localized user content outside file headers; localization is allowed when it is a deliberate product concern.
 - Do not add a device IP, SSH alias, workstation path, private hostname, access token, or default password.
 - Do not push or create a remote unless the repository owner explicitly requests it.
+- Read configuration through the migration in `src/system/config-migrate.mjs`; never dereference a
+  stored setting directly. A bare `CFG.section.key` throws on any device installed before that key
+  existed, which fails the update and rolls the device back — the further behind it is, the harder
+  it becomes to catch up.
+- Store overrides, not defaults. A default written into a device's configuration file can never be
+  changed by a later release, because it is transplanted back over the new one.
+- Assume the user never opens Termux. Anything they must do to run this system has to be possible in
+  the browser, including reading the credentials the installer generated for them.
 - Update the nearest `CLAUDE.md` when a directory contract changes.
 
 ## Required checks

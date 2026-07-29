@@ -14,7 +14,7 @@ import * as stage from '../stage/manager.mjs';
 
 export { hashWorkspace };
 
-let CFG = null;               // { frameworkRoot, frameworkVersion, config, configPath, log }
+let CFG = null;               // { frameworkRoot, frameworkVersion, config, configPath, saveConfig, log }
 const mounts = new Map();     // id → mount 記錄（見 devMount）
 
 const stateFile = () => path.join(CFG.frameworkRoot, '.runtime/dev/packages.v1.json');
