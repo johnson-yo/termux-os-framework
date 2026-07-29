@@ -275,6 +275,17 @@ if (process.argv.includes('--self-test')) {
     // Keys this version does not declare have no default to compare against, so they are always in.
     const withKept = migrateConfig(defaults, { device_name: 'phone', server: { host: '0.0.0.0', port: 8980 }, retired: { x: 1 } }).config;
     test('undeclared keys are always compared', configFingerprint(withKept, defaults).includes('retired.x=1'));
+
+    // Devices installed before this scheme have every default written out. Migration finds nothing
+    // to do on such a file, so unless normalisation is driven by the file's shape it keeps that
+    // form forever — and that form is exactly what stops a later release changing a default.
+    const materialised = { ...defaults };
+    const { report: noop } = migrateConfig(defaults, materialised);
+    test('a fully materialised file gives migration nothing to report', !migrationChangedConfig(noop));
+    test('but it is not yet in stored form',
+      JSON.stringify(materialised) !== JSON.stringify(configOverrides(materialised, defaults)));
+    test('normalising it leaves only the schema',
+      JSON.stringify(configOverrides(materialised, defaults)) === JSON.stringify({ schema: defaults.schema }));
   }
 
   // A missing or corrupt file must still produce something the server can start on.

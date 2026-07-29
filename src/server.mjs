@@ -89,7 +89,11 @@ function loadConfiguration() {
   // conf 就是 defaults 本身時（開發機直接跑源碼樹）沒有東西要遷移，也不該回寫。
   if (CONFIG_PATH === CONFIG_DEFAULTS_PATH) return { config: stored ?? defaults, report: null, defaults };
   const { config, report } = migrateConfig(defaults, stored, { defaultsVersion: FRAMEWORK_VERSION_RAW });
-  if (stored === null || migrationChangedConfig(report)) {
+  // 也要在「內容沒變、形式不對」時重寫。既有設備的檔案是整份預設被複製進去的，
+  // 遷移對它無事可做，於是它會永遠保持那個形態——而那正是讓日後改預設到不了設備的形態。
+  const overrides = configOverrides(config, defaults);
+  const normalized = stored !== null && JSON.stringify(stored) === JSON.stringify(overrides);
+  if (stored === null || migrationChangedConfig(report) || !normalized) {
     // 先留一份原件再覆寫：遷移報告說了什麼，使用者要能對照原始檔案自己核。
     // 檔名記的是「被哪一版遷移之前的樣子」，固定不變，所以重啟不會堆出一串備份。
     if (stored !== null) {
@@ -98,7 +102,7 @@ function loadConfiguration() {
     }
     try {
       fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
-      fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(configOverrides(config, defaults), null, 2)}\n`);
+      fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(overrides, null, 2)}\n`);
     } catch (error) {
       console.warn('[config] 遷移結果無法寫回，本次以記憶體中的配置運行:', error.message);
     }
