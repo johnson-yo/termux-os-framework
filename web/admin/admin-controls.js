@@ -7,6 +7,18 @@
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
 
+// 引擎与作业状态是 API 值，不是给人读的词。显示时映射一次；映射不到就原样显示，
+// 免得出现新状态时界面反而说不出它是什么。
+const STATE_WORDS = {
+  success: '成功', failed: '失败', failed_rolled_back: '失败并已回滚', queued: '排队中',
+  running: '执行中', complete: '完成', preflight: '预检', 'preflight failed': '预检失败',
+  preflight_failed: '预检失败', preflight_passed: '预检通过', rollback: '回滚', interrupted: '中断',
+  install: '安装', check: '检查', uninstall: '卸载', update: '更新', uploaded: '已上传',
+  registry_upgrade: '从 Registry 更新', rollback_job: '回滚', preflight_update: '预检',
+  applied: '已安装', installed: '已安装', backup_skipped: '跳过备份',
+};
+const stateWord = (value) => STATE_WORDS[String(value ?? '').trim()] ?? value ?? '未知';
+
 const frameworkUpdateKind = (state) => {
   if (state?.status === 'success') return 'good';
   if (['failed', 'failed_rolled_back'].includes(state?.status)) return 'bad';
@@ -17,8 +29,8 @@ function frameworkJobCard(job) {
   const details = document.createElement('details'); details.className = 'job-row';
   if (['queued', 'running'].includes(job.status)) details.open = true;
   const summary = document.createElement('summary');
-  summary.append(text('b', `${job.action} · ${job.target?.upload_id ?? 'last-good'}`),
-    text('span', `${job.stage} · ${job.status}`, `status ${frameworkUpdateKind(job)}`));
+  summary.append(text('b', `${stateWord(job.action)} · ${job.target?.upload_id ?? 'last-good'}`),
+    text('span', `${stateWord(job.stage)} · ${stateWord(job.status)}`, `status ${frameworkUpdateKind(job)}`));
   details.append(summary);
   if (['queued', 'running'].includes(job.status)) details.append(document.createElement('progress'));
   if (job.output) details.append(text('pre', job.output));
@@ -28,8 +40,8 @@ function frameworkJobCard(job) {
 function frameworkHistoryCard(entry) {
   const row = document.createElement('details'); row.className = 'job-row';
   const summary = document.createElement('summary');
-  summary.append(text('b', `${entry.previous_build ?? 'unknown'} → ${entry.candidate_build ?? 'unknown'}`),
-    text('span', `${entry.result}${entry.rollback ? ' · rollback' : ''}`, `status ${entry.result === 'success' ? 'good' : 'bad'}`));
+  summary.append(text('b', `${entry.previous_build ?? '未知'} → ${entry.candidate_build ?? '未知'}`),
+    text('span', `${stateWord(entry.result)}${entry.rollback ? ' · 已回滚' : ''}`, `status ${entry.result === 'success' ? 'good' : 'bad'}`));
   row.append(summary, text('p', entry.message ?? 'No message recorded.', 'meta'),
     text('small', entry.at ? new Date(entry.at).toLocaleString() : 'n/a'));
   return row;
@@ -41,20 +53,20 @@ function showManualDownloadDialog({ title, manual, nextStep }) {
     dialog.className = 'confirm-dialog manual-download-dialog';
     const form = document.createElement('form'); form.method = 'dialog';
     const heading = document.createElement('h2'); heading.textContent = title;
-    const intro = text('p', 'The direct GitHub source and the Termux-OS Registry could not be downloaded. Copy the GitHub Release page URL, download the verified .tar.gz yourself, then return here and install the file.', 'description');
-    const label = document.createElement('label'); label.textContent = 'GitHub Release page';
+    const intro = text('p', 'GitHub 直连和 Termux-OS Registry 都下载失败。可以复制 GitHub Release 页面地址，自己下载已验证的 .tar.gz，再回到这里从文件安装。', 'description');
+    const label = document.createElement('label'); label.textContent = 'GitHub Release 页面';
     const row = document.createElement('div'); row.className = 'manual-download-url-row';
     const input = document.createElement('input'); input.type = 'text'; input.value = manual.release_url; input.readOnly = true; input.select();
-    const copy = actionButton('Copy URL', '', async () => {
+    const copy = actionButton('复制地址', '', async () => {
       const copied = await copyText(manual.release_url);
       copy.textContent = copied ? 'Copied' : 'Select and copy';
       if (!copied) { input.focus(); input.select(); }
     });
     row.append(input, copy);
-    const link = document.createElement('a'); link.href = manual.release_url; link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Open Release page'; link.className = 'button-link';
+    const link = document.createElement('a'); link.href = manual.release_url; link.target = '_blank'; link.rel = 'noopener'; link.textContent = '打开 Release 页面'; link.className = 'button-link';
     form.append(heading, intro, label, row, link, text('p', nextStep, 'alert warning'));
     const actions = document.createElement('div'); actions.className = 'button-row';
-    actions.append(actionButton('Close', '', () => dialog.close('close')));
+    actions.append(actionButton('关闭', '', () => dialog.close('close')));
     form.append(actions); dialog.append(form); document.body.append(dialog);
     dialog.addEventListener('close', () => { dialog.remove(); resolve(); }, { once: true });
     dialog.showModal();
@@ -75,16 +87,16 @@ async function runFrameworkPreflight(upload) {
 
 async function runFrameworkUpdate(upload, currentBuild) {
   const accepted = await confirmAction({
-    title: 'Install Framework update',
+    title: '安装 Framework 更新',
     label: 'Update Framework',
     details: [
-      ['Current build', currentBuild ?? 'unknown'],
-      ['Update file', upload.original_name],
-      ['Update build', upload.preflight?.candidate_build ?? 'validated by formal check'],
+      ['当前构建', currentBuild ?? '未知'],
+      ['更新文件', upload.original_name],
+      ['目标构建', upload.preflight?.candidate_build ?? 'validated by formal check'],
       ['File SHA-256', upload.sha256],
-      ['Preserved', 'Installed Packages, persistent config/data and assets'],
-      ['Success check', 'Browser Login, admin menu, integrity, Package inventory and boundary comparison'],
-      ['Failure behavior', 'the existing engine automatically restores the previous version and records the evidence'],
+      ['会保留', 'Installed Packages, persistent config/data and assets'],
+      ['成功判据', 'Browser Login, admin menu, integrity, Package inventory and boundary comparison'],
+      ['失败时的行为', 'the existing engine automatically restores the previous version and records the evidence'],
     ],
   });
   if (!accepted) return;
@@ -101,14 +113,14 @@ async function runFrameworkUpdate(upload, currentBuild) {
 
 async function runFrameworkRollback(lastGood, currentBuild) {
   const accepted = await confirmAction({
-    title: 'Restore previous Framework version',
-    label: 'Restore',
+    title: '恢复上一个 Framework 版本',
+    label: '恢复',
     details: [
-      ['Current build', currentBuild ?? 'unknown'],
-      ['Restore previous version', lastGood.build],
-      ['Preserved', 'Installed Packages, persistent config/data and assets'],
-      ['Success check', 'the existing engine repeats core and boundary checks'],
-      ['Failure behavior', 'the existing engine restores the operation-start runtime when possible'],
+      ['当前构建', currentBuild ?? '未知'],
+      ['恢复上一个版本', lastGood.build],
+      ['会保留', 'Installed Packages, persistent config/data and assets'],
+      ['成功判据', 'the existing engine repeats core and boundary checks'],
+      ['失败时的行为', 'the existing engine restores the operation-start runtime when possible'],
     ],
   });
   if (!accepted) return;
@@ -138,14 +150,14 @@ async function runFrameworkRegistryUpdate(registry, currentBuild, entry = null) 
     selection: registry.selection };
   const action = FRAMEWORK_VERSION_ACTIONS[target.relation] ?? FRAMEWORK_VERSION_ACTIONS.unknown;
   const details = [
-    ['Current version', currentBuild ?? registry.current_version ?? 'unknown'],
+    ['当前版本', currentBuild ?? registry.current_version ?? '未知'],
     [target.relation === 'older' ? '降级到' : target.relation === 'current' ? '重新安装' : 'New version', target.version],
     ['Source', `${registry.repository} · ${target.selection?.upstream_ref ?? 'verified Registry source'}`],
     ['Size', formatBytes(target.size)],
     ['File SHA-256', target.sha256 ?? 'not available'],
-    ['Update path', 'download through Package Registry, then independent installer'],
-    ['Preserved', 'Framework configuration, credentials, Packages, models and caches'],
-    ['Failure behavior', 'installer restores the previous runtime before reporting failure'],
+    ['更新路径', 'download through Package Registry, then independent installer'],
+    ['会保留', 'Framework configuration, credentials, Packages, models and caches'],
+    ['失败时的行为', 'installer restores the previous runtime before reporting failure'],
   ];
   if (target.relation === 'older') {
     details.push(['⚠ 降级风险', '旧版本可能读不懂当前版本写下的配置；如果起不来，用下方 Restore previous version 退回。']);
@@ -160,7 +172,7 @@ async function runFrameworkRegistryUpdate(registry, currentBuild, entry = null) 
   } catch (error) {
     if (error?.data?.manual?.release_url) {
       await showManualDownloadDialog({
-        title: 'Download Framework update manually',
+        title: '手动下载 Framework 更新',
         manual: error.data.manual,
         nextStep: 'After transferring the archive to this device, use Update files → Upload update file, run the check, and then update Framework.',
       });
@@ -173,21 +185,21 @@ async function runFrameworkRegistryUpdate(registry, currentBuild, entry = null) 
 function frameworkUploadCard(upload, currentBuild, disabled) {
   const card = document.createElement('section'); card.className = 'release-card';
   card.append(text('b', upload.original_name), text('code', upload.sha256),
-    valueRow('Size', formatBytes(upload.size)),
-    statusRow('Check', upload.status.replaceAll('_', ' '),
+    valueRow('大小', formatBytes(upload.size)),
+    statusRow('检查', stateWord(upload.status.replaceAll('_', ' ')),
       upload.status === 'preflight_passed' || upload.status === 'applied' ? 'good'
         : upload.status === 'preflight_failed' ? 'bad' : 'neutral'));
-  if (upload.preflight?.candidate_build) card.append(valueRow('Update build', upload.preflight.candidate_build));
+  if (upload.preflight?.candidate_build) card.append(valueRow('目标构建', upload.preflight.candidate_build));
   const controls = document.createElement('div'); controls.className = 'button-row';
   if (['uploaded', 'preflight_failed'].includes(upload.status)) {
-    controls.append(actionButton('Run check', '', () => runFrameworkPreflight(upload), disabled));
+    controls.append(actionButton('运行检查', '', () => runFrameworkPreflight(upload), disabled));
   }
   if (upload.status === 'preflight_passed') {
-    controls.append(actionButton('Update Framework', 'primary', () => runFrameworkUpdate(upload, currentBuild), disabled));
+    controls.append(actionButton('更新 Framework', 'primary', () => runFrameworkUpdate(upload, currentBuild), disabled));
   }
   if (upload.preflight?.output) {
     const output = document.createElement('details');
-    output.append(Object.assign(document.createElement('summary'), { textContent: 'Check details' }), text('pre', upload.preflight.output));
+    output.append(Object.assign(document.createElement('summary'), { textContent: '检查详情' }), text('pre', upload.preflight.output));
     card.append(output);
   }
   card.append(controls);
@@ -197,24 +209,27 @@ function frameworkUploadCard(upload, currentBuild, disabled) {
 function renderFrameworkUpdate(data) {
   if (frameworkUpdatePollTimer) { clearTimeout(frameworkUpdatePollTimer); frameworkUpdatePollTimer = null; }
   frameworkUpdateReconnectSince = 0;
-  const update = section('Framework Update');
-  update.body.append(text('p', 'Upload an update file here. The Framework checks it first, then updates or restores the previous version.', 'description'));
+  const update = section('Framework');
   if (frameworkUpdateNotice) update.body.append(text('p', frameworkUpdateNotice.text, `alert ${frameworkUpdateNotice.kind}`));
   const state = data.engine_state;
-  update.body.append(
-    valueRow('Current build', data.current_build),
-    statusRow('Latest engine result', state ? `${state.stage} · ${state.status}` : 'no update recorded', frameworkUpdateKind(state)),
-    valueRow('Latest message', state?.message ?? 'none'),
-    valueRow('Update engine', data.engine_locked ? 'busy' : 'idle'),
-  );
+  update.body.append(valueRow('当前版本', data.current_build));
+  // 引擎状态只在它不是「闲着而且上一次成功」时才值得占位置：
+  // 平时把它常驻在首屏，等于让每次打开这一页都先读一遍与自己无关的内部状态。
+  if (data.engine_locked || (state && state.status !== 'success')) {
+    update.body.append(
+      statusRow('更新引擎', data.engine_locked ? '正在执行' : `${stateWord(state.stage)} · ${stateWord(state.status)}`,
+        frameworkUpdateKind(state)),
+      valueRow('说明', state?.message ?? '无'),
+    );
+  }
 
-  const registry = section('Framework Registry');
+  const registry = section('Framework 版本');
   const frameworkCatalog = data.registry;
   const registryActionDisabled = !canWrite() || Boolean(data.active_job) || data.engine_locked;
-  const refreshRegistryButton = actionButton('Refresh Registry', '', async () => {
+  const refreshRegistryButton = actionButton('更新列表', '', async () => {
     try {
       await apiData('/api/admin/package-registry/refresh', { method: 'POST', body: '{}' });
-      frameworkUpdateNotice = { kind: 'good', text: 'Registry catalog refreshed.' };
+      frameworkUpdateNotice = { kind: 'good', text: '目录已更新。' };
     } catch (error) {
       frameworkUpdateNotice = { kind: 'bad', text: `Registry refresh: ${error.message ?? error}` };
     }
@@ -223,11 +238,11 @@ function renderFrameworkUpdate(data) {
   if (!frameworkCatalog?.available) {
     const controls = document.createElement('div'); controls.className = 'button-row';
     controls.append(refreshRegistryButton);
-    registry.body.append(text('p', 'No verified Framework version is available in the cached Registry catalog.', 'empty'), controls);
+    registry.body.append(text('p', '缓存的目录里没有已验证的 Framework 版本。', 'empty'), controls);
   } else {
     registry.body.append(
-      valueRow('Source', frameworkCatalog.repository),
-      valueRow('Current version', frameworkCatalog.current_version ?? data.current_build ?? 'unknown'),
+      valueRow('来源', frameworkCatalog.repository),
+      valueRow('当前版本', frameworkCatalog.current_version ?? data.current_build ?? 'unknown'),
     );
 
     // 掛載中的 Dev Runtime 會擋下更新。把「停止全部挂载」直接放在這裡——
@@ -254,38 +269,61 @@ function renderFrameworkUpdate(data) {
     // 檔案壞了要能重裝當前版本，新版有問題要能挑一個舊版裝回去。
     const busy = !canWrite() || Boolean(data.active_job) || data.engine_locked;
     const versions = frameworkCatalog.versions ?? [];
+    const versionRow = (entry) => {
+      const row = document.createElement('div'); row.className = 'version-row';
+      const label = document.createElement('div'); label.className = 'version-label';
+      label.append(text('span', entry.version, 'version-name'));
+      if (entry.relation === 'current') label.append(text('span', '当前', 'status good'));
+      const meta = [];
+      if (entry.published_at) meta.push(String(entry.published_at).slice(0, 10));
+      if (entry.size) meta.push(formatBytes(entry.size));
+      if (meta.length) label.append(text('span', meta.join(' · '), 'version-meta'));
+      const action = FRAMEWORK_VERSION_ACTIONS[entry.relation] ?? FRAMEWORK_VERSION_ACTIONS.unknown;
+      row.append(label, actionButton(action.label, action.variant,
+        () => runFrameworkRegistryUpdate(frameworkCatalog, data.current_build, entry), busy));
+      return row;
+    };
+    // 平时只需要看到「能升到哪」和「当前这版能不能重装」。把每一个历史版本都摆出来，
+    // 等于要用户在一串自己从没用过的版本号里找那一个有意义的。真要退回去，
+    // 下面的「恢复上一个版本」才是有备份保证的路径；这里的旧版本只是最后手段。
+    const primary = versions.filter((entry) => entry.relation === 'newer' || entry.relation === 'current');
+    const older = versions.filter((entry) => entry.relation === 'older' || entry.relation === 'unknown');
     if (!versions.length) {
-      registry.body.append(text('p', 'The cached catalog lists no verified archive for this project.', 'empty'));
+      registry.body.append(text('p', '缓存的目录里没有这个项目的已验证安装包。', 'empty'));
     } else {
       const list = document.createElement('div'); list.className = 'version-list';
-      for (const entry of versions) {
-        const row = document.createElement('div'); row.className = 'version-row';
-        const label = document.createElement('div'); label.className = 'version-label';
-        const name = text('span', entry.version, 'version-name');
-        label.append(name);
-        if (entry.relation === 'current') label.append(text('span', '当前', 'status good'));
-        const meta = [];
-        if (entry.published_at) meta.push(String(entry.published_at).slice(0, 10));
-        if (entry.size) meta.push(formatBytes(entry.size));
-        if (meta.length) label.append(text('span', meta.join(' · '), 'version-meta'));
-        const action = FRAMEWORK_VERSION_ACTIONS[entry.relation] ?? FRAMEWORK_VERSION_ACTIONS.unknown;
-        row.append(label, actionButton(action.label, action.variant,
-          () => runFrameworkRegistryUpdate(frameworkCatalog, data.current_build, entry), busy));
-        list.append(row);
+      for (const entry of primary) list.append(versionRow(entry));
+      // 没有可升级项时要说出来。留一片空白，使用者读到的是「加载失败」而不是「已经最新」。
+      if (!primary.length) {
+        registry.body.append(text('p',
+          `目录里没有比 ${frameworkCatalog.current_version ?? data.current_build} 更新的版本，也没有它自己的安装包。`,
+          'empty'));
       }
       registry.body.append(list);
+      if (older.length) {
+        const more = document.createElement('details');
+        more.append(text('summary', `更早的版本（${older.length}）`));
+        const oldList = document.createElement('div'); oldList.className = 'version-list';
+        oldList.append(text('p', '装回旧版本前请先确认：旧版本可能读不懂当前版本写下的配置。', 'description'));
+        for (const entry of older) oldList.append(versionRow(entry));
+        more.append(oldList);
+        registry.body.append(more);
+      }
     }
   }
   update.body.append(registry.card);
 
-  const candidates = section('Update files');
+  // 离线安装仍然需要，但它不该常驻首屏：绝大多数更新走 Registry，
+  // 而「上传过哪些文件」是过程信息，不是这一页要回答的问题。
+  const candidates = section('从文件安装');
+  candidates.body.append(text('p', '没有网络时，可以在这里上传 Framework 的 .tar.gz 安装包。', 'description'));
   const uploadWrap = document.createElement('div'); uploadWrap.className = 'upload-row';
   const input = document.createElement('input'); input.type = 'file'; input.accept = '.tar.gz,application/gzip';
   const progress = document.createElement('progress'); progress.hidden = true;
-  const uploadButton = actionButton('Upload update file', 'primary', async () => {
+  const uploadButton = actionButton('上传安装包', '', async () => {
     const file = input.files?.[0];
     if (!file) {
-      frameworkUpdateNotice = { kind: 'bad', text: 'Choose one Framework .tar.gz update file first.' };
+      frameworkUpdateNotice = { kind: 'bad', text: '请先选择一个 Framework 的 .tar.gz 安装包。' };
       return loadFrameworkUpdate();
     }
     uploadButton.disabled = true; progress.hidden = false;
@@ -293,34 +331,62 @@ function renderFrameworkUpdate(data) {
       const result = await apiData('/api/admin/framework-update/uploads', {
         method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name) }, body: file,
       });
-      frameworkUpdateNotice = { kind: 'good', text: `Uploaded ${result.upload.original_name}. Run the full check before the update can be installed.` };
+      frameworkUpdateNotice = { kind: 'good', text: `已上传 ${result.upload.original_name}，先运行检查才能安装。` };
     } catch (error) {
-      frameworkUpdateNotice = { kind: 'bad', text: `Upload: ${error.message ?? error}` };
+      frameworkUpdateNotice = { kind: 'bad', text: `上传失败：${error.message ?? error}` };
     }
     await loadFrameworkUpdate();
   }, !canWrite() || Boolean(data.active_job) || data.engine_locked);
   uploadWrap.append(input, uploadButton, progress); candidates.body.append(uploadWrap);
-  if (!data.uploads?.length) candidates.body.append(text('p', 'No Framework update file has been uploaded.', 'empty'));
-  else candidates.body.append(...data.uploads.map((upload) => frameworkUploadCard(upload, data.current_build,
-    !canWrite() || Boolean(data.active_job) || data.engine_locked)));
+  // 只有还能走向安装的候选才留在主流程里。检查没通过的是死路，留在这里会一直堆着——
+  // 设备上就积了几个月前失败的文件。但也不能直接不显示，否则那些文件永远删不掉，
+  // 所以收进一个折叠项，连同「丢弃」一起。
+  const busyNow = !canWrite() || Boolean(data.active_job) || data.engine_locked;
+  const uploads = data.uploads ?? [];
+  const actionable = uploads.filter((upload) => ['uploaded', 'preflight_passed'].includes(upload.status));
+  const dead = uploads.filter((upload) => !['uploaded', 'preflight_passed', 'applied'].includes(upload.status));
+  if (actionable.length) {
+    candidates.body.append(...actionable.map((upload) => frameworkUploadCard(upload, data.current_build, busyNow)));
+  }
+  if (dead.length) {
+    const failed = document.createElement('details');
+    failed.append(text('summary', `检查未通过的文件（${dead.length}）`));
+    for (const upload of dead) failed.append(frameworkUploadCard(upload, data.current_build, busyNow));
+    candidates.body.append(failed);
+  }
 
-  const recovery = section('Restore previous version');
-  if (!data.last_good?.build) recovery.body.append(text('p', 'No verified previous-version backup is available; Restore is unavailable.', 'empty'));
+  const recovery = section('恢复上一个版本');
+  if (!data.last_good?.build) recovery.body.append(text('p', '没有已验证的上一版本备份，无法恢复。', 'empty'));
   else {
-    recovery.body.append(valueRow('Previous build', data.last_good.build), valueRow('Saved', data.last_good.created_at ? new Date(data.last_good.created_at).toLocaleString() : 'n/a'),
-      valueRow('Health at backup', data.last_good.health ?? 'n/a'));
-    recovery.body.append(actionButton('Restore previous version', 'danger-text', () => runFrameworkRollback(data.last_good, data.current_build),
+    recovery.body.append(valueRow('上一个构建', data.last_good.build), valueRow('保存于', data.last_good.created_at ? new Date(data.last_good.created_at).toLocaleString() : 'n/a'),
+      valueRow('备份时的健康状态', data.last_good.health ?? 'n/a'));
+    recovery.body.append(actionButton('恢复上一个版本', 'danger-text', () => runFrameworkRollback(data.last_good, data.current_build),
       !canWrite() || Boolean(data.active_job) || data.engine_locked));
   }
 
-  const jobs = section('Web operation progress');
-  if (!data.jobs?.length) jobs.body.append(text('p', 'No Framework Web operation has been started.', 'empty'));
-  else jobs.body.append(...data.jobs.slice(0, 8).map(frameworkJobCard));
-  const history = section('Framework update history');
-  if (!data.history?.length) history.body.append(text('p', 'The update engine has no recorded history.', 'empty'));
-  else history.body.append(...data.history.map(frameworkHistoryCard));
-  replacePage(update.card, candidates.card, recovery.card, jobs.card, history.card);
+  // 作业进度与更新历史都是过程信息，统一在 Status / Logs 一处出现。
+  // 之前 Package 的作业列表已经这样收拢过，Framework 自己的却漏在了这里。
+  replacePage(update.card, candidates.card, recovery.card);
   if (data.active_job || data.engine_locked) frameworkUpdatePollTimer = setTimeout(() => loadFrameworkUpdate(), 1500);
+}
+
+/**
+ * Framework 的作业进度与更新历史，供 Status / Logs 使用。
+ *
+ * 这些是过程信息：出问题时要查，顺利时不需要。放在 Framework Update 页上，等于每次
+ * 想升个级都先读一遍与决定无关的记录。Package 的作业列表早就收拢到 Logs 了，
+ * Framework 自己的当时漏了。
+ */
+function renderFrameworkOperations(data) {
+  const wrap = document.createElement('div');
+  const jobs = section('Framework 操作进度');
+  if (!data.jobs?.length) jobs.body.append(text('p', '还没有从控制台发起过 Framework 操作。', 'empty'));
+  else jobs.body.append(...data.jobs.slice(0, 8).map(frameworkJobCard));
+  const history = section('Framework 更新历史');
+  if (!data.history?.length) history.body.append(text('p', '更新引擎没有留下记录。', 'empty'));
+  else history.body.append(...data.history.map(frameworkHistoryCard));
+  wrap.append(jobs.card, history.card);
+  return wrap;
 }
 
 async function loadFrameworkUpdate() {
@@ -330,7 +396,7 @@ async function loadFrameworkUpdate() {
     if (!frameworkUpdateReconnectSince) frameworkUpdateReconnectSince = Date.now();
     const seconds = Math.max(1, Math.floor((Date.now() - frameworkUpdateReconnectSince) / 1000));
     const reconnect = document.createElement('div'); reconnect.className = 'reconnect-state';
-    reconnect.append(text('p', 'Reconnecting to Framework. The external update engine continues and its persistent state will reappear here.', 'alert warning'),
+    reconnect.append(text('p', '正在重新连接 Framework。外部更新引擎仍在运行，状态恢复后会重新出现在这里。', 'alert warning'),
       text('small', `Waiting ${seconds}s…`), document.createElement('progress'));
     replacePage(reconnect);
     frameworkUpdatePollTimer = setTimeout(() => loadFrameworkUpdate(), 1500);
@@ -401,10 +467,10 @@ async function startInstalledAction(item, action) {
       ['Package ID', item.id],
       ['Current version', item.version],
       [rollback ? 'Restore version' : 'Installed code', rollback ? item.previous_version : 'will be removed'],
-      ['Services stopped', item.services.length ? item.services.join(', ') : 'none declared'],
-      ['Configuration / data', 'preserved'],
-      ['Provider bindings / desired state', 'preserved'],
-      ['Failure behavior', rollback ? 'Package Manager post-check reports failure' : 'operation result remains in job history'],
+      ['会停止的服务', item.services.length ? item.services.join(', ') : 'none declared'],
+      ['配置 / 数据', 'preserved'],
+      ['提供者绑定 / 期望状态', 'preserved'],
+      ['失败时的行为', rollback ? 'Package Manager post-check reports failure' : 'operation result remains in job history'],
     ],
   });
   if (!accepted) return;
@@ -433,12 +499,12 @@ async function installUpload(upload) {
     details: [
       ['Package ID', identity.id],
       ['Current version', current?.version ?? 'not installed'],
-      ['Package version', identity.version],
+      ['Package 版本', identity.version],
       ['Target', identity.target],
       ['File SHA-256', upload.sha256],
-      ['Services stopped', identity.services?.length ? identity.services.join(', ') : 'none declared'],
-      ['Configuration / data', 'preserved'],
-      ['Failure behavior', current ? 'the previous version is restored automatically' : 'the incomplete install is removed'],
+      ['会停止的服务', identity.services?.length ? identity.services.join(', ') : 'none declared'],
+      ['配置 / 数据', 'preserved'],
+      ['失败时的行为', current ? 'the previous version is restored automatically' : 'the incomplete install is removed'],
     ],
     acknowledgement: upload.registry_verified === true
       ? null
@@ -464,12 +530,12 @@ async function installUpload(upload) {
 
 async function discardUpload(upload) {
   const accepted = await confirmAction({
-    title: 'Discard uploaded package file',
-    label: 'Discard',
+    title: '丢弃已上传的安装包',
+    label: '丢弃',
     details: [
-      ['File', upload.original_name],
+      ['文件', upload.original_name],
       ['File SHA-256', upload.sha256],
-      ['Installed Packages', 'unchanged'],
+      ['已安装的 Package', 'unchanged'],
     ],
   });
   if (!accepted) return;
@@ -624,7 +690,7 @@ function renderPackageCard(item) {
   for (const type of item.types ?? []) tags.append(text('span', type, 'package-tag'));
   card.append(tags);
   const meta = document.createElement('div'); meta.className = 'package-meta';
-  meta.append(valueRow('Runtime', item.runtime ?? 'n/a'), valueRow('API ports', item.ports?.length ? item.ports.map((p) => `${p.id}:${p.port}`).join(', ') : 'none'));
+  meta.append(valueRow('运行时', item.runtime ?? 'n/a'), valueRow('API 端口', item.ports?.length ? item.ports.map((p) => `${p.id}:${p.port}`).join(', ') : 'none'));
   card.append(meta);
   // 有新版本時，卡片先給一條橫幅——按鈕在一排六格裡，不橫幅的話很容易被略過。
   const upgrade = packageUpgrade(item);
@@ -637,19 +703,19 @@ function renderPackageCard(item) {
   actions.className = 'button-row package-card-actions six-up';
   actions.append(item.webui
     ? packageOpenLink(item.webui, { newTab: true })
-    : actionButton('Open', '', () => {}, true));
+    : actionButton('打开', '', () => {}, true));
   actions.append(packageSettingLink(item));
-  actions.append(actionButton('Update', 'primary',
+  actions.append(actionButton('更新', 'primary',
     () => startPackageUpgrade(item, upgrade), !canWrite() || !upgrade));
-  actions.append(actionButton('Dev', '',
+  actions.append(actionButton('开发', '',
     () => startPackageDev(item), !canWrite() || !item.installed_dir));
-  actions.append(actionButton('Rollback', '',
+  actions.append(actionButton('回滚', '',
     () => startInstalledAction(item, 'rollback'), !canWrite() || !item.previous_version));
-  actions.append(actionButton('Uninstall', 'danger-text',
+  actions.append(actionButton('卸载', 'danger-text',
     () => startInstalledAction(item, 'uninstall'), !canWrite()));
   card.append(actions);
   const details = document.createElement('details'); details.className = 'inline-details';
-  details.append(Object.assign(document.createElement('summary'), { textContent: 'Version details' }),
+  details.append(Object.assign(document.createElement('summary'), { textContent: '版本详情' }),
     text('small', `SHA ${item.archive_sha256 ?? 'n/a'} · installed ${item.installed_at ?? 'n/a'}`));
   card.append(details);
   return card;
@@ -658,17 +724,17 @@ function renderPackageCard(item) {
 async function loadAdapters() {
   try {
     const data = await apiData('/api/admin/package-manager');
-    const panel = section('Adapter catalog');
-    panel.body.append(text('p', 'Adapters are the bridges between Packages, devices, engines, and external APIs. Their assigned ports and lifecycle remain owned by the Package Manager.', 'description'));
+    const panel = section('Adapter 目录');
+    panel.body.append(text('p', 'Adapter 是 Package 与设备、引擎、外部 API 之间的桥接。它们的端口和生命周期仍由 Package 管理负责。', 'description'));
     const adapters = (data.packages ?? []).filter((item) => item.types?.includes('adapter'));
-    if (!adapters.length) panel.body.append(text('p', 'No Adapter Packages are installed yet.', 'empty'));
+    if (!adapters.length) panel.body.append(text('p', '还没有安装任何 Adapter。', 'empty'));
     else {
       const grid = document.createElement('div'); grid.className = 'package-grid';
       grid.append(...adapters.map(renderPackageCard)); panel.body.append(grid);
     }
     replacePage(panel.card);
   } catch (error) {
-    const panel = section('Adapter catalog');
+    const panel = section('Adapter 目录');
     panel.body.append(text('p', `Could not load Adapters: ${error.message ?? error}`, 'alert error'));
     replacePage(panel.card);
   }
@@ -678,15 +744,15 @@ function renderInstalledPackages(data) {
   const wrap = document.createElement('div');
   if (data.broken?.length) wrap.append(text('div', `${data.broken.length} Installed Root record(s) need review. See Recent operations for the exact failure.`, 'alert error'));
   const packages = (data.packages ?? []).filter(packageMatches);
-  if (!data.packages?.length) wrap.append(text('p', 'No Packages are installed yet. Install one from a file below.', 'empty'));
-  else if (!packages.length) wrap.append(text('p', 'No Package matches the current search or filter.', 'empty'));
+  if (!data.packages?.length) wrap.append(text('p', '还没有安装任何 Package，可以从下面的文件安装。', 'empty'));
+  else if (!packages.length) wrap.append(text('p', '没有符合当前搜索或筛选的 Package。', 'empty'));
   else {
     const grid = document.createElement('div'); grid.className = 'package-grid';
     grid.append(...packages.map(renderPackageCard)); wrap.append(grid);
   }
   const candidates = data.uploads?.filter((u) => u.status !== 'installed') ?? [];
   if (candidates.length) {
-    wrap.append(text('h3', 'Pending install'), text('p', 'Files waiting to be checked or installed appear here. A file not in the verified list needs an explicit safety acknowledgement.', 'description'));
+    wrap.append(text('h3', '待安装'), text('p', '已经下载、还没装上的安装包在这里。不在已验证列表里的文件，需要你明确确认风险。', 'description'));
     wrap.append(...candidates.map(preflightSummary));
   }
   return wrap;
@@ -699,36 +765,36 @@ function preflightSummary(upload) {
   box.append(
     text('b', id ? `${id.name ?? id.id} ${id.version}` : upload.original_name),
     text('code', upload.sha256),
-    statusRow('Status', packageUploadStatus(upload),
+    statusRow('状态', packageUploadStatus(upload),
       upload.status === 'preflight_passed' ? 'good' : upload.status === 'preflight_failed' ? 'bad' : 'neutral'),
   );
   if (id) {
     box.append(
       valueRow('Package ID', id.id),
-      valueRow('Target', id.target),
-      valueRow('Type', id.types?.join(', ') || 'n/a'),
+      valueRow('目标机型', id.target),
+      valueRow('类型', id.types?.join(', ') || 'n/a'),
     );
   }
   if (upload.origin) {
-    box.append(valueRow('Registry source', `${upload.origin.repository} · ${upload.origin.version}`));
+    box.append(valueRow('来源', `${upload.origin.repository} · ${upload.origin.version}`));
   }
-  box.append(valueRow('Registry trust', upload.registry_verified === true ? 'Verified catalog hash' : 'Not in verified catalog'));
+  box.append(valueRow('来源可信度', upload.registry_verified === true ? 'Verified catalog hash' : 'Not in verified catalog'));
   if (upload.preflight) {
     const missing = (upload.preflight.external ?? []).filter((x) => x.ok === false && x.required);
     box.append(
-      valueRow('Target verdict', upload.preflight.target?.verdict ?? 'n/a'),
-      valueRow('Required dependencies', missing.length ? missing.map((x) => x.id).join(', ') : 'satisfied'),
+      valueRow('机型判定', upload.preflight.target?.verdict ?? 'n/a'),
+      valueRow('依赖', missing.length ? missing.map((x) => x.id).join(', ') : 'satisfied'),
     );
   }
   const actions = document.createElement('div');
   actions.className = 'button-row';
   if (upload.status === 'preflight_passed') {
-    actions.append(actionButton('Install', 'primary', () => installUpload(upload)));
+    actions.append(actionButton('安装', 'primary', () => installUpload(upload)));
   } else if (upload.status === 'preflight_failed' || upload.status === 'uploaded') {
-    actions.append(actionButton('Check again', '', () => retryPreflight(upload)));
+    actions.append(actionButton('重新检查', '', () => retryPreflight(upload)));
   }
   if (!['installed', 'install_failed'].includes(upload.status)) {
-    actions.append(actionButton('Discard', 'danger-text', () => discardUpload(upload)));
+    actions.append(actionButton('丢弃', 'danger-text', () => discardUpload(upload)));
   }
   box.append(actions);
   return box;
@@ -736,12 +802,12 @@ function preflightSummary(upload) {
 
 function packageUploadStatus(upload) {
   return ({
-    uploaded: 'Checking',
-    preflight_passed: 'Ready to install',
-    preflight_failed: 'Check failed',
-    installed: 'Installed',
-    install_failed: 'Install failed',
-  })[upload.status] ?? String(upload.status ?? 'Unknown').replaceAll('_', ' ');
+    uploaded: '检查中',
+    preflight_passed: '可以安装',
+    preflight_failed: '检查未通过',
+    installed: '已安装',
+    install_failed: '安装失败',
+  })[upload.status] ?? stateWord(String(upload.status ?? '').replaceAll('_', ' '));
 }
 
 /**
@@ -822,19 +888,19 @@ function renderRegistryDetails(container, details) {
 function renderRegistry(data) {
   const wrap = document.createElement('div');
   const registry = data.registry ?? { status: 'not_fetched', packages: [] };
-  wrap.append(text('p', 'These verified Packages are available to install. Open ℹ️ on a card to read what it declares before installing.', 'description'));
+  wrap.append(text('p', '这些是已验证、可以安装的 Package。安装前可以点卡片上的 ℹ️ 看它声明了什么。', 'description'));
   if (registry.status !== 'ready' && registry.status !== 'stale') {
-    wrap.append(text('p', 'The catalog has not been loaded on this device yet.', 'empty'));
+    wrap.append(text('p', '这台设备还没有载入过目录。', 'empty'));
     return wrap;
   }
   if (registry.status === 'stale') {
     wrap.append(text('p', `Showing the last cached catalog. Refresh failed: ${registry.error?.code ?? 'registry unavailable'}.`, 'alert warning'));
   }
   if (registry.fetched_at) {
-    wrap.append(text('small', `Updated ${new Date(registry.updated_at ?? registry.generated_at ?? registry.fetched_at).toLocaleString()}`, 'meta'));
+    wrap.append(text('small', `更新于 ${new Date(registry.updated_at ?? registry.generated_at ?? registry.fetched_at).toLocaleString()}`, 'meta'));
   }
   if (!registry.packages?.length) {
-    wrap.append(text('p', 'The Registry returned no Packages.', 'empty'));
+    wrap.append(text('p', 'Registry 没有返回任何 Package。', 'empty'));
     return wrap;
   }
   const grid = document.createElement('div'); grid.className = 'package-grid registry-grid';
@@ -842,7 +908,7 @@ function renderRegistry(data) {
   // 混在包列表裡只會讓人誤以為可以像裝包一樣裝它。
   const installable = registry.packages.filter((item) => !item.types?.includes('framework'));
   if (!installable.length) {
-    wrap.append(text('p', 'The Registry returned no installable Packages.', 'empty'));
+    wrap.append(text('p', 'Registry 没有返回可安装的 Package。', 'empty'));
     return wrap;
   }
   for (const item of installable) {
@@ -851,15 +917,15 @@ function renderRegistry(data) {
     const file = version?.files?.find((entry) => entry.kind === 'source_tar' && entry.name.endsWith('.tar.gz'));
     card.append(text('b', registryDisplayName(item)), text('small', item.repository, 'meta'));
     if (item.description) card.append(text('p', item.description, 'package-card-description'));
-    card.append(valueRow('Latest verified', version?.version ?? item.latest_verified_version ?? 'n/a'),
-      valueRow('Published', item.latest_verified_published_at ?? version?.published_at ?? 'n/a'));
+    card.append(valueRow('最新已验证', version?.version ?? item.latest_verified_version ?? 'n/a'),
+      valueRow('发布时间', item.latest_verified_published_at ?? version?.published_at ?? 'n/a'));
     if (file) {
       // 檔名恆為 source.tar.gz，沒有資訊量；大小有。
-      card.append(valueRow('Source archive', formatBytes(file.size)));
+      card.append(valueRow('源码包', formatBytes(file.size)));
       const detailBox = document.createElement('div'); detailBox.className = 'registry-details'; detailBox.hidden = true;
       const selection = { source: item.source, repository: item.repository, version: version.version, kind: file.kind, file: file.name };
       let publicDetailsLoaded = false;
-      const download = actionButton('Download', 'primary', async () => {
+      const download = actionButton('下载', 'primary', async () => {
         try {
           const result = await apiData('/api/admin/package-registry/download', {
             method: 'POST',
@@ -876,7 +942,7 @@ function renderRegistry(data) {
           if (error?.data?.manual?.release_url) {
             packageTab = 'upload';
             await showManualDownloadDialog({
-              title: 'Download Package manually',
+              title: '手动下载 Package',
               manual: error.data.manual,
               nextStep: 'After transferring the archive to this device, use Install from file to upload and install it after the normal Package checks.',
             });
@@ -909,7 +975,7 @@ function renderRegistry(data) {
       actions.append(download);
       card.append(disclosure, actions);
     } else {
-      card.append(text('p', 'No pinned source archive is available for this version.', 'empty'));
+      card.append(text('p', '这个版本没有固定的源码包。', 'empty'));
     }
     grid.append(card);
   }
@@ -919,17 +985,16 @@ function renderRegistry(data) {
 
 function renderUpload(data) {
   const wrap = document.createElement('div');
-  wrap.append(text('p',
-    'Choose a package file. The Framework checks its identity and requirements before Install is enabled.',
+  wrap.append(text('p', '选择一个 Package 安装包。Framework 会先核对它的身份与依赖，通过后才允许安装。',
     'description'));
   const input = document.createElement('input');
   input.type = 'file'; input.accept = '.tar.gz,application/gzip'; input.id = 'package-file';
   const progress = document.createElement('progress');
   progress.hidden = true;
-  const upload = actionButton('Add and check', 'primary', async () => {
+  const upload = actionButton('添加并检查', 'primary', async () => {
     const file = input.files?.[0];
     if (!file) {
-      packageNotice = { kind: 'bad', text: 'Choose a .tar.gz package file first.' };
+      packageNotice = { kind: 'bad', text: '请先选择一个 .tar.gz 安装包。' };
       return loadPackageManager();
     }
     upload.disabled = true; progress.hidden = false;
@@ -953,7 +1018,7 @@ function renderUpload(data) {
   controls.append(input, upload, progress);
   wrap.append(controls);
   if (data.uploads?.length) {
-    wrap.append(text('h3', 'Recent uploads'), ...data.uploads.slice(0, 5).map(preflightSummary));
+    wrap.append(text('h3', '最近上传'), ...data.uploads.slice(0, 5).map(preflightSummary));
   }
   return wrap;
 }
@@ -964,21 +1029,21 @@ function renderUpload(data) {
  * 反而不知道該看哪一份。
  */
 function renderJobs(data) {
-  const panel = section('Recent operations');
+  const panel = section('最近的操作');
   const fold = document.createElement('details'); fold.className = 'collapsible-panel';
   if (data.active_job) fold.open = true;
-  const summary = document.createElement('summary'); summary.textContent = data.jobs?.length ? `Show ${Math.min(data.jobs.length, 8)} recent operations` : 'No Package lifecycle jobs yet';
+  const summary = document.createElement('summary'); summary.textContent = data.jobs?.length ? `展开最近 ${Math.min(data.jobs.length, 8)} 条操作` : '还没有 Package 生命周期作业';
   fold.append(summary);
   const body = document.createElement('div'); body.className = 'collapsible-body';
-  if (!data.jobs?.length) body.append(text('p', 'No Package lifecycle jobs yet.', 'empty'));
+  if (!data.jobs?.length) body.append(text('p', '还没有 Package 生命周期作业。', 'empty'));
   for (const job of data.jobs?.slice(0, 8) ?? []) {
     const details = document.createElement('details');
     details.className = 'job-row';
     if (data.active_job?.id === job.id) details.open = true;
     const summary = document.createElement('summary');
     summary.append(
-      text('b', `${job.action} · ${job.target.package_id ?? job.target.upload_id}`),
-      text('span', `${job.stage} · ${job.status}`, `status ${job.status === 'success' ? 'good' : job.status === 'failed' ? 'bad' : 'neutral'}`),
+      text('b', `${stateWord(job.action)} · ${job.target.package_id ?? job.target.upload_id}`),
+      text('span', `${stateWord(job.stage)} · ${stateWord(job.status)}`, `status ${job.status === 'success' ? 'good' : job.status === 'failed' ? 'bad' : 'neutral'}`),
     );
     details.append(summary);
     if (['queued', 'running'].includes(job.status)) details.append(document.createElement('progress'));
@@ -994,8 +1059,8 @@ function renderPackageManager(data) {
   if (packagePollTimer) { clearTimeout(packagePollTimer); packagePollTimer = null; }
   indexRegistry(data);
   packageReconnectSince = 0;
-  const panel = section('Package Manager');
-  panel.body.append(text('p', 'Installed shows what is on this device. Available shows verified Packages you can install. You can also install a package from a file.', 'description'));
+  const panel = section('Package 管理');
+  panel.body.append(text('p', '「已安装」是这台设备上有的，「可安装」是已验证、可以装的。也可以直接从文件安装。', 'description'));
   if (packageNotice) panel.body.append(text('p', packageNotice.text, `alert ${packageNotice.kind}`));
   const toolbar = document.createElement('div'); toolbar.className = 'package-toolbar';
   const search = document.createElement('input'); search.type = 'search'; search.placeholder = 'Search Packages'; search.value = packageSearch; search.setAttribute('aria-label', 'Search Packages');
@@ -1029,9 +1094,9 @@ function renderPackageManager(data) {
   // Installed 的括號改為**可升級數**——包總數在列表裡一眼可見，不需要重複；
   // 真正需要一眼看到的是「有幾個該更新」。為 0 時不顯示括號，避免噪音。
   const upgradable = (data.packages ?? []).filter(packageUpgrade).length;
-  for (const [id, label] of [['installed', upgradable ? `Installed (${upgradable})` : 'Installed'],
-    ['registry', 'Available'],
-    ['upload', 'Install from file']]) {
+  for (const [id, label] of [['installed', upgradable ? `已安装（${upgradable} 个可更新）` : '已安装'],
+    ['registry', '可安装'],
+    ['upload', '从文件安装']]) {
     const button = actionButton(label, packageTab === id ? 'active' : '', () => {
       packageTab = id;
       renderPackageManager(data);
@@ -1064,7 +1129,7 @@ async function loadPackageManager() {
     const reconnect = document.createElement('div');
     reconnect.className = 'reconnect-state';
     reconnect.append(
-      text('p', 'Reconnecting to Framework. The Package job continues and its persistent result will reappear here.', 'alert warning'),
+      text('p', '正在重新连接 Framework。作业仍在继续，结果恢复后会重新出现在这里。', 'alert warning'),
       text('small', `Waiting ${seconds}s…`),
       document.createElement('progress'),
     );
@@ -1087,18 +1152,18 @@ async function packageSettingAction(item, action, refresh = loadPackageSettings)
   ];
   if (action === 'restart') {
     details.push(
-      ['Effect', 'Closes active Package clients, stops its runtime, kills its owned session if applicable, then reloads the current version.'],
-      ['Persistent data', 'Package configuration and data are preserved.'],
+      ['影响', 'Closes active Package clients, stops its runtime, kills its owned session if applicable, then reloads the current version.'],
+      ['持久数据', 'Package configuration and data are preserved.'],
     );
   } else if (action === 'disable') {
     details.push(
-      ['Effect', 'Disables the Package, removes its active routes and menu entries, and kills its owned runtime session.'],
-      ['Persistent data', 'Package configuration and data are preserved.'],
+      ['影响', 'Disables the Package, removes its active routes and menu entries, and kills its owned runtime session.'],
+      ['持久数据', 'Package configuration and data are preserved.'],
     );
   } else {
     details.push(
-      ['Effect', 'Loads this Package and starts its App runtime. Termux Terminal creates a fresh termux-os tmux session.'],
-      ['Persistent data', 'Package configuration and data are preserved.'],
+      ['影响', 'Loads this Package and starts its App runtime. Termux Terminal creates a fresh termux-os tmux session.'],
+      ['持久数据', 'Package configuration and data are preserved.'],
     );
   }
   const accepted = await confirmAction({ title: `${labels[action]} ${packageAdminName(item)}`, label: labels[action], details });
@@ -1129,7 +1194,7 @@ function packagePortEditor(item, policy) {
   box.className = 'package-port-settings';
   const draft = (item.ports ?? []).map((port) => ({ ...port }));
   if (!draft.length) {
-    box.append(text('p', 'This Package has no declared HTTP port.', 'empty'));
+    box.append(text('p', '这个 Package 没有声明 HTTP 端口。', 'empty'));
     return { box, draft, save: null };
   }
   for (const port of draft) {
@@ -1160,16 +1225,16 @@ function packagePortEditor(item, policy) {
     controls.append(number, toggleLabel);
     row.append(description, controls); box.append(row);
   }
-  const save = actionButton('Save port settings', 'primary', async () => {
+  const save = actionButton('保存端口设置', 'primary', async () => {
     if (draft.some((port) => port.visibility === 'lan')) {
       const accepted = await confirmAction({
-        title: 'Expose Package API on the LAN',
-        label: 'Enable LAN access',
+        title: '把 Package API 暴露到局域网',
+        label: '开放局域网访问',
         details: [
-          ['Effect', 'The Package port will bind to the device network instead of loopback after restart.'],
-          ['Security', 'Any device able to reach this network may probe the Package API. Use only a trusted network.'],
-          ['Terminal warning', 'A Package such as Termux Terminal may expose an interactive shell and persistent tmux session.'],
-          ['Reversal', 'Return the port to Device only and restart the Package to close the LAN listener.'],
+          ['影响', 'The Package port will bind to the device network instead of loopback after restart.'],
+          ['安全', 'Any device able to reach this network may probe the Package API. Use only a trusted network.'],
+          ['终止性警告', 'A Package such as Termux Terminal may expose an interactive shell and persistent tmux session.'],
+          ['撤销方式', 'Return the port to Device only and restart the Package to close the LAN listener.'],
         ],
       });
       if (!accepted) return;
@@ -1205,7 +1270,7 @@ function renderPackageSettingCard(item, policy) {
     const sourceRow = document.createElement('div'); sourceRow.className = 'package-card-source';
     sourceRow.append(source); card.append(sourceRow);
   }
-  card.append(valueRow('Version', item.version), valueRow('Services', item.services?.join(', ') || 'none'));
+  card.append(valueRow('版本', item.version), valueRow('服务', item.services?.join(', ') || 'none'));
   if (item.loader_status === 'failed' || item.loader_status === 'incompatible') {
     card.append(text('p', item.error ?? `Package status: ${item.loader_status}`, 'alert error'));
   }
@@ -1213,21 +1278,21 @@ function renderPackageSettingCard(item, policy) {
   card.append(editor.box);
   const actions = document.createElement('div'); actions.className = 'button-row package-card-actions package-setting-actions';
   if (item.webui) actions.append(packageOpenLink(item.webui, { newTab: true }));
-  actions.append(actionButton('Restart', '', () => packageSettingAction(item, 'restart'), !canWrite() || !item.enabled || item.loader_status !== 'loaded'));
-  if (item.enabled) actions.append(actionButton('Disable', 'danger-text', () => packageSettingAction(item, 'disable'), !canWrite()));
-  else actions.append(actionButton('Enable', 'primary', () => packageSettingAction(item, 'enable'), !canWrite()));
+  actions.append(actionButton('重启', '', () => packageSettingAction(item, 'restart'), !canWrite() || !item.enabled || item.loader_status !== 'loaded'));
+  if (item.enabled) actions.append(actionButton('停用', 'danger-text', () => packageSettingAction(item, 'disable'), !canWrite()));
+  else actions.append(actionButton('启用', 'primary', () => packageSettingAction(item, 'enable'), !canWrite()));
   card.append(actions);
   return card;
 }
 
 function renderPackageSettings(data) {
-  const panel = section('Package Setting');
-  panel.body.append(text('p', 'Control each installed Package as one unit. Port changes are saved to the private registry and take effect after Restart; switching to LAN makes a compliant Package bind its API on the device network.', 'description'));
+  const panel = section('Package 设置');
+  panel.body.append(text('p', '以整个 Package 为单位控制。端口改动会存入私有登记表，在该 Package 重启后生效；切到「局域网」会让支持的 Package 把 API 绑到设备网络上。', 'description'));
   if (packageSettingNotice) panel.body.append(text('p', packageSettingNotice.text, `alert ${packageSettingNotice.kind}`));
-  panel.body.append(valueRow('Package port range', `${data.policy.range.start}–${data.policy.range.end}`),
-    valueRow('Core-reserved ports', data.policy.reserved.join(', ')),
-    text('p', 'Device only uses loopback. LAN exposes the Package API on 0.0.0.0. Restart disconnects active Package sessions; the Package’s persistent configuration and data are kept.', 'muted'));
-  if (!data.packages?.length) panel.body.append(text('p', 'No installed Packages are available for configuration.', 'empty'));
+  panel.body.append(valueRow('Package 端口范围', `${data.policy.range.start}–${data.policy.range.end}`),
+    valueRow('核心保留端口', data.policy.reserved.join(', ')),
+    text('p', '「仅本机」只用 loopback。「局域网」会把 Package API 暴露在 0.0.0.0 上。重启会断开正在进行的 Package 会话，但该 Package 的持久配置与数据都会保留。', 'muted'));
+  if (!data.packages?.length) panel.body.append(text('p', '没有可配置的已安装 Package。', 'empty'));
   else {
     const grid = document.createElement('div'); grid.className = 'package-setting-grid';
     grid.append(...data.packages.map((item) => renderPackageSettingCard(item, data.policy)));
@@ -1243,7 +1308,7 @@ async function loadPackageSettings() {
     const data = await apiData('/api/admin/package-settings');
     renderPackageSettings(data);
   } catch (error) {
-    const panel = section('Package Setting');
+    const panel = section('Package 设置');
     panel.body.append(text('p', `Could not load Package Setting: ${error.message ?? error}`, 'alert error'));
     replacePage(panel.card);
   }

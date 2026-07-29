@@ -11,18 +11,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Login — Termux-OS</title>
+  <title>登录 — Termux-OS</title>
   <link rel="stylesheet" href="/admin/style.css">
 </head>
 <body class="login-page">
   <main class="login-wrap">
     <form class="login-card" id="login-form">
       <p class="eyebrow">TERMUX-OS</p>
-      <h1>Administration</h1>
-      <p class="description">Sign in to manage runtime state, Packages, Services, and Framework updates on this phone.</p>
-      <label for="password">Administrator password</label>
+      <h1>控制台登录</h1>
+      <p class="description">从别的设备访问这台手机的控制台需要密码。在手机本机上打开则不需要。</p>
+      <label for="password">管理员密码</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
-      <button class="primary" type="submit" id="login-button">Login</button>
+      <button class="primary" type="submit" id="login-button">登录</button>
       <p class="alert error" id="login-error" hidden></p>
     </form>
   </main>

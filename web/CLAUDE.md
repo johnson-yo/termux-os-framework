@@ -1,6 +1,6 @@
 # Web directory contract
 
-This directory contains the Framework-owned administration shell. It uses the HttpOnly browser session and CSRF APIs, stores no credential in browser storage — only named interface preferences such as whether the install prompt was dismissed — and renders only real Core pages plus Package-owned menu entries. Keep it responsive, accessible, dependency-free, and English by default.
+This directory contains the Framework-owned administration shell. It uses the HttpOnly browser session and CSRF APIs, stores no credential in browser storage — only named interface preferences such as whether the install prompt was dismissed — and renders only real Core pages plus Package-owned menu entries. Keep it responsive, accessible and dependency-free. User-facing copy is Simplified Chinese, because the people using it read Chinese and a panel that mixes languages reads as unfinished. Protocol nouns stay as they are — Framework, Package, Adapter, System Key, SHA-256, GitHub, Registry — so what the panel says still matches the documentation and the logs. Engine output and status values are evidence, not prose: map a known status to a word when displaying it, and pass anything unknown through unchanged rather than hiding it behind a guess.
 
 The Packages group exposes `Package Setting` as its operational control page.
 Its writes use the authenticated Admin API: port edits are persisted before a
@@ -44,3 +44,18 @@ login HTML under `/admin/app.js`, and after signing in the browser was handed HT
 JavaScript, so the panel never started. Clearing the browser cache did not help, because this store
 is separate and the next install poisoned it again. There is no pre-cache, a redirected response is
 never stored, and a stored entry whose content type does not match the request is discarded.
+
+Progress and history belong on Status / Logs, not on the page whose job is to act. Package lifecycle
+jobs were collected there once already; Framework operation progress and update history stayed on the
+update page until they were moved for the same reason, which is that a page asking the user to decide
+something should not first make them read records of decisions already made.
+
+The address list shows only addresses something is actually listening on. Listing a LAN address while
+bound to loopback sent the user to a page that could not open, and then to look for a network fault
+that did not exist.
+
+Changing the bind address or the port restarts the Framework as part of the same action. Leaving the
+user to find a restart button afterwards is half a switch. When the port changes the browser follows
+to the new address — but only when the port actually changed, and never by copying the configured
+port into the current URL, because the port the browser reached the panel on is not necessarily the
+port the Framework listens on.

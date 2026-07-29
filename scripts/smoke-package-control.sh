@@ -286,10 +286,11 @@ grep -q "installed_dir: dir" "$ROOT/src/system/package-control.mjs" \
 
 # 分頁標題：Available 的計數沒有資訊量（列表本身就看得到）；
 # Installed 的括號改為**可升級數**，那才是需要一眼看到的。
-if grep -q "upgradable ? \`Installed (\${upgradable})\`" "$ROOT/web/admin/admin-controls.js" \
-  && grep -q "'Available'" "$ROOT/web/admin/admin-controls.js" \
-  && grep -q 'Install from file' "$ROOT/web/admin/admin-controls.js" \
-  && grep -q 'Pending install' "$ROOT/web/admin/admin-controls.js" \
+# 認的是三個分頁的存在與可升級計數這個機制，不是它們當下的文案。
+if grep -q "upgradable ?" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "\['installed'," "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "\['registry'," "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "\['upload'," "$ROOT/web/admin/admin-controls.js" \
   && grep -q '/api/admin/package-registry/refresh' "$ROOT/web/admin/admin-controls.js" \
   && grep -q 'confirm-dialog' "$ROOT/web/admin/index.html" && grep -q 'package-grid' "$ROOT/web/admin/style.css"; then
   ok "Installed/Pending install/Available/Install from file + explicit confirmation UI present"

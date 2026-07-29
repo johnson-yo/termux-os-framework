@@ -52,6 +52,9 @@ There is deliberately no first-party `packages/` directory. Package source is de
   it becomes to catch up.
 - Store overrides, not defaults. A default written into a device's configuration file can never be
   changed by a later release, because it is transplanted back over the new one.
+- Write user-facing copy in Simplified Chinese and keep protocol nouns untranslated. A test that
+  greps for a label is asserting on prose, not on behaviour; assert on the path, the id or the
+  structure instead, or the next copy change breaks the suite for no reason.
 - Assume the user never opens Termux. Anything they must do to run this system has to be possible in
   the browser, including reading the credentials the installer generated for them.
 - Do not change what the previous version's `core_check` inspects — `/admin` returning 200, `/health`,

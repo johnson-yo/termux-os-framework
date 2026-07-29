@@ -106,7 +106,7 @@ LAN_IP=$(node -e '
 ')
 if [ -n "$LAN_IP" ]; then
   C=$(curl -s -o "$WORK/remote.html" -w '%{http_code}' -m 3 "http://$LAN_IP:$PORT/admin")
-  if [ "$C" = 200 ] && grep -q 'Administrator password' "$WORK/remote.html"; then
+  if [ "$C" = 200 ] && grep -q 'id="login-form"' "$WORK/remote.html"; then
     ok "非本機 /admin 仍然要密碼"
   else
     bad "非本機 /admin 仍然要密碼" "http=$C"

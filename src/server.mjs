@@ -255,9 +255,10 @@ const credentialSnapshot = () => ({
     configured: Boolean(CFG.auth.admin_password),
     minimum_length: AUTH_PASSWORD_MIN_LENGTH,
   },
+  // 这几条是直接显示给使用者看的，所以跟着控制台一起用中文；上面的字段名是契约，不动。
   note: credentialsEditable
-    ? 'The System Key is masked by default. Use Copy key when a trusted Browser Session needs the full value.'
-    : 'Credentials are managed outside the private Framework credential file; edit the environment or config source.',
+    ? 'System Key 默认是遮蔽的。受信任的浏览器会话需要完整值时，用「复制密钥」。'
+    : '凭证由 Framework 私有凭证文件之外的地方管理，请改环境变量或配置来源。',
 });
 
 // ============================================================

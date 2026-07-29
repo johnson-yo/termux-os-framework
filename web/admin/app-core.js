@@ -150,7 +150,7 @@ const section = (title, href = null) => {
   if (href) {
     const link = document.createElement('a');
     link.href = href;
-    link.textContent = 'Details';
+    link.textContent = '详情';
     head.append(link);
   }
   const body = document.createElement('div');
@@ -171,16 +171,16 @@ function renderOverview(data) {
   const heroCopy = document.createElement('div');
   heroCopy.className = 'control-hero-copy';
   heroCopy.append(
-    text('p', 'CONTROL CENTER', 'eyebrow'),
+    text('p', '控制中心', 'eyebrow'),
     text('h2', state.label),
     text('p', state.detail, 'hero-description'),
   );
   const issues = document.createElement('div');
   issues.className = 'control-hero-issues';
   if (!data.attention.length) {
-    issues.append(text('p', 'No action required. The control plane is within its expected state.', 'empty'));
+    issues.append(text('p', '无需处理，控制面一切正常。', 'empty'));
   } else {
-    issues.append(text('p', 'Action queue', 'control-hero-issues-label'));
+    issues.append(text('p', '操作队列', 'control-hero-issues-label'));
     for (const item of data.attention) {
       const row = document.createElement('a');
       row.className = `attention ${item.severity}`;
@@ -194,7 +194,7 @@ function renderOverview(data) {
   heroMeta.className = 'control-hero-meta';
   heroMeta.append(
     text('span', state.label, `status ${state.kind}`),
-    text('small', `Updated ${new Date(data.generated_at).toLocaleTimeString()}`, 'meta'),
+    text('small', `更新于 ${new Date(data.generated_at).toLocaleTimeString()}`, 'meta'),
   );
   hero.append(heroCopy, heroMeta);
 
@@ -207,82 +207,82 @@ function renderOverview(data) {
   const adapters = data.components.adapters;
   const services = data.components.services;
 
-  const app = section('Applications', '/admin/applications');
+  const app = section('应用', '/admin/applications');
   if (!applications?.ok) componentError(app.body, applications);
   else {
     const v = applications.value;
     app.body.append(
-      valueRow('Installed', v.installed),
-      valueRow('Ready', v.loaded),
-      valueRow('Disabled', v.disabled),
-      valueRow('Attention', v.failed),
+      valueRow('已安装', v.installed),
+      valueRow('就绪', v.loaded),
+      valueRow('已停用', v.disabled),
+      valueRow('需要处理', v.failed),
     );
   }
 
-  const svc = section('Services', '/admin/services/overview');
+  const svc = section('服务', '/admin/services/overview');
   if (!services.ok) componentError(svc.body, services);
   else {
     const v = services.value;
     svc.body.append(
-      valueRow('Running', v.running),
-      valueRow('Stopped', v.stopped),
-      valueRow('Failed', v.failed),
-      valueRow('Registered', v.total),
+      valueRow('运行中', v.running),
+      valueRow('已停止', v.stopped),
+      valueRow('失败', v.failed),
+      valueRow('已注册', v.total),
     );
   }
 
-  const pkg = section('Packages', '/admin/packages/overview');
+  const pkg = section('Package', '/admin/packages/overview');
   if (!packages.ok) componentError(pkg.body, packages);
   else {
     const v = packages.value;
     pkg.body.append(
-      valueRow('Installed', v.installed),
-      valueRow('Loaded', v.loaded),
-      valueRow('Failed / degraded', `${v.failed} / ${v.degraded}`),
-      valueRow('Updates', v.available_updates ?? 'n/a'),
+      valueRow('已安装', v.installed),
+      valueRow('已加载', v.loaded),
+      valueRow('失败 / 降级', `${v.failed} / ${v.degraded}`),
+      valueRow('更新', v.available_updates ?? 'n/a'),
     );
   }
 
-  const adapter = section('Adapters', '/admin/adapters/overview');
+  const adapter = section('Adapter', '/admin/adapters/overview');
   if (!adapters?.ok) componentError(adapter.body, adapters);
   else {
     const v = adapters.value;
     adapter.body.append(
-      valueRow('Installed', v.installed),
-      valueRow('Ready', v.loaded),
-      valueRow('Disabled', v.disabled),
-      valueRow('Attention', v.failed),
+      valueRow('已安装', v.installed),
+      valueRow('就绪', v.loaded),
+      valueRow('已停用', v.disabled),
+      valueRow('需要处理', v.failed),
     );
   }
 
-  const sys = section('System', '/admin/system/system');
+  const sys = section('系统', '/admin/system/system');
   sys.body.append(
-    valueRow('Device', data.system.device),
-    valueRow('Platform', data.system.platform),
+    valueRow('设备', data.system.device),
+    valueRow('平台', data.system.platform),
     valueRow('Android', data.system.android),
     valueRow('Termux', data.system.termux_prefix),
-    valueRow('Current time', new Date(data.generated_at).toLocaleString()),
-    valueRow('Framework uptime', resources.ok ? formatDuration(resources.value.framework_uptime_s) : 'n/a'),
+    valueRow('当前时间', new Date(data.generated_at).toLocaleString()),
+    valueRow('Framework 已运行', resources.ok ? formatDuration(resources.value.framework_uptime_s) : 'n/a'),
   );
   if (!resources.ok) componentError(sys.body, resources);
   else {
     const m = resources.value;
     sys.body.append(
-      valueRow('Memory', m.memory ? `${m.memory.available_mb} MB available of ${m.memory.total_mb} MB` : 'n/a'),
-      valueRow('Storage', m.storage?.sdcard ? `${m.storage.sdcard.free_gb} GB available of ${m.storage.sdcard.total_gb} GB` : 'n/a'),
-      valueRow('CPU', m.cpu?.usage_percent == null ? `${m.cpu?.cores ?? 'n/a'} cores · load n/a` : `${m.cpu.usage_percent}% · ${m.cpu.cores} cores`),
-      valueRow('Temperature', m.temperature ? `${m.temperature.celsius} °C` : 'n/a'),
-      valueRow('Device uptime', formatDuration(m.device_uptime_s)),
+      valueRow('内存', m.memory ? `可用 ${m.memory.available_mb} MB / 共 ${m.memory.total_mb} MB` : 'n/a'),
+      valueRow('存储', m.storage?.sdcard ? `可用 ${m.storage.sdcard.free_gb} GB / 共 ${m.storage.sdcard.total_gb} GB` : 'n/a'),
+      valueRow('CPU', m.cpu?.usage_percent == null ? `${m.cpu?.cores ?? '未知'} 核 · 负载未知` : `${m.cpu.usage_percent}% · ${m.cpu.cores} 核`),
+      valueRow('温度', m.temperature ? `${m.temperature.celsius} °C` : 'n/a'),
+      valueRow('设备已运行', formatDuration(m.device_uptime_s)),
     );
   }
   if (!framework.ok) componentError(sys.body, framework);
   else {
     const v = framework.value;
     sys.body.append(
-      statusRow('Framework health', v.health, v.health === 'healthy' ? 'good' : 'bad'),
-      valueRow('Framework version', v.version),
-      valueRow('Framework build', v.build),
-      valueRow('Last update', v.last_update ? `${v.last_update.status} · ${v.last_update.candidate_build ?? 'unknown build'}` : 'none recorded'),
+      statusRow('Framework 健康', v.health, v.health === 'healthy' ? 'good' : 'bad'),
+      valueRow('Framework 版本', v.version),
+      valueRow('Framework 构建', v.build),
+      valueRow('上次更新', v.last_update ? `${stateWord(v.last_update.status)} · ${v.last_update.candidate_build ?? '未知构建'}` : '没有记录'),
     );
   }
   grid.append(app.card, svc.card, pkg.card, adapter.card, sys.card);
@@ -295,19 +295,19 @@ function overviewState(data) {
     || (data.attention ?? []).some((item) => item.severity === 'error');
   const hasWarning = (data.attention ?? []).some((item) => item.severity === 'warning');
   if (hasError) return {
-    label: 'Needs attention',
+    label: '需要处理',
     kind: 'bad',
     detail: 'At least one component is outside its expected state. Follow the linked item below before changing anything else.',
   };
   if (hasWarning) return {
-    label: 'Review recommended',
+    label: '建议查看',
     kind: 'warn',
     detail: 'The Framework is responding, but a recent change or development override deserves a deliberate review.',
   };
   return {
-    label: 'Operational',
+    label: '运行正常',
     kind: 'good',
-    detail: 'The Framework is responding and no component has reported an action requiring your attention.',
+    detail: 'Framework 正常响应，没有组件报告需要你处理的事项。',
   };
 }
 
@@ -352,11 +352,11 @@ const statusKind = (value) => {
 };
 
 async function renderApplications() {
-  const panel = section('Installed applications');
+  const panel = section('已安装的应用');
   if (applicationNotice) panel.body.append(text('p', applicationNotice.text, `alert ${applicationNotice.kind}`));
   try {
     const result = await apiData('/api/apps');
-    if (!result.apps?.length) panel.body.append(text('p', 'No applications are installed.', 'empty'));
+    if (!result.apps?.length) panel.body.append(text('p', '还没有安装任何应用。', 'empty'));
     const apps = await Promise.all((result.apps ?? []).map(async (app) => {
       try {
         const packageInfo = await apiData(`/api/packages/${encodeURIComponent(app.package)}`);
@@ -392,7 +392,7 @@ async function renderApplications() {
         open.textContent = 'Open';
         controls.append(open);
       } else {
-        controls.append(actionButton('Open', 'primary', () => openApplication(app), !canWrite() || app.state === 'disabled'));
+        controls.append(actionButton('打开', 'primary', () => openApplication(app), !canWrite() || app.state === 'disabled'));
       }
       card.append(controls);
       panel.body.append(card);
@@ -409,7 +409,7 @@ async function openApplication(app) {
     if (result.consent_required) {
       const accepted = await confirmAction({
         title: `Prepare ${app.name}`,
-        label: 'Start required services',
+        label: '启动所需服务',
         details: [
           ['Application', app.name],
           ['Services to start', (result.start_services ?? []).map((s) => s.id).join(', ') || 'none'],
@@ -443,7 +443,7 @@ async function openApplication(app) {
 }
 
 async function renderServices() {
-  const panel = section('Managed services');
+  const panel = section('受管服务');
   if (serviceNotice) panel.body.append(text('p', serviceNotice.text, `alert ${serviceNotice.kind}`));
   try {
     const result = await apiData('/api/stage/services');
@@ -467,11 +467,11 @@ async function renderServices() {
       if (service.package) {
         const link = document.createElement('a'); link.href = `/packages/${service.package}/`; link.textContent = service.package;
         pkg.append(link);
-      } else pkg.append(text('span', 'Framework core', 'muted'));
+      } else pkg.append(text('span', 'Framework 核心', 'muted'));
       const desired = cell('Desired'); desired.append(text('span', service.desired ?? 'stopped', `status ${statusKind(service.desired)}`));
-      const process = cell('Process'); process.append(text('span', service.process?.state ?? 'unknown', `status ${statusKind(service.process?.state)}`),
+      const process = cell('进程'); process.append(text('span', service.process?.state ?? '未知', `status ${statusKind(service.process?.state)}`),
         text('small', service.process?.started_at ?? service.process?.exited_at ?? 'n/a'));
-      const health = cell('Health'); health.append(text('span', service.health?.state ?? 'unknown', `status ${statusKind(service.health?.state)}`));
+      const health = cell('健康'); health.append(text('span', service.health?.state ?? '未知', `status ${statusKind(service.health?.state)}`));
       const activity = cell('Last activity'); activity.append(text('span', service.last_activity_at ? new Date(service.last_activity_at).toLocaleString() : 'no log activity'));
       const actions = cell('Action'); actions.className = 'table-actions';
       for (const action of ['start', 'stop', 'restart']) {
@@ -511,52 +511,125 @@ async function controlService(service, action) {
 
 async function renderSystem() {
   const [overview, access] = await Promise.all([apiData('/api/admin/overview'), apiData('/api/access-info')]);
-  const system = section('Device and Framework');
+  const system = section('设备与 Framework');
   system.body.append(
-    valueRow('Device', overview.system?.device),
-    valueRow('Platform', overview.system?.platform),
-    valueRow('Framework build', overview.components?.framework?.value?.build),
-    valueRow('Framework version', overview.components?.framework?.value?.version),
-    valueRow('Primary access', access.primary?.admin_url ?? 'no reachable address reported'),
+    valueRow('设备', overview.system?.device),
+    valueRow('平台', overview.system?.platform),
+    valueRow('Framework 构建', overview.components?.framework?.value?.build),
+    valueRow('Framework 版本', overview.components?.framework?.value?.version),
+    valueRow('主要入口', access.primary?.admin_url ?? 'no reachable address reported'),
   );
-  const resources = section('Resources');
+  const resources = section('资源');
   const value = overview.components?.resources?.value;
   if (!overview.components?.resources?.ok) componentError(resources.body, overview.components?.resources ?? {});
   else resources.body.append(
-    valueRow('Memory', value.memory ? `${value.memory.available_mb} / ${value.memory.total_mb} MB free` : 'n/a'),
-    valueRow('Storage', value.storage?.sdcard ? `${value.storage.sdcard.free_gb} / ${value.storage.sdcard.total_gb} GB free` : 'n/a'),
-    valueRow('Temperature', value.temperature ? `${value.temperature.celsius} °C` : 'n/a'),
-    valueRow('Device uptime', formatDuration(value.device_uptime_s)),
+    valueRow('内存', value.memory ? `${value.memory.available_mb} / ${value.memory.total_mb} MB free` : 'n/a'),
+    valueRow('存储', value.storage?.sdcard ? `${value.storage.sdcard.free_gb} / ${value.storage.sdcard.total_gb} GB free` : 'n/a'),
+    valueRow('温度', value.temperature ? `${value.temperature.celsius} °C` : 'n/a'),
+    valueRow('设备已运行', formatDuration(value.device_uptime_s)),
   );
   replacePage(system.card, resources.card);
+}
+
+/** 独立的重启按钮，给「配置已改但还没生效」的状态用。 */
+function restartRow(net) {
+  const row = document.createElement('div');
+  row.className = 'button-row';
+  row.append(actionButton('重启框架', 'primary',
+    () => restartFrameworkAndFollow({ portChangedTo: net.port === net.running_port ? null : net.port }),
+    !canWrite()));
+  return row;
+}
+
+/**
+ * 重启 Framework，然后把浏览器带到它重启后真正在听的地址。
+ *
+ * 改端口之后，当前这个页面的地址就失效了——原地重试只会一直失败，而用户看到的是
+ * 「转圈然后打不开」，并不知道该去哪。所以这里主动探测新地址，通了就跳过去。
+ */
+async function restartFrameworkAndFollow({ portChangedTo = null } = {}) {
+  const target = new URL(location.href);
+  // 只有端口真的变了才改地址。
+  //
+  // 别把配置里的端口直接写进 URL：浏览器访问的端口不一定等于 Framework 监听的端口
+  // ——中间可能隔着转发。真机上就是这样：控制台监听 8980，浏览器在 8981，改绑定地址
+  // 时把 URL 改成 8980 会把用户送到一个打不开的地方。
+  if (portChangedTo) target.port = String(portChangedTo);
+  target.pathname = '/admin/system/administration';
+  target.search = '';
+  const overlay = document.createElement('div');
+  overlay.className = 'reconnect-state';
+  overlay.append(text('p', '正在重启 Framework…', 'alert warning'),
+    text('small', `恢复后会自动打开 ${target.origin}`), document.createElement('progress'));
+  replacePage(overlay);
+  try {
+    await apiData('/api/admin/restart', { method: 'POST', body: '{}' });
+  } catch {
+    // 重启请求本身可能在响应写完之前就断了，那不是失败。
+  }
+  const deadline = Date.now() + 60000;
+  const probe = async () => {
+    try {
+      const response = await fetch(`${target.origin}/health`, { cache: 'no-store' });
+      if (response.ok) { location.replace(target.href); return; }
+    } catch { /* 还没起来 */ }
+    if (Date.now() > deadline) {
+      overlay.replaceChildren(
+        text('p', 'Framework 在 60 秒内没有恢复。', 'alert error'),
+        text('small', `请手动打开 ${target.origin}/admin`),
+      );
+      return;
+    }
+    setTimeout(probe, 1200);
+  };
+  setTimeout(probe, 2500);
+}
+
+/** 改绑定或改端口：说清后果 → 用户同意 → 写配置 → 立刻重启 → 跟到新地址。 */
+async function applyNetworkChange(patch, net, prompt) {
+  if (!confirm(`${prompt.title}？\n\n${prompt.body}\n\n更改后会立即重启 Framework。`)) return;
+  let result;
+  try {
+    result = await apiData('/api/admin/network', { method: 'POST', body: JSON.stringify(patch) });
+  } catch (error) {
+    administrationNotice = { kind: 'bad', text: `设置失败：${error.message ?? error}` };
+    return renderAdministration();
+  }
+  if (!result.restart_required) {
+    administrationNotice = { kind: 'good', text: `已生效：${result.host}:${result.port}。` };
+    return renderAdministration();
+  }
+  return restartFrameworkAndFollow({
+    portChangedTo: result.port === net.running_port ? null : result.port,
+  });
 }
 
 async function renderAdministration() {
   const [access, session, credentials] = await Promise.all([
     apiData('/api/access-info'), apiData('/api/auth/session'), apiData('/api/admin/credentials'),
   ]);
-  const panel = section('Control-center credentials');
-  panel.body.append(text('p', 'The System Key is the shared API credential for the Framework, Package-to-Package calls, and trusted third-party Apps. It is shown here because this page is the control center.', 'description'));
+  const panel = section('控制台凭证');
+  panel.body.append(text('p', 'System Key 是 Framework、Package 之间调用以及受信任第三方 App 共用的 API 凭证。这一页是控制中心，所以它显示在这里。', 'description'));
   if (administrationNotice) panel.body.append(text('p', administrationNotice.text, `alert ${administrationNotice.kind}`));
 
   const keyBlock = document.createElement('div'); keyBlock.className = 'credential-block';
-  keyBlock.append(text('b', 'System Key / API token'), text('p', credentials.note, 'muted'));
+  keyBlock.append(text('b', 'System Key / API 令牌'), text('p', credentials.note, 'muted'));
   const keyControls = document.createElement('div'); keyControls.className = 'credential-controls';
   const keyInput = document.createElement('input'); keyInput.type = 'text'; keyInput.value = '';
   keyInput.placeholder = credentials.system_key_masked ?? '***'; keyInput.readOnly = !credentials.editable;
   keyInput.autocomplete = 'off'; keyInput.spellcheck = false; keyInput.className = 'secret-input';
-  const copy = actionButton('Copy key', '', async () => {
+  const copy = actionButton('复制密钥', '', async () => {
     try {
       const full = await apiData('/api/admin/credentials/system-key');
       await navigator.clipboard.writeText(full.system_key);
-      administrationNotice = { kind: 'good', text: 'System Key copied to the clipboard; the full value stays masked on screen.' };
+      administrationNotice = { kind: 'good', text: 'System Key 已复制到剪贴板，屏幕上仍保持遮蔽。' };
     }
-    catch { administrationNotice = { kind: 'warning', text: 'Clipboard access was unavailable. The full System Key remains masked.' }; }
+    catch { administrationNotice = { kind: 'warning', text: '剪贴板不可用，System Key 仍保持遮蔽状态。' }; }
     renderAdministration();
   });
   keyControls.append(keyInput, copy); keyBlock.append(keyControls);
   const keyActions = document.createElement('div'); keyActions.className = 'button-row';
-  const saveKey = actionButton('Save manual key', 'primary', async () => {
+  const saveKey = actionButton('保存手填密钥', 'primary', async () => {
     try {
       const result = await apiData('/api/admin/credentials/system-key', { method: 'POST', body: JSON.stringify({ value: keyInput.value }) });
       administrationNotice = { kind: 'good', text: `System Key saved. ${result.restarted_services?.length ?? 0} running Package service(s) restarted.` };
@@ -564,23 +637,23 @@ async function renderAdministration() {
     renderAdministration();
   }, !canWrite() || !credentials.editable || !keyInput.value);
   keyInput.addEventListener('input', () => { saveKey.disabled = !canWrite() || !credentials.editable || !keyInput.value; });
-  const generateKey = actionButton('Generate random key', '', async () => {
+  const generateKey = actionButton('生成随机密钥', '', async () => {
     try {
       await apiData('/api/admin/credentials/system-key', { method: 'POST', body: JSON.stringify({ generate: true }) });
-      administrationNotice = { kind: 'good', text: 'A new random System Key was generated.' };
+      administrationNotice = { kind: 'good', text: '已生成新的随机 System Key。' };
     } catch (error) { administrationNotice = { kind: 'bad', text: `System Key: ${error.message ?? error}` }; }
     renderAdministration();
   }, !canWrite() || !credentials.editable);
   keyActions.append(saveKey, generateKey); keyBlock.append(keyActions);
   panel.body.append(keyBlock,
-    valueRow('Current key', credentials.system_key_masked ?? '***'),
-    valueRow('Key length', `${credentials.system_key_length} characters`),
-    valueRow('Credential source', credentials.source),
-    valueRow('Browser Session', `${session.schema ?? 'session'} · ${session.permissions?.join(', ') ?? 'n/a'}`),
-    valueRow('Session expires', Number.isFinite(session.expires_in_seconds) ? `in ${formatDuration(session.expires_in_seconds)}` : 'n/a'),
+    valueRow('当前密钥', credentials.system_key_masked ?? '***'),
+    valueRow('密钥长度', `${credentials.system_key_length} 个字符`),
+    valueRow('凭证来源', credentials.source),
+    valueRow('浏览器会话', `${session.schema ?? 'session'} · ${session.permissions?.join(', ') ?? 'n/a'}`),
+    valueRow('会话到期', Number.isFinite(session.expires_in_seconds) ? `in ${formatDuration(session.expires_in_seconds)}` : 'n/a'),
   );
 
-  const password = section('Login password');
+  const password = section('登录密码');
   // 本機進入面板本來就不需要密碼，再要求舊密碼只會擋住唯一有權改它的人。
   // 這個密碼是給別的設備用的——所以說清楚它擋的是誰。
   password.body.append(text('p', credentials.local
@@ -588,11 +661,11 @@ async function renderAdministration() {
     : 'Enter the current password before setting a new one. Existing Browser Sessions are signed out after a successful change.',
   'description'));
   const passwordForm = document.createElement('form'); passwordForm.className = 'credential-form';
-  const currentPassword = document.createElement('input'); currentPassword.type = 'password'; currentPassword.placeholder = 'Current password'; currentPassword.required = !credentials.local; currentPassword.autocomplete = 'current-password';
+  const currentPassword = document.createElement('input'); currentPassword.type = 'password'; currentPassword.placeholder = '当前密码'; currentPassword.required = !credentials.local; currentPassword.autocomplete = 'current-password';
   currentPassword.hidden = Boolean(credentials.local);
-  const newPassword = document.createElement('input'); newPassword.type = 'password'; newPassword.placeholder = 'New password'; newPassword.minLength = credentials.login_password?.minimum_length ?? 16; newPassword.autocomplete = 'new-password';
-  const confirmPassword = document.createElement('input'); confirmPassword.type = 'password'; confirmPassword.placeholder = 'Repeat new password'; confirmPassword.minLength = newPassword.minLength; confirmPassword.autocomplete = 'new-password';
-  const savePassword = actionButton('Update login password', 'primary', () => {}, !canWrite() || !credentials.editable);
+  const newPassword = document.createElement('input'); newPassword.type = 'password'; newPassword.placeholder = '新密码'; newPassword.minLength = credentials.login_password?.minimum_length ?? 16; newPassword.autocomplete = 'new-password';
+  const confirmPassword = document.createElement('input'); confirmPassword.type = 'password'; confirmPassword.placeholder = '再输一次新密码'; confirmPassword.minLength = newPassword.minLength; confirmPassword.autocomplete = 'new-password';
+  const savePassword = actionButton('更改登录密码', 'primary', () => {}, !canWrite() || !credentials.editable);
   savePassword.type = 'submit';
   if (!credentials.local) passwordForm.append(currentPassword);
   passwordForm.append(newPassword, confirmPassword, savePassword);
@@ -604,66 +677,45 @@ async function renderAdministration() {
       location.replace('/admin');
     } catch (error) { administrationNotice = { kind: 'bad', text: `Login password: ${error.message ?? error}` }; renderAdministration(); }
   });
-  password.body.append(passwordForm, valueRow('Minimum length', `${credentials.login_password?.minimum_length ?? 16} characters`));
+  password.body.append(passwordForm, valueRow('最短长度', `${credentials.login_password?.minimum_length ?? 16} 个字符`));
 
-  // 網路可達性放在「Reachable addresses」之前：先決定綁在哪，那份清單才有意義。
-  const network = section('Network access');
+  // 网络可达性放在地址清单之前：先决定绑在哪，那份清单才有意义。
+  const network = section('网络访问');
   const net = await apiData('/api/admin/network').catch(() => null);
   if (!net) {
-    network.body.append(text('p', 'Could not read the current bind address.', 'alert error'));
+    network.body.append(text('p', '读不到当前的绑定地址。', 'alert error'));
   } else {
     network.body.append(
       text('p', '只监听 127.0.0.1 时，这个控制台只在这台设备上应答，本机进入不需要密码。'
-        + '开放局域网访问后，同一网络上的任何设备都能连上，登录密码是唯一的屏障——'
-        + '所以开放之前先确认密码不是随机生成的那一串。', 'description'),
-      valueRow('Configured bind', `${net.host}:${net.port}`),
-      valueRow('Currently listening on', net.running_host),
+        + '开放局域网访问后，同一网络上的任何设备都能连上，登录密码是唯一的屏障。', 'description'),
+      valueRow('监听地址', `${net.running_host}:${net.running_port}`),
     );
     if (net.restart_required) {
-      network.body.append(text('p', 'The configured address differs from the running one. Restart to apply it.', 'alert warning'));
+      network.body.append(text('p',
+        `配置里已经是 ${net.host}:${net.port}，但运行中的还是 ${net.running_host}:${net.running_port}，重启后生效。`,
+        'alert warning'));
+      network.body.append(restartRow(net));
     }
-    // 生效需要重啟，而重啟必須能在瀏覽器裡完成——讓使用者為了套用一個設定去開 Termux，
-    // 等於把這個開關做了一半。
-    const restartRow = document.createElement('div');
-    restartRow.className = 'button-row';
-    restartRow.append(actionButton('重启框架', net.restart_required ? 'primary' : '', async () => {
-      if (!confirm('重启 Framework？\n\n控制台会短暂中断，数秒后恢复。')) return;
-      try {
-        await apiData('/api/admin/restart', { method: 'POST', body: '{}' });
-        administrationNotice = { kind: 'good', text: '正在重启；数秒后请重新整理页面。' };
-      } catch (error) {
-        administrationNotice = { kind: 'bad', text: `重启失败：${error.message ?? error}` };
-      }
-      renderAdministration();
-    }, !canWrite()));
-    network.body.append(restartRow);
-    // 一句話加一個勾選框說不清後果，而後果是「同一個 WiFi 上的任何人都到得了這個面板」。
-    // 做成一個明說自己要幹什麼的按鈕，狀態寫在旁邊。
+
+    // 一句话加一个勾选框说不清后果，而后果是「同一个 WiFi 上的任何人都到得了这个面板」。
+    // 而且改完还要用户自己去点重启，等于把这个开关做了一半——所以确认之后就直接重启。
     const lanRow = document.createElement('div');
     lanRow.className = 'button-row';
     lanRow.append(actionButton(
-      net.lan_enabled ? '只允许本机访问' : '允许局域网访问',
+      net.lan_enabled ? '改为只允许本机访问' : '允许局域网访问',
       net.lan_enabled ? '' : 'primary',
-      async () => {
-        const next = !net.lan_enabled;
-        if (next && !confirm('允许局域网访问？\n\n同一个网络上的任何设备都能打开这个控制台，'
-          + '唯一的屏障是登录密码。本机进入不需要密码，但别的设备需要。')) return;
-        try {
-          const result = await apiData('/api/admin/network', {
-            method: 'POST', body: JSON.stringify({ lan_enabled: next }),
-          });
-          administrationNotice = { kind: result.restart_required ? 'warning' : 'good',
-            text: result.restart_required
-              ? `绑定地址已设为 ${result.host}，重启后生效。`
-              : `绑定地址是 ${result.host}。` };
-        } catch (error) {
-          administrationNotice = { kind: 'bad', text: `Network access: ${error.message ?? error}` };
-        }
-        renderAdministration();
-      }, !canWrite()));
+      () => applyNetworkChange(
+        { lan_enabled: !net.lan_enabled },
+        net,
+        net.lan_enabled
+          ? { title: '改为只允许本机访问', body: '改完之后，只有这台手机自己能打开控制台，其他设备会连不上。' }
+          : { title: '允许局域网访问',
+            body: '同一个网络上的任何设备都能打开这个控制台，唯一的屏障是登录密码。'
+              + '开放之前请先确认密码不是系统生成的那一串随机字符。' }),
+      !canWrite()));
     network.body.append(lanRow);
 
-    // 埠會撞。撞了就開不了面板，而使用者沒有 shell 可以去改設定檔——所以這裡必須能改。
+    // 端口会撞。撞了面板就打不开，而用户没有 shell 去改配置文件——所以这件事必须能在浏览器里做完。
     const portForm = document.createElement('form');
     portForm.className = 'inline-form';
     const portInput = document.createElement('input');
@@ -673,55 +725,41 @@ async function renderAdministration() {
     portLabel.setAttribute('for', 'admin-port');
     portLabel.textContent = '控制台端口';
     portForm.append(portLabel, portInput, actionButton('更改端口', '', null, !canWrite(), 'submit'));
-    portForm.addEventListener('submit', async (event) => {
+    portForm.addEventListener('submit', (event) => {
       event.preventDefault();
       const port = Number(portInput.value);
       if (!Number.isInteger(port) || port < 1024 || port > 65535) {
         administrationNotice = { kind: 'bad', text: '端口必须是 1024–65535 之间的整数。' };
         return renderAdministration();
       }
-      if (port !== Number(net.port) && !confirm(`把控制台端口改成 ${port}？\n\n`
-        + `重启后当前地址会失效，请改用新端口打开。`)) return;
-      try {
-        const result = await apiData('/api/admin/network', {
-          method: 'POST', body: JSON.stringify({ port }),
-        });
-        administrationNotice = { kind: result.restart_required ? 'warning' : 'good',
-          text: result.restart_required
-            ? `端口已设为 ${result.port}，重启后请用新端口打开控制台。`
-            : `端口是 ${result.port}。` };
-      } catch (error) {
-        administrationNotice = { kind: 'bad', text: `端口更改失败：${error.message ?? error}` };
+      if (port === Number(net.running_port)) {
+        administrationNotice = { kind: 'good', text: `控制台已经在 ${port} 上监听。` };
+        return renderAdministration();
       }
-      renderAdministration();
+      return applyNetworkChange({ port }, net, {
+        title: '更改控制台端口',
+        body: `重启后控制台会改在 ${port} 端口上。当前这个地址会失效，`
+          + '完成后浏览器会自动跳到新地址。小于 1024 的端口用不了，Termux 没有那个权限。',
+      });
     });
     network.body.append(portForm);
   }
 
-  // 綁在 loopback 時，這些位址上沒有東西在聽。把它們列成「可達」是在說一件不成立的事，
-  // 使用者照著打開只會連不上，然後去查一個根本不存在的網路問題。
+  // 只监听 loopback 时，别的地址上没有任何东西在听。把它们列出来只会让人照着打开、
+  // 连不上，然后去查一个根本不存在的网络问题——所以那种情况下一条都不列。
   const listeningEverywhere = (net?.running_host ?? '127.0.0.1') === '0.0.0.0';
-  const addresses = section(listeningEverywhere ? 'Reachable addresses' : 'Addresses on this device');
+  const shown = (access.addresses ?? []).filter((item) => listeningEverywhere || item.kind === 'loopback');
+  const addresses = section(listeningEverywhere ? '可访问地址' : '本机地址');
   if (!listeningEverywhere) {
     addresses.body.append(text('p',
-      `控制台目前只在 ${net?.running_host ?? '127.0.0.1'}:${net?.port ?? 8980} 上监听，`
-      + '下面这些地址上没有东西在听。要让别的设备打得开，先用上面的「允许局域网访问」。',
-      'description'));
+      '控制台目前只在这台设备上应答。要让别的设备打得开，先用上面的「允许局域网访问」。', 'description'));
   }
-  if (!access.addresses?.length) addresses.body.append(text('p', 'No non-loopback address is currently reported.', 'empty'));
-  for (const item of access.addresses ?? []) {
-    const reachable = listeningEverywhere || item.kind === 'loopback';
-    if (reachable) {
-      const link = document.createElement('a');
-      link.className = 'list-link'; link.href = item.admin_url;
-      link.append(text('b', item.admin_url), text('span', item.kind));
-      addresses.body.append(link);
-    } else {
-      const row = document.createElement('div');
-      row.className = 'list-link muted-row';
-      row.append(text('b', item.admin_url), text('span', `${item.kind} · 未监听`));
-      addresses.body.append(row);
-    }
+  if (!shown.length) addresses.body.append(text('p', '当前没有可用地址。', 'empty'));
+  for (const item of shown) {
+    const link = document.createElement('a');
+    link.className = 'list-link'; link.href = item.admin_url;
+    link.append(text('b', item.admin_url), text('span', item.kind));
+    addresses.body.append(link);
   }
   replacePage(panel.card, password.card, network.card, addresses.card);
 }
@@ -751,46 +789,46 @@ async function renderRuntime() {
   const [overview, integrity, stage, dev] = await Promise.all([
     apiData('/api/admin/overview'), apiData('/api/admin/integrity'), apiData('/api/stage/services'), apiData('/api/dev/packages'),
   ]);
-  const framework = section('Framework runtime');
+  const framework = section('Framework 运行时');
   const report = overview.components?.framework?.value;
   framework.body.append(
-    statusRow('Health', report?.health ?? 'unknown', statusKind(report?.health)),
-    valueRow('Build', report?.build),
-    valueRow('Last update', report?.last_update ? `${report.last_update.status} · ${report.last_update.candidate_build ?? 'n/a'}` : 'none'),
-    valueRow('Integrity', integrity.ok ? 'all core checks passed' : 'needs review'),
+    statusRow('健康', report?.health ?? '未知', statusKind(report?.health)),
+    valueRow('构建', report?.build),
+    valueRow('上次更新', report?.last_update ? `${stateWord(report.last_update.status)} · ${report.last_update.candidate_build ?? '未知'}` : '无'),
+    valueRow('完整性', integrity.ok ? 'all core checks passed' : 'needs review'),
   );
-  const services = section('Stage services');
+  const services = section('Stage 服务');
   for (const item of stage.services ?? []) {
     services.body.append(statusRow(item.name, `${item.desired} → ${item.process?.state} / ${item.health?.state}`,
       item.process?.state === 'running' && item.health?.state !== 'unhealthy' ? 'good' : statusKind(item.process?.state)));
   }
-  const packages = section('Package and Dev Runtime');
+  const packages = section('Package 与开发运行时');
   const packageCheck = integrity.checks?.installed_packages;
   packages.body.append(
-    valueRow('Loaded packages', packageCheck ? `${packageCheck.loaded} / ${packageCheck.count}` : 'n/a'),
-    valueRow('Load failures', packageCheck?.failed?.length ? packageCheck.failed.join(', ') : 'none'),
-    valueRow('Dev Mounts', dev.mounts?.length ?? 0),
+    valueRow('已加载的 Package', packageCheck ? `${packageCheck.loaded} / ${packageCheck.count}` : 'n/a'),
+    valueRow('加载失败', packageCheck?.failed?.length ? packageCheck.failed.join(', ') : 'none'),
+    valueRow('开发挂载', dev.mounts?.length ?? 0),
   );
   replacePage(framework.card, services.card, packages.card);
 }
 
-function createObservationPanel(title = 'Log observation') {
+function createObservationPanel(title = '日志观察') {
   const panel = section(title);
-  panel.body.append(text('p', 'Start Observation only follows new log output. Clear View changes this browser view, never the stored log evidence.', 'description'));
+  panel.body.append(text('p', '「开始观察」只跟随新产生的日志。「清空视图」只清这个浏览器窗口，不会动已经存下来的日志。', 'description'));
   const controls = document.createElement('div'); controls.className = 'svc-controls';
   const select = document.createElement('select');
-  const start = actionButton('Start Observation', 'primary', startObservation);
-  const clear = actionButton('Clear View', '', () => { log.textContent = ''; meta.textContent = `View cleared at offset ${state.offset}.`; }, true);
+  const start = actionButton('开始观察', 'primary', startObservation);
+  const clear = actionButton('清空视图', '', () => { log.textContent = ''; meta.textContent = `View cleared at offset ${state.offset}.`; }, true);
   const follow = document.createElement('label'); follow.className = 'meta';
-  const check = document.createElement('input'); check.type = 'checkbox'; check.checked = true; follow.append(check, document.createTextNode(' Auto Follow'));
-  const download = actionButton('Download visible log', '', () => {
+  const check = document.createElement('input'); check.type = 'checkbox'; check.checked = true; follow.append(check, document.createTextNode(' 自动跟随'));
+  const download = actionButton('下载当前日志', '', () => {
     const link = document.createElement('a');
     link.href = URL.createObjectURL(new Blob([log.textContent], { type: 'text/plain;charset=utf-8' }));
     link.download = `observation-${state.component ?? 'log'}-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
     link.click(); URL.revokeObjectURL(link.href);
   }, true);
   controls.append(select, start, clear, follow, download);
-  const meta = text('p', 'Choose a component and start an observation.', 'meta');
+  const meta = text('p', '选择一个组件，然后开始观察。', 'meta');
   const log = document.createElement('pre'); log.className = 'logview';
   panel.body.append(controls, meta, log);
   const state = { component: null, offset: 0, timer: null };
@@ -830,14 +868,19 @@ function createObservationPanel(title = 'Log observation') {
 }
 
 async function renderLogs() {
-  const observation = createObservationPanel('Logs');
-  // Package 生命週期作業只在這裡出現一次；先前每個 Package 頁面各掛一份，
-  // 同一批作業重複四處，要查失敗原因時反而不知道看哪一份。
-  let jobs = null;
+  const observation = createObservationPanel('日志');
+  // 生命周期作业与更新历史只在这里出现一次。先前 Package 的作业每个页面各挂一份，
+  // 同一批作业重复四处，要查失败原因时反而不知道看哪一份；Framework 的则一直留在
+  // 更新页上，让每次升级都先读一遍与决定无关的记录。
+  let packageJobs = null;
+  let frameworkOps = null;
   try {
-    jobs = renderJobs(await apiData('/api/admin/package-manager'));
-  } catch { /* 作業列表拿不到不該讓日誌頁整頁失敗 */ }
-  replacePage(observation.card, jobs);
+    packageJobs = renderJobs(await apiData('/api/admin/package-manager'));
+  } catch { /* 作业列表拿不到不该让日志页整页失败 */ }
+  try {
+    frameworkOps = renderFrameworkOperations(await apiData('/api/admin/framework-update'));
+  } catch { /* 同上 */ }
+  replacePage(observation.card, packageJobs, frameworkOps);
   pageCleanup = observation.cleanup;
 }
 
@@ -848,7 +891,7 @@ function shareYourAppLink() {
   link.target = '_blank';
   link.rel = 'noopener';
   link.className = 'button-link';
-  link.textContent = 'Share your App';
+  link.textContent = '发布你的应用';
   return link;
 }
 
@@ -868,16 +911,16 @@ async function renderWorkspace() {
   const data = await apiData('/api/admin/workspaces');
   const nodes = [];
 
-  const head = section('Projects');
+  const head = section('项目');
   head.head?.append(actionButton('新建项目', 'primary', () => promptCreateWorkspace(data)), shareYourAppLink());
-  head.body.append(valueRow('Workspace root', data.root));
+  head.body.append(valueRow('工作区根目录', data.root));
   if (!data.root_exists) {
     head.body.append(text('p', '这个目录还不存在，新建第一个项目时会自动创建。', 'empty'));
   }
   nodes.push(head.card);
 
   if (!data.projects?.length) {
-    const empty = section('No project yet');
+    const empty = section('还没有项目');
     empty.body.append(text('p', '用「新建项目」从框架模板生成一个，或在已安装的 Package 卡片上点 Dev 派生一份。', 'empty'));
     nodes.push(empty.card);
     replacePage(...nodes);
@@ -886,25 +929,25 @@ async function renderWorkspace() {
 
   for (const project of data.projects) {
     const card = section(project.name ? `${project.name} · ${project.slug}` : project.slug);
-    card.body.append(valueRow('Path', project.path + (project.external ? '（在 workspace root 之外）' : '')));
+    card.body.append(valueRow('路径', project.path + (project.external ? '（在 workspace root 之外）' : '')));
     if (!project.valid) {
       card.body.append(text('p', `不是可掛載的專案：${project.invalid_reason}`, 'alert warning'));
     } else {
       card.body.append(
         valueRow('Package', `${project.package_id}${project.version ? ` · ${project.version}` : ''}`),
-        valueRow('Size', formatBytes(project.size_bytes)),
+        valueRow('大小', formatBytes(project.size_bytes)),
       );
     }
     const mount = project.mount;
-    card.body.append(valueRow('State', mount
+    card.body.append(valueRow('状态', mount
       ? `mounted @${mount.slug} · ${mount.status}${mount.error ? ` — ${mount.error}` : ''}`
       : 'not mounted'));
-    if (mount) card.body.append(valueRow('Watch', `${mount.watch_mode} · ${mount.seq ?? 0} reloads`));
+    if (mount) card.body.append(valueRow('监视', `${mount.watch_mode} · ${mount.seq ?? 0} reloads`));
     if (project.released) {
-      card.body.append(valueRow('Released alongside', `${project.released.version} (${project.released.status})`));
+      card.body.append(valueRow('随同发布', `${project.released.version} (${project.released.status})`));
     }
     if (mount?.services?.length) {
-      card.body.append(valueRow('Services', mount.services.map((sv) => `${sv.id} (${sv.state})`).join(', ')));
+      card.body.append(valueRow('服务', mount.services.map((sv) => `${sv.id} (${sv.state})`).join(', ')));
     }
 
     const row = document.createElement('div');

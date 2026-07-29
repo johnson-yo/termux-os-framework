@@ -150,7 +150,8 @@ curl -s -H "$AUTH" $B/api/admin/workspaces \
 grep -q "apiData('/api/admin/workspaces')" "$ROOT/web/admin/app-core.js" \
   && ok "視圖用 apiData 解析（api 回傳的是 Response）" || bad "工作區視圖用錯 API helper"
 # 版面必須與其它管理頁一致：用共用的 valueRow，而不是自造一套 kv-grid
-grep -q "valueRow('Workspace root', data.root)" "$ROOT/web/admin/app-core.js" \
+# 只認版式，不認文案：介面文字會改，「用共用 valueRow 而不是自造 kv-grid」才是要守的。
+grep -q "valueRow(.*, data.root)" "$ROOT/web/admin/app-core.js" \
   && ! grep -q "kv-grid" "$ROOT/web/admin/app-core.js" \
   && ok "工作區卡片沿用共用 valueRow 版式" || bad "工作區卡片版式與其它頁不一致"
 # 未掛載的專案也必須看得見，否則使用者只能開 shell 執行 ls 才知道有什麼

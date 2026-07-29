@@ -207,8 +207,9 @@ fi
 
 echo "--- 4. 声明式 Menu + Overview ---"
 curl -sf -b "$COOKIE" "$BASE/api/admin/menu" >"$WORK/menu.json"
+# 認路徑順序，不認標題文字：介面文案會改，導覽的結構與順序不該跟著改。
 if node -e 'const d=require(process.argv[1]);process.exit(d.schema==="termux-os.admin-menu.v1"
-  &&d.menu.map(x=>x.title).join(",")==="Status,Applications,Services,Packages,Adapters,System"?0:1)' "$WORK/menu.json"; then
+  &&d.menu.map(x=>x.path).join(",")==="/admin/status,/admin/applications,/admin/services,/admin/packages,/admin/adapters,/admin/system"?0:1)' "$WORK/menu.json"; then
   ok "fixed top navigation is declarative and ordered"
 else
   bad "fixed top navigation is declarative and ordered"
@@ -245,7 +246,8 @@ else
   bad "Admin WebUI stores no long-lived token" "$BAD_STORAGE"
 fi
 
-if grep -q 'Reconnecting to Framework' "$ROOT/web/admin/admin-controls.js" \
+# 只認行為，不認文案：重啟窗口要顯示成「正在重新連接」而不是報成失敗。
+if grep -q "className = 'reconnect-state'" "$ROOT/web/admin/admin-controls.js" \
   && ! grep -q 'Unable to load Package Manager' "$ROOT/web/admin/admin-controls.js"; then
   ok "Package restart window is shown as reconnecting, not a false failure"
 else
@@ -333,7 +335,7 @@ else
   bad "Download still gated behind Details"
 fi
 # 恆定的檔名沒有資訊量
-grep -q "valueRow('Source archive', formatBytes(file.size))" "$ROOT/web/admin/admin-controls.js" \
+grep -q "valueRow(.*, formatBytes(file.size))" "$ROOT/web/admin/admin-controls.js" \
   && ok "Source archive shows size, not the constant filename" || bad "Source archive still prints source.tar.gz"
 
 # 綁定位址必須能從介面改，且改完要說「需重啟」——HOST 在啟動時就綁定了

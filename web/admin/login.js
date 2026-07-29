@@ -30,14 +30,14 @@ form.addEventListener('submit', async (event) => {
     const result = await response.json();
     if (!response.ok) {
       error.textContent = result.error === 'too_many_attempts'
-        ? 'Too many attempts. Wait one minute and try again.'
-        : 'The administrator password is not correct.';
+        ? '尝试次数过多，请等一分钟再试。'
+        : '管理员密码不正确。';
       error.hidden = false;
       return;
     }
     location.replace(safeNext());
   } catch {
-    error.textContent = 'Framework is not reachable. Check the connection and try again.';
+    error.textContent = '连不上 Framework，请检查连接后重试。';
     error.hidden = false;
   } finally {
     button.disabled = false;

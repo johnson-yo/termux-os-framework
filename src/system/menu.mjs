@@ -49,7 +49,9 @@ if (process.argv.includes('--self-test')) {
   const t = (name, cond) => { console.log(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
   const read = buildAdminMenu();
   const flat = read.menu.flatMap((x) => [x, ...x.children]);
-  t('fixed top-level order', read.menu.map((x) => x.title).join(',') === 'Status,Applications,Services,Packages,Adapters,System');
+  // 守的是順序本身，不是當下的標題文字——介面文案會改，導覽順序不該跟著改。
+  t('fixed top-level order', read.menu.map((x) => x.path).join(',')
+    === '/admin/status,/admin/applications,/admin/services,/admin/packages,/admin/adapters,/admin/system');
   t('core pages stay visible to every authenticated session', flat.some((x) => x.path === '/admin/system/administration'));
   t('Package Setting lives under Packages', flat.find((x) => x.path === '/admin/packages/settings')?.parent === '/admin/packages');
   t('Framework Update lives under System', flat.find((x) => x.path === '/admin/system/framework-update')?.parent === '/admin/system');
