@@ -63,7 +63,7 @@ function renderMigration(step, migration) {
 async function load() {
   try {
     const response = await fetch('/api/admin/setup', { headers: { Accept: 'application/json' } });
-    if (!response.ok) { location.replace('/admin/login'); return; }
+    if (!response.ok) { location.replace('/admin'); return; }
     const data = await response.json();
     setupToken = data.setup_token;
     el('setup-password').textContent = data.admin_password;
@@ -129,7 +129,8 @@ document.addEventListener('click', async (event) => {
       card.setAttribute('aria-busy', 'false');
       return;
     }
-    location.replace('/admin/login');
+    // 回 /admin：本機會就地取得 Session 直接進去，別的來源才會看到登入頁。
+    location.replace('/admin');
   } catch {
     fail('保存失败，Framework 没有响应。');
     button.disabled = false;

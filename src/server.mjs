@@ -1710,6 +1710,16 @@ const server = http.createServer(async (req, res) => {
     migrationChanged: Boolean(CONFIG_MIGRATION && migrationChangedConfig(CONFIG_MIGRATION)),
   });
 
+  // 手機上的瀏覽器就是機主本人。密碼是用來擋別的機器的，在本機要求它只會讓使用者
+  // 去找一組從來沒給過他的密碼。這裡發的是真的 Session 而不是繞過認證，所以寫入仍然
+  // 受 CSRF 保護：設備上的其他網頁能對 loopback 發請求，但讀不到讓請求生效的 token。
+  const localEntry = () => {
+    if (auth?.kind === 'session' || !isLoopbackAddress(req.socket?.remoteAddress)) return null;
+    const session = openLocalSession();
+    auth = { kind: 'session', permissions: session.permissions, session };
+    return sessionCookie(session);
+  };
+
   // 登录页与它的最小静态资源公开；统一 Shell 只接受 Browser Session。
   if (url === '/admin/setup') {
     return setupStep() === 'none' ? redirect(res, '/admin/login') : serveAdminFile(res, 'setup.html');
@@ -1717,7 +1727,11 @@ const server = http.createServer(async (req, res) => {
   if (url === '/admin/setup.js') return serveAdminFile(res, 'setup.js');
   if (url === '/admin/login') {
     if (setupStep() !== 'none') return redirect(res, '/admin/setup');
-    if (auth?.kind === 'session') return redirect(res, '/admin/status/overview');
+    // 本機沒有登入這回事：舊書籤或舊連結指到這裡時，直接讓它進去，而不是要一組沒給過的密碼。
+    const cookie = localEntry();
+    if (auth?.kind === 'session') {
+      return redirect(res, '/admin/status/overview', cookie ? { 'Set-Cookie': cookie } : {});
+    }
     return serveAdminFile(res, 'login.html');
   }
   // 登入前就要拿得到：瀏覽器是在顯示登入頁或 Setup 頁時去抓 manifest、圖示與 Service Worker 的。
@@ -1732,16 +1746,6 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': MIME['.js'], 'Service-Worker-Allowed': '/admin' });
     return res.end(fs.readFileSync(file));
   }
-  // 手機上的瀏覽器就是機主本人。密碼是用來擋別的機器的，在本機要求它只會讓使用者
-  // 去找一組從來沒給過他的密碼。這裡發的是真的 Session 而不是繞過認證，所以寫入仍然
-  // 受 CSRF 保護：設備上的其他網頁能對 loopback 發請求，但讀不到讓請求生效的 token。
-  const localEntry = () => {
-    if (auth?.kind === 'session' || !isLoopbackAddress(req.socket?.remoteAddress)) return null;
-    const session = openLocalSession();
-    auth = { kind: 'session', permissions: session.permissions, session };
-    return sessionCookie(session);
-  };
-
   if (url === '/admin' || url === '/admin/') {
     // Setup 在這裡直接以 200 回應，而不是導向 /admin/setup。更新期間跑 core-check 的是
     // **舊版本的** 控制器，它要求 /admin 回 200；改成轉址會讓每一次從舊版本上來的更新
