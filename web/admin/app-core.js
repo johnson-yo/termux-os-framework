@@ -613,7 +613,9 @@ async function renderAdministration() {
     network.body.append(text('p', 'Could not read the current bind address.', 'alert error'));
   } else {
     network.body.append(
-      text('p', 'Loopback only means this control center answers on this device alone. Allowing LAN access lets any device on the same network reach it, with the login password as the only barrier.', 'description'),
+      text('p', '只监听 127.0.0.1 时，这个控制台只在这台设备上应答，本机进入不需要密码。'
+        + '开放局域网访问后，同一网络上的任何设备都能连上，登录密码是唯一的屏障——'
+        + '所以开放之前先确认密码不是随机生成的那一串。', 'description'),
       valueRow('Configured bind', `${net.host}:${net.port}`),
       valueRow('Currently listening on', net.running_host),
     );

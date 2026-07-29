@@ -11,6 +11,7 @@ const el = (id) => document.getElementById(id);
 const card = el('setup-card');
 const error = el('setup-error');
 let setupToken = null;
+const state = { minimum: 16 };
 
 const fail = (message) => { error.textContent = message; error.hidden = false; };
 
@@ -66,6 +67,9 @@ async function load() {
     if (!response.ok) { location.replace('/admin'); return; }
     const data = await response.json();
     setupToken = data.setup_token;
+    // 最小長度由後端給，寫死在這裡遲早跟真正的規則對不上。
+    state.minimum = data.password_minimum_length ?? 16;
+    el('new-password').placeholder = `至少 ${state.minimum} 个字符`;
     el('setup-password').textContent = data.admin_password;
     el('setup-token').textContent = data.system_key;
     if (!data.editable) {
@@ -75,7 +79,7 @@ async function load() {
     }
     renderMigration(data.step, data.migration);
     el('setup-lead').textContent = el('setup-lead').textContent === '正在读取本机凭证…'
-      ? '这些是这台设备的管理凭证。现在记下来，或者直接改成你自己的密码。'
+      ? '这台设备已经可以直接使用，下面是它的管理凭证。'
       : el('setup-lead').textContent;
     el('setup-body').hidden = false;
     card.setAttribute('aria-busy', 'false');
@@ -117,7 +121,7 @@ document.addEventListener('click', async (event) => {
     const result = await response.json();
     if (!response.ok) {
       fail(result.error === 'login_password_too_short'
-        ? '密码太短了，至少 12 个字符。'
+        ? `密码太短了，至少 ${state.minimum} 个字符。`
         : `没能保存：${result.detail ?? result.error}`);
       button.disabled = false;
       return;

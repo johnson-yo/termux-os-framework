@@ -866,6 +866,7 @@ const server = http.createServer(async (req, res) => {
       version: FRAMEWORK_VERSION,
       editable: credentialsEditable,
       setup_token: SETUP_TOKEN,
+      password_minimum_length: AUTH_PASSWORD_MIN_LENGTH,
       admin_password: CFG.auth.admin_password,
       system_key: CFG.auth.admin_token,
       // 遷移已經在啟動時發生過了（不然服務起不來），這裡呈現的是它做了什麼，
