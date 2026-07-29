@@ -69,8 +69,10 @@ sys.exit(0 if d["device"]=="smoke-device" and d["git_commit"] else 1)' \
 echo "--- 3. 頁面入口（§2：用戶不該猜隱藏路徑）---"
 # 全新安裝的設備還沒有人認領憑證。密碼是隨機生成寫進私有檔案的，只有本機瀏覽器能看到它，
 # 所以這裡的入口是 Setup 而不是登入框——否則使用者得開 Termux 打指令才進得去。
-C=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/admin")
-[ "$C" = 302 ] && ok "未認領的設備 /admin → Setup" || bad "未認領的設備 /admin → Setup" "http=$C"
+# /admin 直接回 200 的 Setup 頁，不轉址：更新時是舊版本的控制器在檢查這個狀態碼。
+C=$(curl -s -o "$WORK/entry.html" -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/admin")
+[ "$C" = 200 ] && grep -q 'setup.js' "$WORK/entry.html" \
+  && ok "未認領的設備 /admin 顯示 Setup" || bad "未認領的設備 /admin 顯示 Setup" "http=$C"
 C=$(curl -s -o "$WORK/setup.html" -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/admin/setup")
 [ "$C" = 200 ] && grep -q 'setup.js' "$WORK/setup.html" \
   && ok "Setup 頁可直接開啟" || bad "Setup 頁可直接開啟" "http=$C"

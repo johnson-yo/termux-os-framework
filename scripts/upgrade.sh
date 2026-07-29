@@ -57,8 +57,14 @@ else
   download_archive "$INSTALL_VERSION"
 fi
 
+# A Framework that cannot start is exactly the one that needs upgrading. Refusing here left such a
+# device with no way forward through either the panel or this installer, which is the situation the
+# upgrade path exists for. The existing last-good is preserved rather than overwritten with a build
+# that just failed its own health check.
 if [ -f "$FRAMEWORK_CONTROL" ]; then
-  run_controller backup >/dev/null 2>&1 || die "current Framework failed health/backup preflight"
+  if ! run_controller backup >/dev/null 2>&1; then
+    say "current Framework failed its health check; keeping the existing last-good and upgrading anyway"
+  fi
 fi
 INSTALL_MODE="upgrade"
 prepare_and_deploy "$INSTALL_VERSION"

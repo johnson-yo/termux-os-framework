@@ -54,6 +54,10 @@ There is deliberately no first-party `packages/` directory. Package source is de
   changed by a later release, because it is transplanted back over the new one.
 - Assume the user never opens Termux. Anything they must do to run this system has to be possible in
   the browser, including reading the credentials the installer generated for them.
+- Do not change what the previous version's `core_check` inspects — `/admin` returning 200, `/health`,
+  `/api/features`, `/api/admin/status`, browser login. The post-check that decides whether an update
+  is kept runs from the *old* controller, so breaking one of these makes the new version uninstallable
+  everywhere at once, and the failure appears on users' devices rather than here.
 - Update the nearest `CLAUDE.md` when a directory contract changes.
 
 ## Required checks

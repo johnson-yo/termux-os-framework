@@ -741,8 +741,20 @@ cmd_update() {
   ensure_no_dev_mounts || die "Dev Runtime active，更新未動現場"
   snapshot_boundaries "$UPDATE_DIR/$UPDATE_ID.before"
 
+  # 當前版本不健康，正是最需要更新的時候。過去這裡直接 die，於是一個起不來的
+  # Framework 連自己的更新通道都用不了，只能開 shell 手動救——而使用者沒有 shell。
+  # 保留既有 last-good 不覆蓋（不能拿壞掉的版本蓋掉已知good），但更新照常進行。
   write_state last_good running "保存健康舊版本" false
-  cmd_backup
+  if ( cmd_backup ); then
+    :
+  else
+    if [ -f "$PERSIST/backups/last-good.tar.gz" ]; then
+      say "當前版本未通過健康檢查：保留既有 last-good（$(last_good_build)）不覆蓋，繼續更新"
+    else
+      say "當前版本未通過健康檢查，且沒有既有 last-good：本次更新失敗時無可回退版本"
+    fi
+    append_history backup_skipped false "current build unhealthy; existing last-good preserved"
+  fi
 
   write_state switch running "停止並原子切換 runtime" false
   switch_candidate || die "runtime 原子切換失敗"

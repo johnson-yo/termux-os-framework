@@ -217,6 +217,37 @@ run_control stop >/dev/null
 if run_control backup >/dev/null 2>&1; then bad "unhealthy backup rejected"; else ok "unhealthy backup rejected"; fi
 if run_control start >/dev/null; then ok "runtime restart after negative test"; else bad "runtime restart after negative test"; fi
 
+echo "--- 8. 舊版本的 core-check 仍然接受這個候選 ---"
+# 更新期間跑 post-check 的是**舊版本的**控制器。任何改動了它所檢查的回應的變更，
+# 都會讓每一次從舊版本上來的更新失敗回滾——也就是新版本誰都裝不上，而且症狀
+# 出現在使用者的設備上，不在這裡。所以這些契約要當場釘住。
+ENTRY_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$BASE_URL/admin")
+if [ "$ENTRY_CODE" = 200 ]; then ok "/admin 回 200（舊 core-check 的硬性要求）"; else bad "/admin 回 200" "http=$ENTRY_CODE"; fi
+if curl -sf -m 5 "$BASE_URL/api/features" | grep -q '"browser_session"'; then
+  ok "feature schema 仍宣告 browser_session"
+else
+  bad "feature schema 仍宣告 browser_session"
+fi
+if curl -sf -m 5 "$BASE_URL/health" >/dev/null; then ok "/health 可用"; else bad "/health 可用"; fi
+
+echo "--- 9. 起不來的 Framework 仍然更新得動 ---"
+# 一個因為配置或程式碼而起不來的 Framework，正是最需要更新的那一個。
+# 這裡曾經直接拒絕，於是設備卡死在壞掉的版本上，只能開 shell 手動救——而使用者沒有 shell。
+LAST_GOOD_BEFORE="$(sha256sum "$PERSIST/backups/last-good.tar.gz" | awk '{print $1}')"
+run_control stop >/dev/null 2>&1 || true
+if run_control update "$GOOD" "$GOOD.sha256" >/dev/null 2>&1; then
+  ok "current 不健康時仍可更新"
+else
+  bad "current 不健康時仍可更新"
+fi
+need test "$(curl -sf "$BASE_URL/api/dev/version" | node -pe 'JSON.parse(require("fs").readFileSync(0)).deploy_id')" = good-build
+# 壞掉的版本不得覆蓋已知good的備份，否則「還能退回去」這個保證就沒了。
+if [ "$(sha256sum "$PERSIST/backups/last-good.tar.gz" | awk '{print $1}')" = "$LAST_GOOD_BEFORE" ]; then
+  ok "不健康時保留既有 last-good 不覆蓋"
+else
+  bad "不健康時保留既有 last-good 不覆蓋"
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 exit "$FAIL"

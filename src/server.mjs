@@ -1694,7 +1694,10 @@ const server = http.createServer(async (req, res) => {
     return res.end(fs.readFileSync(file));
   }
   if (url === '/admin' || url === '/admin/') {
-    if (setupStep() !== 'none') return redirect(res, '/admin/setup');
+    // Setup 在這裡直接以 200 回應，而不是導向 /admin/setup。更新期間跑 core-check 的是
+    // **舊版本的** 控制器，它要求 /admin 回 200；改成轉址會讓每一次從舊版本上來的更新
+    // 都在 post-check 失敗並回滾——也就是新版本誰都裝不上。
+    if (setupStep() !== 'none') return serveAdminFile(res, 'setup.html');
     return auth?.kind === 'session'
       ? redirect(res, '/admin/status/overview')
       : serveAdminFile(res, 'login.html');
