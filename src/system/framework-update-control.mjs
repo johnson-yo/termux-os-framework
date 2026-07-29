@@ -83,11 +83,42 @@ export function updateFrameworkUpdateUpload(id, patch) {
   return publicUpload(next);
 }
 
-export function listFrameworkUpdateUploads() {
+/** 保留几个已结束的候选就够了：更早的既装不上，也不该继续占着设备的存储。 */
+const RESOLVED_UPLOADS_KEPT = 3;
+/** 超过这个时间还没走完检查的候选，不再当作「正在进行」。 */
+const PENDING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Prune candidates that can no longer lead to an install.
+ *
+ * A failed or applied candidate is a finished story: the reason is in the update history and the
+ * archive is dead weight. Keeping every one of them filled the update page with months-old files
+ * the user could neither install nor understand, and quietly grew on a phone's storage. The newest
+ * few are kept so a just-finished result is still inspectable.
+ */
+function pruneResolvedUploads(uploads) {
+  const pending = uploads.filter((upload) => ['uploaded', 'preflight_passed'].includes(upload.status));
+  const resolved = uploads.filter((upload) => !['uploaded', 'preflight_passed'].includes(upload.status));
+  // 未处理的候选也只留最新一个，而且它得真的「正在进行」：上传是一次一个的动作，
+  // 一天前上传却从没检查过的文件既装不上，也不是待办事项，留着只会让人以为还有事要办。
+  const stale = (upload) => Date.now() - Date.parse(upload.created_at ?? 0) > PENDING_MAX_AGE_MS;
+  const keep = pending.filter((upload) => !stale(upload)).slice(0, 1);
+  const drop = pending.filter((upload) => !keep.includes(upload));
+  for (const upload of [...drop, ...resolved.slice(RESOLVED_UPLOADS_KEPT)]) {
+    try { discardFrameworkUpdateUpload(upload.id); } catch { /* 正在被作业占用就下次再说 */ }
+  }
+}
+
+export function listFrameworkUpdateUploads({ prune = false } = {}) {
   const d = ensure();
-  return fs.readdirSync(d.uploads).filter((name) => name.endsWith('.json'))
+  const uploads = fs.readdirSync(d.uploads).filter((name) => name.endsWith('.json'))
     .map((name) => publicUpload(readJson(path.join(d.uploads, name)))).filter(Boolean)
     .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  if (prune) {
+    pruneResolvedUploads(uploads);
+    return uploads.filter((upload) => fs.existsSync(uploadPath(upload.id)));
+  }
+  return uploads;
 }
 
 async function storeFrameworkUpdateStream(stream, filename, {
@@ -283,7 +314,7 @@ export function frameworkUpdateSnapshot({ currentBuild, registry = null } = {}) 
     engine_state: readJson(d.state), preflight_result: readJson(d.preflight), last_good: lastGood ? {
       build: lastGood.deploy_id ?? null, created_at: lastGood.created_at ?? null, health: lastGood.health ?? null,
     } : null,
-    engine_locked: engineActive(), history: readHistory(d.history), uploads: listFrameworkUpdateUploads(), jobs,
+    engine_locked: engineActive(), history: readHistory(d.history), uploads: listFrameworkUpdateUploads({ prune: true }), jobs,
     active_job: jobs.find((job) => ACTIVE_JOB_STATUSES.has(job.status)) ?? null,
   };
 }

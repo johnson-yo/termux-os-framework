@@ -280,7 +280,14 @@ button:disabled { cursor: wait; opacity: .55; }
 .svc-controls button, .credential-controls button { border: 1px solid #b9c4cd; border-radius: 5px; background: #fff; min-height: 42px; padding: 7px 11px; }
 .primary { border: 1px solid var(--brand-dark); border-radius: 5px; background: var(--brand); color: #fff; min-height: 42px; padding: 7px 11px; font-weight: 650; }
 .danger-text { color: var(--bad); }
-.button-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+/* 按钮行。竖屏是主场，所以默认就是「左对齐、按内容宽度、自然换行」：
+   把按钮拉满一行会让「更新」和「删除」长得一模一样，读的人要靠位置去分辨；
+   一行一个按钮更是把三个动作撑成三屏。 */
+.button-row {
+  display: flex; flex-wrap: wrap; align-items: center;
+  justify-content: flex-start; gap: 8px; margin-top: 12px;
+}
+.button-row > .btn { flex: 0 1 auto; }
 .tabs { display: flex; gap: 4px; margin: 2px 0 16px; border-bottom: 1px solid var(--line); }
 .tabs .btn { border-bottom: 0; border-radius: 5px 5px 0 0; }
 .table-scroll { overflow-x: auto; }
@@ -309,17 +316,31 @@ progress { width: min(280px, 100%); }
 .credential-block { padding: 12px; border: 1px solid #b9d5e8; border-radius: 8px; background: #fafdff; }
 .credential-block > b { display: block; }
 .credential-block > p { margin: 3px 0 9px; }
-.credential-controls { display: flex; gap: 8px; align-items: stretch; }
+.credential-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.credential-controls .secret-input { flex: 1 1 100%; }
+.credential-controls .btn { flex: 0 1 auto; }
 .secret-input { flex: 1 1 auto; min-width: 0; border: 1px solid #aebdca; border-radius: 5px; padding: 9px 10px; color: var(--text); background: #fff; font: .8rem ui-monospace, monospace; }
 .credential-controls button { flex: 0 0 auto; min-height: 44px; }
-.credential-form { display: grid; gap: 9px; max-width: 560px; }
+.credential-form { display: grid; gap: 9px; max-width: 560px; justify-items: start; }
 .credential-form input { width: 100%; border: 1px solid #bcc6cf; border-radius: 5px; padding: 9px 10px; }
+/* 表单里的按钮是一个动作，不是一栏。grid 默认把它拉满整行，于是「更改登录密码」
+   长得比它旁边的所有按钮都大，看上去像是这一页的主操作。 */
+.credential-form .btn { justify-self: start; }
 .port-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 11px 0; border-bottom: 1px solid #edf0f3; }
 .port-row:last-child { border-bottom: 0; }
 .port-row b, .port-row small { display: block; }
 .port-row small { color: var(--muted); }
 .port-row code { overflow-wrap: anywhere; text-align: right; }
 .sdk-actions { justify-content: flex-start; }
+/* label 在上、控件与动作在下：三者挤成一行时输入框会被压到只剩几个字宽，
+   而这一行里最该看清的就是输入的值。 */
+.inline-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.inline-form > label { flex: 1 1 100%; color: var(--muted); font-size: .82rem; font-weight: 650; }
+.inline-form > input, .inline-form > select {
+  flex: 1 1 8rem; min-width: 0; border: 1px solid #bcc6cf; border-radius: 5px; padding: 9px 10px;
+  min-height: 42px; background: #fff; color: var(--text);
+}
+.inline-form > .btn { flex: 0 0 auto; }
 .sdk-prompt {
   max-height: 60vh;
   margin: 0;
@@ -367,7 +388,7 @@ progress { width: min(280px, 100%); }
 .package-meta .value-row { min-height: 34px; padding: 6px 0; font-size: .78rem; }
 .package-card .button-row { margin-top: auto; padding-top: 11px; }
 .package-card-actions { justify-content: flex-start; }
-.package-card-actions > * { min-width: 7rem; text-align: center; }
+.package-card-actions > .btn { min-width: 5.5rem; }
 
 .package-setting-grid { display: grid; gap: 12px; }
 .package-setting-card { padding: 14px; }
@@ -472,24 +493,23 @@ main:not(.content) > h1 { font-size: 1.35rem; }
   .value-row b { max-width: 100%; text-align: left; overflow-wrap: anywhere; }
   .application-row { display: block; }
   .application-row .button-row { justify-content: flex-start; margin-top: 10px; }
-  .application-row .button-row > * { flex: 1 1 120px; }
-  .application-actions { justify-content: center; }
-  .application-actions > * { flex: 0 1 150px; }
+  .application-actions { justify-content: flex-start; }
   .top-meta { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .credential-controls { display: grid; grid-template-columns: 1fr auto; }
-  .credential-controls .secret-input { grid-column: 1 / -1; width: 100%; }
+  .credential-controls .secret-input { width: 100%; }
   .port-row { align-items: flex-start; flex-direction: column; gap: 4px; }
   .port-row code { text-align: left; }
   .package-port-setting { align-items: stretch; flex-direction: column; gap: 8px; }
   .package-port-controls { justify-content: stretch; }
   .package-port-controls input[type="number"] { flex: 1 1 auto; width: 100%; }
   .package-port-controls .visibility-toggle { flex: 0 0 auto; }
-  .sdk-actions > * { width: 100%; }
+
   .sdk-prompt { max-height: 66vh; padding: 10px; font-size: .74rem; }
-  .button-row { justify-content: stretch; }
-  .button-row > * { flex: 1 1 120px; }
-  .upload-row { align-items: stretch; }
-  .upload-row > * { width: 100%; max-width: none; }
+  /* 窄屏同样按内容宽度：拉伸只会让两个字的按钮和八个字的按钮一样宽。
+     42px 的最小高度已经保证了点击区域，宽度不需要再补。 */
+  .button-row { justify-content: flex-start; }
+  .button-row > .btn { flex: 0 1 auto; }
+  .upload-row { align-items: center; }
+  .upload-row input[type="file"] { flex: 1 1 100%; min-width: 0; }
   .table-scroll { overflow: visible; }
   .data-table, .data-table tbody, .data-table tr, .data-table td { display: block; width: 100%; }
   .data-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
@@ -525,12 +545,17 @@ main:not(.content) > h1 { font-size: 1.35rem; }
 }
 .button-row.six-up > * {
   min-width: 0; width: 100%; text-align: center;
-  padding: 5px 2px; font-size: clamp(.6rem, 2.1vw, .74rem);
+  padding: 6px 4px; font-size: clamp(.68rem, 2.1vw, .78rem);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 竖屏放不下六格：390px 宽下每格只有 65px，字要缩到看不清才塞得进去。
+   改成两排三列——位置仍然固定，按钮不会因为状态变化而跳位。 */
+@media (max-width: 760px) {
+  .button-row.six-up { grid-template-columns: repeat(3, 1fr); gap: 6px; }
 }
 .package-upgrade-banner { margin: 8px 0 0; }
 
-/* Framework 版本列表：每行一个版本 + 一个动作按钮，窄屏时按钮换行占满。 */
+/* Framework 版本列表：每行一个版本 + 一个动作按钮。 */
 .version-list { margin-top: 12px; border-top: 1px solid var(--line); }
 .version-row {
   display: flex; align-items: center; justify-content: space-between;
@@ -539,9 +564,7 @@ main:not(.content) > h1 { font-size: 1.35rem; }
 .version-label { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .version-name { font-family: ui-monospace, monospace; font-weight: 600; }
 .version-meta { color: var(--muted); font-size: 12px; }
-@media (max-width: 620px) {
-  .version-row > button { flex: 1 1 100%; }
-}
+
 
 /* Setup：安装或更新后唯一一次把生成的凭证交给用户的地方。比登录卡宽，因为它要放下
    密码、System Key 和这一版对配置做了什么，而这些都不该折叠到看不见。 */

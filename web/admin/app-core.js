@@ -567,16 +567,6 @@ async function renderSystem() {
   replacePage(system.card, resources.card);
 }
 
-/** 独立的重启按钮，给「配置已改但还没生效」的状态用。 */
-function restartRow(net) {
-  const row = document.createElement('div');
-  row.className = 'button-row';
-  row.append(actionButton('重启框架', 'primary',
-    () => restartFrameworkAndFollow({ portChangedTo: net.port === net.running_port ? null : net.port }),
-    !canWrite()));
-  return row;
-}
-
 /**
  * 重启 Framework，然后把浏览器带到它重启后真正在听的地址。
  *
@@ -763,13 +753,15 @@ async function renderAdministration() {
       network.body.append(text('p',
         `配置里已经是 ${net.host}:${net.port}，但运行中的还是 ${net.running_host}:${net.running_port}，重启后生效。`,
         'alert warning'));
-      network.body.append(restartRow(net));
     }
-
-    // 一句话加一个勾选框说不清后果，而后果是「同一个 WiFi 上的任何人都到得了这个面板」。
-    // 而且改完还要用户自己去点重启，等于把这个开关做了一半——所以确认之后就直接重启。
+    // 两个动作放在同一行。各占一行会让这张卡片变成一列按钮，而它们是并列的选择。
+    // 重启一直可用：它不只是「让改动生效」的一步，也是用户唯一能在浏览器里
+    // 把卡住的 Framework 弄回来的手段。
     const lanRow = document.createElement('div');
     lanRow.className = 'button-row';
+    lanRow.append(actionButton('重启框架', net.restart_required ? 'primary' : '',
+      () => restartFrameworkAndFollow({ portChangedTo: net.port === net.running_port ? null : net.port }),
+      !canWrite()));
     lanRow.append(actionButton(
       net.lan_enabled ? '改为只允许本机访问' : '允许局域网访问',
       net.lan_enabled ? '' : 'primary',

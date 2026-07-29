@@ -73,3 +73,14 @@ carry their own rules, so the same action looked different on two pages. `action
 `linkButton` emit it; containers only lay things out. Panels collapse through `section(..., {
 collapsible })` for the same reason: one card implementing its own `<details>` taught the user that
 some cards fold and left them guessing which.
+
+Portrait is the primary layout, so buttons are sized by their content and wrap; they are never
+stretched to fill a row. A stretched button makes "Update" and "Delete" the same shape, leaving
+position as the only way to tell them apart, and one button per row turns three actions into three
+screens. The 42px minimum height is what makes a target touchable — width does not need to help.
+
+An action page shows what can be acted on and nothing else. The Framework update page is the current
+version, whether a newer one exists, the download and its result, and the way back. Older releases,
+candidates whose check failed, and files uploaded weeks ago are not choices; they are residue, and
+the recovery card already covers going back. The server prunes them rather than relying on the page
+to hide them, because a file nobody can see is still occupying a phone's storage.

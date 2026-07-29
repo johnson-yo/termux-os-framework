@@ -223,7 +223,8 @@ function renderFrameworkUpdate(data) {
     );
   }
 
-  const registry = section('Framework 版本');
+  // 与上面的卡片是同一件事——当前是什么版本、有没有更新的，分成两张只会把当前版本说两遍。
+  const registry = update;
   const frameworkCatalog = data.registry;
   const registryActionDisabled = !canWrite() || Boolean(data.active_job) || data.engine_locked;
   const refreshRegistryButton = actionButton('更新列表', '', async () => {
@@ -240,10 +241,8 @@ function renderFrameworkUpdate(data) {
     controls.append(refreshRegistryButton);
     registry.body.append(text('p', '缓存的目录里没有已验证的 Framework 版本。', 'empty'), controls);
   } else {
-    registry.body.append(
-      valueRow('来源', frameworkCatalog.repository),
-      valueRow('当前版本', frameworkCatalog.current_version ?? data.current_build ?? 'unknown'),
-    );
+    // 当前版本上面已经说过了，这里只补「从哪里取」。
+    registry.body.append(valueRow('来源', frameworkCatalog.repository));
 
     // 掛載中的 Dev Runtime 會擋下更新。把「停止全部挂载」直接放在這裡——
     // 讓使用者為了更新而去別的頁面翻找（或更糟，去開 Termux）是把流程做了一半。
@@ -268,58 +267,43 @@ function renderFrameworkUpdate(data) {
     // 列出全部已驗證版本，而不只是 latest。「已經是最新」不代表這頁沒事可做：
     // 檔案壞了要能重裝當前版本，新版有問題要能挑一個舊版裝回去。
     const busy = !canWrite() || Boolean(data.active_job) || data.engine_locked;
+    // 只呈现一个决定：能不能升到更新的版本，或者重装当前这一版。
+    // 把每个历史版本都摆出来，等于要用户在一串自己从没用过的版本号里找那一个有意义的；
+    // 真要退回去，下面的「恢复上一个版本」才是有备份保证的路径。
     const versions = frameworkCatalog.versions ?? [];
-    const versionRow = (entry) => {
-      const row = document.createElement('div'); row.className = 'version-row';
-      const label = document.createElement('div'); label.className = 'version-label';
-      label.append(text('span', entry.version, 'version-name'));
-      if (entry.relation === 'current') label.append(text('span', '当前', 'status good'));
-      const meta = [];
-      if (entry.published_at) meta.push(String(entry.published_at).slice(0, 10));
-      if (entry.size) meta.push(formatBytes(entry.size));
-      if (meta.length) label.append(text('span', meta.join(' · '), 'version-meta'));
-      const action = FRAMEWORK_VERSION_ACTIONS[entry.relation] ?? FRAMEWORK_VERSION_ACTIONS.unknown;
-      row.append(label, actionButton(action.label, action.variant,
-        () => runFrameworkRegistryUpdate(frameworkCatalog, data.current_build, entry), busy));
-      return row;
-    };
-    // 平时只需要看到「能升到哪」和「当前这版能不能重装」。把每一个历史版本都摆出来，
-    // 等于要用户在一串自己从没用过的版本号里找那一个有意义的。真要退回去，
-    // 下面的「恢复上一个版本」才是有备份保证的路径；这里的旧版本只是最后手段。
-    const primary = versions.filter((entry) => entry.relation === 'newer' || entry.relation === 'current');
-    const older = versions.filter((entry) => entry.relation === 'older' || entry.relation === 'unknown');
-    if (!versions.length) {
-      registry.body.append(text('p', '缓存的目录里没有这个项目的已验证安装包。', 'empty'));
+    const actionable = versions.filter((entry) => entry.relation === 'newer' || entry.relation === 'current');
+    if (!actionable.length) {
+      registry.body.append(text('p',
+        `目录里没有比 ${frameworkCatalog.current_version ?? data.current_build} 更新的版本。`, 'empty'));
     } else {
       const list = document.createElement('div'); list.className = 'version-list';
-      for (const entry of primary) list.append(versionRow(entry));
-      // 没有可升级项时要说出来。留一片空白，使用者读到的是「加载失败」而不是「已经最新」。
-      if (!primary.length) {
-        registry.body.append(text('p',
-          `目录里没有比 ${frameworkCatalog.current_version ?? data.current_build} 更新的版本，也没有它自己的安装包。`,
-          'empty'));
+      for (const entry of actionable) {
+        const row = document.createElement('div'); row.className = 'version-row';
+        const label = document.createElement('div'); label.className = 'version-label';
+        label.append(text('span', entry.version, 'version-name'));
+        if (entry.relation === 'current') label.append(text('span', '当前', 'status good'));
+        const meta = [];
+        if (entry.published_at) meta.push(String(entry.published_at).slice(0, 10));
+        if (entry.size) meta.push(formatBytes(entry.size));
+        if (meta.length) label.append(text('span', meta.join(' · '), 'version-meta'));
+        const action = FRAMEWORK_VERSION_ACTIONS[entry.relation] ?? FRAMEWORK_VERSION_ACTIONS.unknown;
+        row.append(label, actionButton(action.label, action.variant,
+          () => runFrameworkRegistryUpdate(frameworkCatalog, data.current_build, entry), busy));
+        list.append(row);
       }
       registry.body.append(list);
-      if (older.length) {
-        const more = document.createElement('details');
-        more.append(text('summary', `更早的版本（${older.length}）`));
-        const oldList = document.createElement('div'); oldList.className = 'version-list';
-        oldList.append(text('p', '装回旧版本前请先确认：旧版本可能读不懂当前版本写下的配置。', 'description'));
-        for (const entry of older) oldList.append(versionRow(entry));
-        more.append(oldList);
-        registry.body.append(more);
-      }
     }
   }
-  update.body.append(registry.card);
 
-  // 离线安装仍然需要，但它不该常驻首屏：绝大多数更新走 Registry，
-  // 而「上传过哪些文件」是过程信息，不是这一页要回答的问题。
+  // 离线安装仍然需要（没有网络的设备只能这样装），但这一页不做文件管理器：
+  // 只显示正在进行中的那一个。检查没通过的文件既不能装也不该留在这里让人以为要处理它——
+  // 失败原因在上面的结果里说过，完整记录在 Status / Logs。
   const candidates = section('从文件安装');
   candidates.body.append(text('p', '没有网络时，可以在这里上传 Framework 的 .tar.gz 安装包。', 'description'));
   const uploadWrap = document.createElement('div'); uploadWrap.className = 'upload-row';
   const input = document.createElement('input'); input.type = 'file'; input.accept = '.tar.gz,application/gzip';
   const progress = document.createElement('progress'); progress.hidden = true;
+  const busyNow = !canWrite() || Boolean(data.active_job) || data.engine_locked;
   const uploadButton = actionButton('上传安装包', '', async () => {
     const file = input.files?.[0];
     if (!file) {
@@ -336,24 +320,12 @@ function renderFrameworkUpdate(data) {
       frameworkUpdateNotice = { kind: 'bad', text: `上传失败：${error.message ?? error}` };
     }
     await loadFrameworkUpdate();
-  }, !canWrite() || Boolean(data.active_job) || data.engine_locked);
+  }, busyNow);
   uploadWrap.append(input, uploadButton, progress); candidates.body.append(uploadWrap);
-  // 只有还能走向安装的候选才留在主流程里。检查没通过的是死路，留在这里会一直堆着——
-  // 设备上就积了几个月前失败的文件。但也不能直接不显示，否则那些文件永远删不掉，
-  // 所以收进一个折叠项，连同「丢弃」一起。
-  const busyNow = !canWrite() || Boolean(data.active_job) || data.engine_locked;
-  const uploads = data.uploads ?? [];
-  const actionable = uploads.filter((upload) => ['uploaded', 'preflight_passed'].includes(upload.status));
-  const dead = uploads.filter((upload) => !['uploaded', 'preflight_passed', 'applied'].includes(upload.status));
-  if (actionable.length) {
-    candidates.body.append(...actionable.map((upload) => frameworkUploadCard(upload, data.current_build, busyNow)));
-  }
-  if (dead.length) {
-    const failed = document.createElement('details');
-    failed.append(text('summary', `检查未通过的文件（${dead.length}）`));
-    for (const upload of dead) failed.append(frameworkUploadCard(upload, data.current_build, busyNow));
-    candidates.body.append(failed);
-  }
+  // 只显示最新的那一个。上传是一次一个的动作，同时列出好几个「等待检查」的旧文件，
+  // 读的人会以为它们都还要处理——实际上它们只是没被清掉。
+  const [current] = (data.uploads ?? []).filter((upload) => ['uploaded', 'preflight_passed'].includes(upload.status));
+  if (current) candidates.body.append(frameworkUploadCard(current, data.current_build, busyNow));
 
   const recovery = section('恢复上一个版本');
   if (!data.last_good?.build) recovery.body.append(text('p', '没有已验证的上一版本备份，无法恢复。', 'empty'));
