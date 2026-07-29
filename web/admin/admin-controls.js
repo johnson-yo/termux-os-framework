@@ -63,7 +63,7 @@ function showManualDownloadDialog({ title, manual, nextStep }) {
       if (!copied) { input.focus(); input.select(); }
     });
     row.append(input, copy);
-    const link = document.createElement('a'); link.href = manual.release_url; link.target = '_blank'; link.rel = 'noopener'; link.textContent = '打开 Release 页面'; link.className = 'button-link';
+    const link = linkButton('打开 Release 页面', manual.release_url, '', { newTab: true });
     form.append(heading, intro, label, row, link, text('p', nextStep, 'alert warning'));
     const actions = document.createElement('div'); actions.className = 'button-row';
     actions.append(actionButton('关闭', '', () => dialog.close('close')));
@@ -379,10 +379,10 @@ function renderFrameworkUpdate(data) {
  */
 function renderFrameworkOperations(data) {
   const wrap = document.createElement('div');
-  const jobs = section('Framework 操作进度');
+  const jobs = section('Framework 操作进度', null, { collapsible: true, collapsed: !data.active_job });
   if (!data.jobs?.length) jobs.body.append(text('p', '还没有从控制台发起过 Framework 操作。', 'empty'));
   else jobs.body.append(...data.jobs.slice(0, 8).map(frameworkJobCard));
-  const history = section('Framework 更新历史');
+  const history = section('Framework 更新历史', null, { collapsible: true, collapsed: true });
   if (!data.history?.length) history.body.append(text('p', '更新引擎没有留下记录。', 'empty'));
   else history.body.append(...data.history.map(frameworkHistoryCard));
   wrap.append(jobs.card, history.card);
@@ -650,24 +650,11 @@ function githubRepositoryLink(item) {
   return link;
 }
 
-function packageOpenLink(href, { newTab = false } = {}) {
-  const link = document.createElement('a');
-  link.href = href;
-  link.textContent = 'Open';
-  link.className = 'button-link primary-link package-open-link';
-  if (newTab) {
-    link.target = '_blank';
-    link.rel = 'noopener';
-  }
-  return link;
-}
+const packageOpenLink = (href, { newTab = false } = {}) => linkButton('打开', href, 'primary', { newTab });
 
 function packageSettingLink(item) {
-  const link = document.createElement('a');
-  link.href = `/admin/packages/settings#${packageSettingAnchor(item.id)}`;
-  link.textContent = 'Setting';
-  link.className = 'button-link package-setting-link';
-  link.setAttribute('aria-label', `Settings for ${packageAdminName(item)}`);
+  const link = linkButton('设置', `/admin/packages/settings#${packageSettingAnchor(item.id)}`);
+  link.setAttribute('aria-label', `${packageAdminName(item)} 的设置`);
   return link;
 }
 
@@ -836,6 +823,13 @@ function packageUpgrade(item) {
 }
 
 /** 每次拿到 package-manager 快照時重建索引；官方名單與可升級判定都靠它。 */
+/** 保证 Official 索引可用，不管用户是从哪一页进来的。索引已经建立就不再重复取。 */
+async function ensureRegistryIndex() {
+  if (officialRepositories.size) return;
+  try { indexRegistry(await apiData('/api/admin/package-manager')); }
+  catch { /* 目录拿不到时退回没有标识，而不是整页失败 */ }
+}
+
 function indexRegistry(data) {
   registryByRepository = new Map();
   officialRepositories = new Set();
@@ -897,7 +891,7 @@ function renderRegistry(data) {
     wrap.append(text('p', `Showing the last cached catalog. Refresh failed: ${registry.error?.code ?? 'registry unavailable'}.`, 'alert warning'));
   }
   if (registry.fetched_at) {
-    wrap.append(text('small', `更新于 ${new Date(registry.updated_at ?? registry.generated_at ?? registry.fetched_at).toLocaleString()}`, 'meta'));
+    wrap.append(text('small', `${tr('更新于')} ${new Date(registry.updated_at ?? registry.generated_at ?? registry.fetched_at).toLocaleString()}`, 'meta'));
   }
   if (!registry.packages?.length) {
     wrap.append(text('p', 'Registry 没有返回任何 Package。', 'empty'));
@@ -1029,12 +1023,10 @@ function renderUpload(data) {
  * 反而不知道該看哪一份。
  */
 function renderJobs(data) {
-  const panel = section('最近的操作');
-  const fold = document.createElement('details'); fold.className = 'collapsible-panel';
-  if (data.active_job) fold.open = true;
-  const summary = document.createElement('summary'); summary.textContent = data.jobs?.length ? `展开最近 ${Math.min(data.jobs.length, 8)} 条操作` : '还没有 Package 生命周期作业';
-  fold.append(summary);
-  const body = document.createElement('div'); body.className = 'collapsible-body';
+  // 折叠交给 section 统一处理。先前这里自己套了一层 <details>，于是同一页里
+  // 只有这一块能收起来，别的卡片不能——用户无从知道哪一块是可以收的。
+  const panel = section('Package 操作', null, { collapsible: true, collapsed: !data.active_job });
+  const body = panel.body;
   if (!data.jobs?.length) body.append(text('p', '还没有 Package 生命周期作业。', 'empty'));
   for (const job of data.jobs?.slice(0, 8) ?? []) {
     const details = document.createElement('details');
@@ -1051,7 +1043,6 @@ function renderJobs(data) {
     if (job.error) details.append(text('p', job.error, 'alert error'));
     body.append(details);
   }
-  fold.append(body); panel.body.append(fold);
   return panel.card;
 }
 
@@ -1305,7 +1296,13 @@ function renderPackageSettings(data) {
 
 async function loadPackageSettings() {
   try {
-    const data = await apiData('/api/admin/package-settings');
+    // Official 标识来自 Registry 目录，而那份索引原本只在 Package 管理页渲染时才建立。
+    // 直接打开设置页时它是空的，于是同一个包在一页上有标识、另一页上没有。
+    // 索引由需要它的页面各自确保，不再依赖用户先访问过哪一页。
+    const [data] = await Promise.all([
+      apiData('/api/admin/package-settings'),
+      ensureRegistryIndex(),
+    ]);
     renderPackageSettings(data);
   } catch (error) {
     const panel = section('Package 设置');

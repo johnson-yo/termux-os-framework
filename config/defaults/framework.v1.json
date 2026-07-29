@@ -12,5 +12,8 @@
       "base_url": "https://package.termux-os.com",
       "framework_repository": "johnson-yo/termux-os-framework"
     }
+  },
+  "ui": {
+    "language": "zh-Hans"
   }
 }

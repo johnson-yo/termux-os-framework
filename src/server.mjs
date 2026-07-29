@@ -339,9 +339,12 @@ DEV WORKSPACE — 載入失敗（Framework 本體正常）</div>
 // Host 在返回 HTML 时注入同源 session 请求上下文并隐藏旧 token 输入；Package 原文件与 SHA 不变。
 // PWA：/admin 是使用者的日常入口，桌面圖示讓它不必先開瀏覽器再找網址。
 // Service Worker 的 scope 只有 /admin/，並且把版本帶進 URL——否則更新後仍會拿到舊版本的 shell。
+const uiLanguage = () => (typeof CFG.ui?.language === 'string' && CFG.ui.language ? CFG.ui.language : 'zh-Hans');
 const pwaInjection = () => `<link rel="manifest" href="/admin/manifest.webmanifest">
 <link rel="icon" href="/admin/icon.svg" type="image/svg+xml">
 <meta name="theme-color" content="#18212b">
+<script src="/admin/i18n.js"></script>
+<script>window.__TERMUX_OS_LANGUAGE__=${JSON.stringify(uiLanguage())};</script>
 <script>if('serviceWorker'in navigator){window.addEventListener('load',function(){
 // updateViaCache:'none' 讓瀏覽器每次都去問這支腳本本身，否則裝成 App 之後可能長期停在舊的一份。
 navigator.serviceWorker.register('/admin/sw.js?v=${encodeURIComponent(FRAMEWORK_VERSION)}',
@@ -388,6 +391,7 @@ function servePackageHtml(res, webRoot, rel) {
 }
 
 const ADMIN_FILES = new Map([
+  ['/admin/i18n.js', 'i18n.js'],
   ['/admin/manifest.webmanifest', 'manifest.webmanifest'],
   ['/admin/icon.svg', 'icon.svg'],
   ['/admin/sw.js', 'sw.js'],
@@ -818,7 +822,11 @@ const stageRoute = async (req, res, url, query) => {
 // ============================================================
 const server = http.createServer(async (req, res) => {
   const parsed = new URL(req.url, 'http://x');
-  const url = parsed.pathname;
+  // 工作區實例的 id 是 `<包id>@<slug>`，瀏覽器用 encodeURIComponent 送出時 `@` 變成 `%40`，
+  // 而路由的 id 字元集裡沒有 `%`——於是「停止掛載」這類請求全部落到 404 not found。
+  // 這裡只還原 `@`：id 只由 [\w.@-] 組成，其中唯一會被編碼的就是它。做通用解碼會把
+  // `%2F` 變成路徑分隔符，等於讓外部決定命中哪一條路由。
+  const url = parsed.pathname.replace(/%40/gi, '@');
   // 本機瀏覽器進入面板時會就地取得一個 Session（見下方 localEntry），所以這裡不是 const。
   let auth = authenticateRequest(req);
 
@@ -1087,6 +1095,28 @@ const server = http.createServer(async (req, res) => {
       }).unref();
     }, 250);
     return undefined;
+  }
+  if (url === '/api/admin/ui' && req.method === 'GET') {
+    if (!hasPermission(auth, 'read')) return json(res, 401, { ok: false, error: 'unauthorized' });
+    return json(res, 200, { ok: true, language: uiLanguage() }, { 'Cache-Control': 'no-store' });
+  }
+  if (url === '/api/admin/ui' && req.method === 'POST') {
+    if (!hasPermission(auth, 'write')) return json(res, 401, { ok: false, error: 'unauthorized' });
+    const body = await readBody(req);
+    // 只接受目录里真的存在的语言：接受一个没有目录的代码，等于把界面切成一片回落的原文，
+    // 而使用者会以为是自己选错了。
+    const language = String(body?.language ?? '');
+    const available = fs.existsSync(path.join(ROOT, 'web/admin/i18n', `${language}.json`));
+    if (!/^[\w-]+$/.test(language) || (language !== 'zh-Hans' && !available)) {
+      return json(res, 400, { ok: false, error: 'language_unavailable', detail: language });
+    }
+    try {
+      CFG.ui = { ...(CFG.ui ?? {}), language };
+      persistConfiguration();
+    } catch (error) {
+      return json(res, 500, { ok: false, error: 'config_write_failed', detail: String(error?.message ?? error) });
+    }
+    return json(res, 200, { ok: true, language });
   }
   if (url === '/api/admin/network' && req.method === 'GET') {
     if (!hasPermission(auth, 'read')) return json(res, 401, { ok: false, error: 'unauthorized' });
@@ -1737,8 +1767,13 @@ const server = http.createServer(async (req, res) => {
     return serveAdminFile(res, 'login.html');
   }
   // 登入前就要拿得到：瀏覽器是在顯示登入頁或 Setup 頁時去抓 manifest、圖示與 Service Worker 的。
-  if (['/admin/login.js', '/admin/style.css', '/admin/manifest.webmanifest', '/admin/icon.svg'].includes(url)) {
+  if (['/admin/login.js', '/admin/style.css', '/admin/manifest.webmanifest', '/admin/icon.svg', '/admin/i18n.js'].includes(url)) {
     return serveAdminFile(res, ADMIN_FILES.get(url));
+  }
+  // 语言目录在登录之前就要拿得到：登录页本身也要按选择的语言显示。
+  {
+    const m = url.match(/^\/admin\/i18n\/([\w-]+)\.json$/);
+    if (m) return serveStatic(res, path.join(ROOT, 'web/admin/i18n'), `${m[1]}.json`);
   }
   if (url === '/admin/sw.js') {
     // 腳本在 /admin/ 之下，預設最大 scope 就是 /admin/，涵蓋不到不帶斜線的 /admin。

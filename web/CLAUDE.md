@@ -1,6 +1,13 @@
 # Web directory contract
 
-This directory contains the Framework-owned administration shell. It uses the HttpOnly browser session and CSRF APIs, stores no credential in browser storage — only named interface preferences such as whether the install prompt was dismissed — and renders only real Core pages plus Package-owned menu entries. Keep it responsive, accessible and dependency-free. User-facing copy is Simplified Chinese, because the people using it read Chinese and a panel that mixes languages reads as unfinished. Protocol nouns stay as they are — Framework, Package, Adapter, System Key, SHA-256, GitHub, Registry — so what the panel says still matches the documentation and the logs. Engine output and status values are evidence, not prose: map a known status to a word when displaying it, and pass anything unknown through unchanged rather than hiding it behind a guess.
+This directory contains the Framework-owned administration shell. It uses the HttpOnly browser session and CSRF APIs, stores no credential in browser storage — only named interface preferences such as whether the install prompt was dismissed — and renders only real Core pages plus Package-owned menu entries. Keep it responsive, accessible and dependency-free. User-facing copy is written in Simplified Chinese and translated at runtime. The source string is
+the key, the way gettext uses msgid: `web/admin/i18n/<lang>.json` maps source to translation, a
+missing entry shows the original, and adding a language is adding one file. Translation happens
+inside the shared components — section, text, valueRow, statusRow, actionButton, linkButton — so it
+is applied once rather than at each call site. `scripts/extract-ui-strings.mjs` keeps the catalogs
+in step with the sources and fails the suite when they fall behind; a string that is concatenated
+across lines or assembled in a template cannot be a catalog key, so write it as one literal and wrap
+any unit separately. Protocol nouns stay as they are — Framework, Package, Adapter, System Key, SHA-256, GitHub, Registry — so what the panel says still matches the documentation and the logs. Engine output and status values are evidence, not prose: map a known status to a word when displaying it, and pass anything unknown through unchanged rather than hiding it behind a guess.
 
 The Packages group exposes `Package Setting` as its operational control page.
 Its writes use the authenticated Admin API: port edits are persisted before a
@@ -59,3 +66,10 @@ user to find a restart button afterwards is half a switch. When the port changes
 to the new address — but only when the port actually changed, and never by copying the configured
 port into the current URL, because the port the browser reached the panel on is not necessarily the
 port the Framework listens on.
+
+There is one button. Its appearance comes from its variant, never from the container it sits in —
+`.button-row button`, `.upload-row button`, `.table-actions button` and `.tabs button` each used to
+carry their own rules, so the same action looked different on two pages. `actionButton` and
+`linkButton` emit it; containers only lay things out. Panels collapse through `section(..., {
+collapsible })` for the same reason: one card implementing its own `<details>` taught the user that
+some cards fold and left them guessing which.

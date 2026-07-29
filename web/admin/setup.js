@@ -7,6 +7,9 @@
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
 
+// 语言在这里也要生效：登录页与 Setup 页是使用者看到的第一屏。
+window.TermuxOSI18n?.load?.(window.__TERMUX_OS_LANGUAGE__);
+
 const el = (id) => document.getElementById(id);
 const card = el('setup-card');
 const error = el('setup-error');

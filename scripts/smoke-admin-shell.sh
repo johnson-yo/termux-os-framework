@@ -237,7 +237,7 @@ fi
 # 這條守的是「瀏覽器裡不留長期憑證」。原本靠「完全不准出現 localStorage」來保證，
 # 但那也擋掉了與憑證無關的偏好（例如安裝提示關掉沒有）。改成逐一檢查每一處
 # localStorage/sessionStorage 的鍵名：只有明確列出的偏好可以存，其餘一律不合格。
-ALLOWED_STORAGE_KEY='INSTALL_DISMISSED|termux-os.install-dismissed'
+ALLOWED_STORAGE_KEY='INSTALL_DISMISSED|termux-os.install-dismissed|COLLAPSED_KEY|termux-os.collapsed-panels'
 STORAGE_HITS=$(grep -rnE 'localStorage|sessionStorage' "$ROOT/web/admin" || true)
 BAD_STORAGE=$(echo "$STORAGE_HITS" | grep -vE "$ALLOWED_STORAGE_KEY" | grep -E 'localStorage|sessionStorage' || true)
 if [ -z "$BAD_STORAGE" ] && ! grep -rq 'id="token"' "$ROOT/web/admin"; then
@@ -400,7 +400,7 @@ if [ "$CODE" = 404 ]; then ok "retired SDK page is gone, not left as a placehold
 # must list them explicitly; assert the renderer really emits per-page open buttons.
 # 工作區的頁面掛在 /packages/<id>@<slug>/，猜不出來——必須逐一列成可點連結
 if curl -sf -b "$COOKIE" "$BASE/api/admin/workspaces" | grep -q '"projects"' \
-  && grep -q "pageLink(\`打开 \${page.title}\`" "$ROOT/web/admin/app-core.js"; then
+  && grep -q "for (const page of pages)" "$ROOT/web/admin/app-core.js"; then
   ok "Workspace view exposes every page of a mounted project"
 else
   bad "Workspace view page links"

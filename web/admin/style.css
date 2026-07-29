@@ -26,6 +26,15 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+/* 桌面浏览器里这套版式偏大，多数人要手动缩到 80% 才舒服，所以默认就缩好。
+   用 zoom 而不是改基准字号：这份样式里 px 是 rem 的四倍多，只改字号会缩了文字
+   却留下原样的间距。
+   只在宽视口生效——手机上缩到 80% 会让 42px 的按钮变成 34px，低于可用的点击尺寸，
+   而手机正是这个面板的主场。 */
+@media (min-width: 900px) {
+  html { zoom: 0.8; }
+}
+
 body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); line-height: 1.45; }
 button, input, select, textarea { font: inherit; }
 a { color: var(--brand); }
@@ -165,7 +174,7 @@ button:disabled { cursor: wait; opacity: .55; }
 .application-actions > * { min-width: 8rem; text-align: center; }
 .muted { color: var(--muted); }
 .compact { margin: 0; }
-.primary-link { border-color: var(--brand-dark); background: var(--brand); color: #fff; }
+
 .value-row:last-child, .list-row:last-child, .list-link:last-child { border-bottom: 0; }
 .value-row span, .list-link span { color: var(--muted); }
 .value-row b { text-align: right; font-family: ui-monospace, monospace; font-size: .8rem; }
@@ -239,49 +248,41 @@ button:disabled { cursor: wait; opacity: .55; }
   padding: 9px 10px;
 }
 .eyebrow { margin: 0; color: var(--brand); font-size: .75rem; font-weight: 800; letter-spacing: .12em; }
-.primary, .svc-controls button {
-  border: 1px solid var(--brand-dark);
-  border-radius: 5px;
-  background: var(--brand);
-  color: #fff;
-  min-height: 42px;
-  padding: 7px 11px;
-  font-weight: 650;
-}
-.danger, button.danger {
-  border-color: #8f1c14;
-  background: var(--bad);
-  color: #fff;
-}
-.danger-text { color: var(--bad); }
-.button-link, .table-actions button, .tabs button, .upload-row button, .button-row button {
-  display: inline-block;
+/* 唯一的按钮组件。
+   外观只由变体决定，与它被放进哪个容器无关——先前 .button-row button、.upload-row button、
+   .table-actions button、.tabs button 各写一套，于是同一个动作在两个页面上是两个样子。
+   容器只负责排版（间距、换行、对齐），不再决定长相。 */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid #b9c4cd;
   border-radius: 5px;
   background: #fff;
   color: var(--text);
   min-height: 42px;
-  padding: 7px 9px;
+  padding: 7px 11px;
+  font: inherit;
+  font-weight: 600;
   line-height: 1.2;
   white-space: normal;
   overflow-wrap: anywhere;
+  text-align: center;
   text-decoration: none;
+  cursor: pointer;
 }
-.upload-row button.primary, .button-row button.primary {
-  border-color: var(--brand-dark);
-  background: var(--brand);
-  color: #fff;
-}
-.button-row button.danger {
-  border-color: #8f1c14;
-  background: var(--bad);
-  color: #fff;
-}
-.table-actions .danger-text, .button-row .danger-text { color: var(--bad); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.is-primary { border-color: var(--brand-dark); background: var(--brand); color: #fff; font-weight: 650; }
+.btn.is-danger { border-color: #8f1c14; background: var(--bad); color: #fff; font-weight: 650; }
+.btn.is-danger-text { color: var(--bad); }
+.btn.is-quiet { border-color: transparent; background: transparent; color: var(--muted); }
+.btn.is-active { color: var(--brand); background: #eef6fc; font-weight: 750; }
+
+/* 尚未迁移到组件的少数原生按钮仍需要基本外观，避免出现「没有边框的字」。 */
+.svc-controls button, .credential-controls button { border: 1px solid #b9c4cd; border-radius: 5px; background: #fff; min-height: 42px; padding: 7px 11px; }
+.primary { border: 1px solid var(--brand-dark); border-radius: 5px; background: var(--brand); color: #fff; min-height: 42px; padding: 7px 11px; font-weight: 650; }
+.danger-text { color: var(--bad); }
 .button-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .tabs { display: flex; gap: 4px; margin: 2px 0 16px; border-bottom: 1px solid var(--line); }
-.tabs button { border-bottom: 0; border-radius: 5px 5px 0 0; color: var(--muted); }
-.tabs button.active { color: var(--brand); background: #eef6fc; font-weight: 750; }
+.tabs .btn { border-bottom: 0; border-radius: 5px 5px 0 0; }
 .table-scroll { overflow-x: auto; }
 .data-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
 .data-table th, .data-table td { padding: 10px 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
@@ -367,11 +368,7 @@ progress { width: min(280px, 100%); }
 .package-card .button-row { margin-top: auto; padding-top: 11px; }
 .package-card-actions { justify-content: flex-start; }
 .package-card-actions > * { min-width: 7rem; text-align: center; }
-.package-open-link, .package-setting-link {
-  display: inline-flex; align-items: center; justify-content: center;
-  font-weight: 650;
-}
-.package-setting-link { border-color: #b9d5e8; background: var(--brand-soft); color: var(--brand-dark); }
+
 .package-setting-grid { display: grid; gap: 12px; }
 .package-setting-card { padding: 14px; }
 .package-setting-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -409,7 +406,7 @@ progress { width: min(280px, 100%); }
 .manual-download-dialog label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: .8rem; font-weight: 700; }
 .manual-download-url-row { display: flex; gap: 8px; align-items: stretch; }
 .manual-download-url-row input { min-width: 0; flex: 1; border: 1px solid #bcc6cf; border-radius: 6px; padding: 9px 10px; color: var(--text); font: .78rem ui-monospace, monospace; }
-.manual-download-dialog .button-link { display: inline-block; margin-top: 10px; }
+.manual-download-dialog .btn { margin-top: 10px; }
 .confirm-ack {
   display: flex; align-items: flex-start; gap: 9px; margin: 12px 0 4px; padding: 10px;
   border: 1px solid #e0b84b; border-radius: 6px; background: #fff8e7; font-size: .84rem;
@@ -585,3 +582,9 @@ main:not(.content) > h1 { font-size: 1.35rem; }
   background: #fff; cursor: pointer; font-size: .82rem;
 }
 .install-bar button.primary { background: #18212b; color: #fff; border-color: #18212b; }
+
+/* 可折叠卡片：折叠状态只藏主体，标题行与展开按钮始终在，
+   否则收起来之后用户就找不到它了。 */
+.panel.is-collapsible .panel-head { cursor: default; }
+.panel.is-collapsed .panel-body { display: none; }
+.panel.is-collapsed { padding-bottom: 0; }

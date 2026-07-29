@@ -55,5 +55,6 @@ for script in \
   bash "$script"
 done
 
+node scripts/extract-ui-strings.mjs --check
 node scripts/check-publication.mjs
 echo "PASS Framework Core test suite"

@@ -46,6 +46,8 @@ async function loadPage() {
 async function boot() {
   // 先掛監聽再等後端：beforeinstallprompt 可能在頁面剛載入時就觸發，晚一步就永遠收不到。
   setupInstallPrompt();
+  // 语言目录要在任何界面文字产生之前就位，否则第一屏会先用原文闪一下再变。
+  await window.TermuxOSI18n?.load?.(window.__TERMUX_OS_LANGUAGE__);
   await window.TermuxOS.ready;
   const [menuResponse, statusResponse] = await Promise.all([
     api('/api/admin/menu'),

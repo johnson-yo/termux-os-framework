@@ -8,8 +8,14 @@
 
 const $ = (id) => document.getElementById(id);
 const api = (...args) => window.TermuxOS.api(...args);
+// 所有界面文字都经过下面这几个组件，所以翻译只在这里接一次。
+// 经典脚本共用同一个全局作用域，所以这里不能叫 t——i18n.js 已经声明了那个名字。
+const tr = (value) => (window.TermuxOSI18n?.t ? window.TermuxOSI18n.t(value) : value);
+
 const text = (tag, value, className) => Object.assign(document.createElement(tag), {
-  textContent: value ?? 'n/a', className: className ?? '',
+  // 翻译在这里发生：所有界面文字都经由 text/valueRow/statusRow/actionButton 产生，
+  // 在出口接一次，就不必在几百个调用点各写一遍。
+  textContent: tr(value ?? 'n/a'), className: className ?? '',
 });
 
 let menu = [];
@@ -82,9 +88,11 @@ function showCopy(path) {
   const parent = found?.parent ? flatMenu(menu).find((node) => node.path === found.parent) : null;
   const copySource = found?.description ? found : flatMenu(menu).find((node) => node.path === found?.default_child);
   const title = found?.title ?? 'Administration';
-  $('breadcrumb').textContent = parent ? `${parent.title} / ${title}` : title;
-  $('page-title').textContent = title;
-  $('page-description').textContent = copySource?.description ?? 'This page uses the shared Browser Session and administration hierarchy.';
+  // 页头与导航的文字也来自组件之外的直接赋值，同样要过翻译，否则切了语言之后
+  // 只有卡片变了、标题栏没变。
+  $('breadcrumb').textContent = parent ? `${tr(parent.title)} / ${tr(title)}` : tr(title);
+  $('page-title').textContent = tr(title);
+  $('page-description').textContent = tr(copySource?.description ?? '这个页面使用共享的浏览器会话与管理层级。');
   document.title = `${title} — Termux-OS`;
 }
 
@@ -96,7 +104,7 @@ function renderNavigation(nodes) {
     const top = document.createElement('a');
     top.className = 'nav-top';
     top.href = node.default_child ?? node.path;
-    top.textContent = node.title;
+    top.textContent = tr(node.title);
     top.addEventListener('click', () => setNavigationOpen(false));
     group.append(top);
     if (node.children?.length) {
@@ -106,7 +114,7 @@ function renderNavigation(nodes) {
         const link = document.createElement('a');
         const href = child.default_child ?? child.path;
         link.href = href;
-        link.textContent = child.title;
+        link.textContent = tr(child.title);
         // Package 自有頁面不在 /admin/ 下，它們是獨立的 WebUI——用新分頁開，
         // 免得使用者從自己的 App 回不到管理台。core 頁面仍是同分頁導航。
         if (!href.startsWith('/admin/')) {
@@ -141,7 +149,24 @@ const valueRow = (label, value) => {
   return row;
 };
 
-const section = (title, href = null) => {
+/**
+ * 面板卡片。所有页面共用这一个，标题行与主体的写法只有这一处。
+ *
+ * `collapsed` 让卡片可折叠：记录类的内容（作业进度、更新历史）默认收起，需要时展开。
+ * 先前只有「最近的操作」自己用 <details> 实现了折叠，别的卡片没有——同一页里两种交互，
+ * 用户无从知道哪一块能收起来。折叠状态按标题记在本地，切页回来还是原样。
+ */
+const COLLAPSED_KEY = 'termux-os.collapsed-panels';
+const collapsedSet = () => {
+  try { return new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]')); } catch { return new Set(); }
+};
+const rememberCollapsed = (title, collapsed) => {
+  const set = collapsedSet();
+  if (collapsed) set.add(title); else set.delete(title);
+  try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set])); } catch { /* 隐私模式下无所谓 */ }
+};
+
+const section = (title, href = null, { collapsible = false, collapsed = false } = {}) => {
   const card = document.createElement('section');
   card.className = 'panel';
   const head = document.createElement('div');
@@ -150,11 +175,26 @@ const section = (title, href = null) => {
   if (href) {
     const link = document.createElement('a');
     link.href = href;
-    link.textContent = '详情';
+    link.textContent = tr('详情');
     head.append(link);
   }
   const body = document.createElement('div');
   body.className = 'panel-body';
+  if (collapsible) {
+    const remembered = collapsedSet();
+    const start = remembered.has(title) || (collapsed && !remembered.has(`!${title}`));
+    card.classList.add('is-collapsible');
+    const toggle = actionButton(start ? '展开' : '收起', 'quiet', () => {
+      const nowCollapsed = !card.classList.contains('is-collapsed');
+      card.classList.toggle('is-collapsed', nowCollapsed);
+      toggle.textContent = tr(nowCollapsed ? '展开' : '收起');
+      toggle.setAttribute('aria-expanded', String(!nowCollapsed));
+      rememberCollapsed(title, nowCollapsed);
+    });
+    toggle.setAttribute('aria-expanded', String(!start));
+    card.classList.toggle('is-collapsed', start);
+    head.append(toggle);
+  }
   card.append(head, body);
   // 暴露 head，讓呼叫方能在標題行右側掛按鈕（例如 Workspace 的 Share your App）
   return { card, head, body };
@@ -194,7 +234,7 @@ function renderOverview(data) {
   heroMeta.className = 'control-hero-meta';
   heroMeta.append(
     text('span', state.label, `status ${state.kind}`),
-    text('small', `更新于 ${new Date(data.generated_at).toLocaleTimeString()}`, 'meta'),
+    text('small', `${tr('更新于')} ${new Date(data.generated_at).toLocaleTimeString()}`, 'meta'),
   );
   hero.append(heroCopy, heroMeta);
 
@@ -268,9 +308,9 @@ function renderOverview(data) {
   else {
     const m = resources.value;
     sys.body.append(
-      valueRow('内存', m.memory ? `可用 ${m.memory.available_mb} MB / 共 ${m.memory.total_mb} MB` : 'n/a'),
-      valueRow('存储', m.storage?.sdcard ? `可用 ${m.storage.sdcard.free_gb} GB / 共 ${m.storage.sdcard.total_gb} GB` : 'n/a'),
-      valueRow('CPU', m.cpu?.usage_percent == null ? `${m.cpu?.cores ?? '未知'} 核 · 负载未知` : `${m.cpu.usage_percent}% · ${m.cpu.cores} 核`),
+      valueRow('内存', m.memory ? `${tr('可用')} ${m.memory.available_mb} MB / ${tr('共')} ${m.memory.total_mb} MB` : 'n/a'),
+      valueRow('存储', m.storage?.sdcard ? `${tr('可用')} ${m.storage.sdcard.free_gb} GB / ${tr('共')} ${m.storage.sdcard.total_gb} GB` : 'n/a'),
+      valueRow('CPU', m.cpu?.usage_percent == null ? `${m.cpu?.cores ?? tr('未知')} ${tr('核')} · ${tr('负载未知')}` : `${m.cpu.usage_percent}% · ${m.cpu.cores} ${tr('核')}`),
       valueRow('温度', m.temperature ? `${m.temperature.celsius} °C` : 'n/a'),
       valueRow('设备已运行', formatDuration(m.device_uptime_s)),
     );
@@ -285,7 +325,9 @@ function renderOverview(data) {
       valueRow('上次更新', v.last_update ? `${stateWord(v.last_update.status)} · ${v.last_update.candidate_build ?? '未知构建'}` : '没有记录'),
     );
   }
-  grid.append(app.card, svc.card, pkg.card, adapter.card, sys.card);
+  // 设备与 Framework 排在最前：打开概览时第一个想知道的是「这台机器现在怎么样」，
+  // 而不是「装了哪些应用」。应用、服务、Package、Adapter 属于其后的细分。
+  grid.append(sys.card, app.card, svc.card, pkg.card, adapter.card);
   replacePage(hero, grid);
 }
 
@@ -384,13 +426,7 @@ async function renderApplications() {
       controls.className = 'button-row compact application-actions';
       controls.append(text('span', app.state.replaceAll('_', ' '), `status ${statusKind(app.state)}`));
       if (app.state === 'ready') {
-        const open = document.createElement('a');
-        open.href = app.url;
-        open.target = '_blank';
-        open.rel = 'noopener';
-        open.className = 'button-link primary-link';
-        open.textContent = 'Open';
-        controls.append(open);
+        controls.append(linkButton('打开', app.url, 'primary', { newTab: true }));
       } else {
         controls.append(actionButton('打开', 'primary', () => openApplication(app), !canWrite() || app.state === 'disabled'));
       }
@@ -479,7 +515,7 @@ async function renderServices() {
           () => controlService(service, action), !canWrite()));
       }
       if (service.package) {
-        const open = document.createElement('a'); open.href = `/packages/${service.package}/`; open.className = 'button-link'; open.textContent = 'Open'; actions.append(open);
+        actions.append(linkButton('打开', `/packages/${service.package}/`));
       }
       row.append(name, pkg, desired, process, health, activity, actions); body.append(row);
     }
@@ -647,7 +683,7 @@ async function renderAdministration() {
   keyActions.append(saveKey, generateKey); keyBlock.append(keyActions);
   panel.body.append(keyBlock,
     valueRow('当前密钥', credentials.system_key_masked ?? '***'),
-    valueRow('密钥长度', `${credentials.system_key_length} 个字符`),
+    valueRow('密钥长度', `${credentials.system_key_length} ${tr('个字符')}`),
     valueRow('凭证来源', credentials.source),
     valueRow('浏览器会话', `${session.schema ?? 'session'} · ${session.permissions?.join(', ') ?? 'n/a'}`),
     valueRow('会话到期', Number.isFinite(session.expires_in_seconds) ? `in ${formatDuration(session.expires_in_seconds)}` : 'n/a'),
@@ -658,7 +694,7 @@ async function renderAdministration() {
   // 這個密碼是給別的設備用的——所以說清楚它擋的是誰。
   password.body.append(text('p', credentials.local
     ? '这个密码只在别的设备通过局域网访问时才需要；本机进入不用密码。改完后其他设备上的登录会失效。'
-    : 'Enter the current password before setting a new one. Existing Browser Sessions are signed out after a successful change.',
+    : '设置新密码前先输入当前密码。更改成功后，已有的浏览器会话都会退出登录。',
   'description'));
   const passwordForm = document.createElement('form'); passwordForm.className = 'credential-form';
   const currentPassword = document.createElement('input'); currentPassword.type = 'password'; currentPassword.placeholder = '当前密码'; currentPassword.required = !credentials.local; currentPassword.autocomplete = 'current-password';
@@ -677,7 +713,40 @@ async function renderAdministration() {
       location.replace('/admin');
     } catch (error) { administrationNotice = { kind: 'bad', text: `Login password: ${error.message ?? error}` }; renderAdministration(); }
   });
-  password.body.append(passwordForm, valueRow('最短长度', `${credentials.login_password?.minimum_length ?? 16} 个字符`));
+  password.body.append(passwordForm, valueRow('最短长度', `${credentials.login_password?.minimum_length ?? 16} ${tr('个字符')}`));
+
+  // 语言放在这一页的最前面：它决定了下面所有内容用什么语言显示。
+  const language = section('语言');
+  const current = window.TermuxOSI18n?.language ?? 'zh-Hans';
+  language.body.append(text('p', '切换后整个控制台立即改用所选语言。未翻译的条目会显示原文。', 'description'));
+  const langForm = document.createElement('form'); langForm.className = 'inline-form';
+  const select = document.createElement('select');
+  select.id = 'ui-language';
+  for (const item of window.TermuxOSI18n?.languages ?? []) {
+    const option = document.createElement('option');
+    option.value = item.code; option.textContent = item.label;
+    option.selected = item.code === current;
+    select.append(option);
+  }
+  select.disabled = !canWrite();
+  const langLabel = document.createElement('label');
+  langLabel.setAttribute('for', 'ui-language');
+  langLabel.textContent = tr('界面语言');
+  langForm.append(langLabel, select, actionButton('应用', 'primary', null, !canWrite(), 'submit'));
+  langForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try {
+      await apiData('/api/admin/ui', { method: 'POST', body: JSON.stringify({ language: select.value }) });
+      await window.TermuxOSI18n.load(select.value);
+      administrationNotice = { kind: 'good', text: '界面语言已更改。' };
+    } catch (error) {
+      administrationNotice = { kind: 'bad', text: `语言切换失败：${error.message ?? error}` };
+    }
+    // 重新渲染即可生效：文字全部经由组件产生，不需要重载页面。
+    renderAdministration();
+    await refreshAdminNavigation();
+  });
+  language.body.append(langForm);
 
   // 网络可达性放在地址清单之前：先决定绑在哪，那份清单才有意义。
   const network = section('网络访问');
@@ -686,8 +755,8 @@ async function renderAdministration() {
     network.body.append(text('p', '读不到当前的绑定地址。', 'alert error'));
   } else {
     network.body.append(
-      text('p', '只监听 127.0.0.1 时，这个控制台只在这台设备上应答，本机进入不需要密码。'
-        + '开放局域网访问后，同一网络上的任何设备都能连上，登录密码是唯一的屏障。', 'description'),
+      // 整句写成一条字面量：跨行拼接的句子没法作为翻译词条，切了语言它会原样留着。
+      text('p', '只监听 127.0.0.1 时，这个控制台只在这台设备上应答，本机进入不需要密码。开放局域网访问后，同一网络上的任何设备都能连上，登录密码是唯一的屏障。', 'description'),
       valueRow('监听地址', `${net.running_host}:${net.running_port}`),
     );
     if (net.restart_required) {
@@ -723,7 +792,7 @@ async function renderAdministration() {
     portInput.value = String(net.port ?? 8980); portInput.required = true; portInput.disabled = !canWrite();
     const portLabel = document.createElement('label');
     portLabel.setAttribute('for', 'admin-port');
-    portLabel.textContent = '控制台端口';
+    portLabel.textContent = tr('控制台端口');
     portForm.append(portLabel, portInput, actionButton('更改端口', '', null, !canWrite(), 'submit'));
     portForm.addEventListener('submit', (event) => {
       event.preventDefault();
@@ -761,7 +830,7 @@ async function renderAdministration() {
     link.append(text('b', item.admin_url), text('span', item.kind));
     addresses.body.append(link);
   }
-  replacePage(panel.card, password.card, network.card, addresses.card);
+  replacePage(language.card, panel.card, password.card, network.card, addresses.card);
 }
 
 async function copyText(textValue) {
@@ -786,8 +855,8 @@ async function copyText(textValue) {
 }
 
 async function renderRuntime() {
-  const [overview, integrity, stage, dev] = await Promise.all([
-    apiData('/api/admin/overview'), apiData('/api/admin/integrity'), apiData('/api/stage/services'), apiData('/api/dev/packages'),
+  const [overview, integrity, dev] = await Promise.all([
+    apiData('/api/admin/overview'), apiData('/api/admin/integrity'), apiData('/api/dev/packages'),
   ]);
   const framework = section('Framework 运行时');
   const report = overview.components?.framework?.value;
@@ -797,11 +866,8 @@ async function renderRuntime() {
     valueRow('上次更新', report?.last_update ? `${stateWord(report.last_update.status)} · ${report.last_update.candidate_build ?? '未知'}` : '无'),
     valueRow('完整性', integrity.ok ? 'all core checks passed' : 'needs review'),
   );
-  const services = section('Stage 服务');
-  for (const item of stage.services ?? []) {
-    services.body.append(statusRow(item.name, `${item.desired} → ${item.process?.state} / ${item.health?.state}`,
-      item.process?.state === 'running' && item.health?.state !== 'unhealthy' ? 'good' : statusKind(item.process?.state)));
-  }
+  // Stage 服务不在这里列。「服务」有自己的分页，那里能启停、看健康、看日志；
+  // 在运行时页再摆一份只读的同一批名字，读的人会以为这是另一样东西。
   const packages = section('Package 与开发运行时');
   const packageCheck = integrity.checks?.installed_packages;
   packages.body.append(
@@ -809,7 +875,7 @@ async function renderRuntime() {
     valueRow('加载失败', packageCheck?.failed?.length ? packageCheck.failed.join(', ') : 'none'),
     valueRow('开发挂载', dev.mounts?.length ?? 0),
   );
-  replacePage(framework.card, services.card, packages.card);
+  replacePage(framework.card, packages.card);
 }
 
 function createObservationPanel(title = '日志观察') {
@@ -818,9 +884,9 @@ function createObservationPanel(title = '日志观察') {
   const controls = document.createElement('div'); controls.className = 'svc-controls';
   const select = document.createElement('select');
   const start = actionButton('开始观察', 'primary', startObservation);
-  const clear = actionButton('清空视图', '', () => { log.textContent = ''; meta.textContent = `View cleared at offset ${state.offset}.`; }, true);
+  const clear = actionButton('清空视图', '', () => { log.textContent = ''; meta.textContent = `${tr('视图已清空，偏移量')} ${state.offset}`; }, true);
   const follow = document.createElement('label'); follow.className = 'meta';
-  const check = document.createElement('input'); check.type = 'checkbox'; check.checked = true; follow.append(check, document.createTextNode(' 自动跟随'));
+  const check = document.createElement('input'); check.type = 'checkbox'; check.checked = true; follow.append(check, document.createTextNode(` ${tr('自动跟随')}`));
   const download = actionButton('下载当前日志', '', () => {
     const link = document.createElement('a');
     link.href = URL.createObjectURL(new Blob([log.textContent], { type: 'text/plain;charset=utf-8' }));
@@ -840,7 +906,7 @@ function createObservationPanel(title = '日志观察') {
         value: component.id, textContent: component.id,
       })));
       if (selected && [...select.options].some((item) => item.value === selected)) select.value = selected;
-    } catch (error) { meta.textContent = `Could not load log components: ${error.message ?? error}`; }
+    } catch (error) { meta.textContent = `${tr('读不到日志组件')}：${error.message ?? error}`; }
   };
   const poll = async () => {
     if (!state.component) return;
@@ -886,13 +952,7 @@ async function renderLogs() {
 
 /** 公開開發者入口。唯一有意義的一項，不值得占一個分頁，掛在 Workspace 標題行上。 */
 function shareYourAppLink() {
-  const link = document.createElement('a');
-  link.href = 'https://package.termux-os.com/dev/';
-  link.target = '_blank';
-  link.rel = 'noopener';
-  link.className = 'button-link';
-  link.textContent = '发布你的应用';
-  return link;
+  return linkButton('发布你的应用', 'https://package.termux-os.com/dev/', '', { newTab: true });
 }
 
 /**
@@ -953,10 +1013,13 @@ async function renderWorkspace() {
     const row = document.createElement('div');
     row.className = 'button-row';
     if (mount) {
-      for (const page of mount.pages ?? []) {
-        row.append(pageLink(`打开 ${page.title}`, page.url, 'button-link primary-link'));
+      // 按钮上只写动作。页面名称已经在上面的清单里列过，重复写进按钮只会把它撑得很长，
+      // 而且几个按钮并排时，真正不同的那部分反而被前缀淹没。
+      const pages = mount.pages ?? [];
+      for (const page of pages) {
+        row.append(pageLink(pages.length > 1 ? page.title : '打开', page.url, 'primary'));
       }
-      if (project.released) row.append(pageLink(`打开正式版 ${project.released.version}`, project.released.url, 'button-link'));
+      if (project.released) row.append(pageLink('打开正式版', project.released.url));
       row.append(actionButton('停止挂载', '', () => workspaceMount(project, false)));
     } else {
       row.append(actionButton('挂载', 'primary', () => workspaceMount(project, true), !project.valid));
@@ -1032,25 +1095,43 @@ async function promptCreateWorkspace() {
   return renderWorkspace();
 }
 
-const pageLink = (label, href, className) => {
-  const link = document.createElement('a');
-  link.href = href;
-  link.target = '_blank';
-  link.rel = 'noopener';
-  link.className = className;
-  link.textContent = label;
-  return link;
+/** 在新标签打开的按钮式链接。外观与其它按钮一致，只是它是导航而不是动作。 */
+const pageLink = (label, href, variant = '') => linkButton(label, href, variant, { newTab: true });
+
+/**
+ * 变体名到组件 class 的映射。
+ *
+ * 过去按钮长什么样取决于它被放进了哪个容器（.button-row button、.upload-row button、
+ * .table-actions button、.tabs button 各写一套），再加上 button-link / primary-link /
+ * danger-text 几组并行的写法——同一个「更新」按钮在两个页面上是两个样子。现在外观只由
+ * 变体决定，与位置无关；容器只负责排版。
+ */
+const BUTTON_VARIANT = {
+  '': '', primary: 'is-primary', danger: 'is-danger', 'danger-text': 'is-danger-text',
+  active: 'is-active', quiet: 'is-quiet',
 };
+const buttonClass = (variant) => ['btn', BUTTON_VARIANT[variant ?? ''] ?? String(variant ?? '')]
+  .filter(Boolean).join(' ');
 
 const actionButton = (label, className, handler, disabled = false, type = 'button') => {
   const button = document.createElement('button');
   button.type = type;
-  button.textContent = label;
-  button.className = className ?? '';
+  button.textContent = tr(label);
+  button.className = buttonClass(className);
   button.disabled = disabled;
   // A submit button inside a form is driven by the form's own handler.
   if (handler) button.addEventListener('click', handler);
   return button;
+};
+
+/** 外观与 actionButton 完全一致的链接：导航用 <a>，但它在界面上就是一个按钮。 */
+const linkButton = (label, href, variant = '', { newTab = false } = {}) => {
+  const link = document.createElement('a');
+  link.href = href;
+  link.textContent = tr(label);
+  link.className = buttonClass(variant);
+  if (newTab) { link.target = '_blank'; link.rel = 'noopener'; }
+  return link;
 };
 
 function confirmAction({ title, label, details, acknowledgement = null }) {

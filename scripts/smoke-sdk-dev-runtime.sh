@@ -129,6 +129,11 @@ curl -s -b "$WORK/cookie" $B/packages/$ID/ | grep -q "DEV WORKSPACE" && bad "正
 curl -s -b "$WORK/cookie" "$B/packages/$INST/" | grep -q "DEV WORKSPACE" && ok "工作區頁面有 DEV banner" || bad "DEV banner"
 curl -s -H "$AUTH" "$B/api/packages/$INST" | jq "assert d['package']['source']=='dev-mount'" \
   && ok "工作區 runtime 來源=dev-mount" || bad "dev-mount source"
+# 瀏覽器送出實例 id 時會把 `@` 編成 `%40`。管理台的「停止掛載」就是這樣呼叫的，
+# 而路由的 id 字元集裡沒有 `%`——工作區因此停不掉，只回一句 not found。
+ENC_INST="${ID}%40${SLUG}"
+curl -s -o "$WORK/enc.json" -w '%{http_code}' -H "$AUTH" "$B/api/packages/$ENC_INST" | grep -q 200 \
+  && ok "百分號編碼的實例 id 仍能命中路由" || bad "百分號編碼的實例 id 命中路由" 
 
 echo "--- 8b. 服務身分必須實例化 ---"
 # 命名空間只做到註冊是不夠的：包會用自己的 service id 去拼 status/pid 路徑，

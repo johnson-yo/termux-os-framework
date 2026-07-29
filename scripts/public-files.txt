@@ -35,6 +35,7 @@ scripts/CLAUDE.md
 scripts/check-publication.mjs
 scripts/conf-fingerprint.mjs
 scripts/export-public-tree.mjs
+scripts/extract-ui-strings.mjs
 scripts/framework-update-job.mjs
 scripts/framework.sh
 scripts/hooks/commit-msg
@@ -234,6 +235,10 @@ web/CLAUDE.md
 web/admin/admin-controls.js
 web/admin/app-core.js
 web/admin/app.js
+web/admin/i18n.js
+web/admin/i18n/en.json
+web/admin/i18n/ja.json
+web/admin/i18n/zh-Hant.json
 web/admin/icon.svg
 web/admin/index.html
 web/admin/login.html
