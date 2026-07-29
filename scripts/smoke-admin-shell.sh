@@ -33,7 +33,8 @@ node -e '
   const fs=require("fs");
   fs.writeFileSync(process.argv[1], JSON.stringify({
     schema:"termux-os-framework.conf.v1", device_name:"shell-smoke",
-    server:{host:"127.0.0.1",port:Number(process.argv[2])},
+    // 綁 0.0.0.0 才能同時測「本機免密碼」與「別的位址仍要密碼」。
+    server:{host:"0.0.0.0",port:Number(process.argv[2])},
     auth:{},
     integrations:{app:{enabled:false,url:"http://127.0.0.1:1",token:""}}
   }, null, 2));
@@ -64,12 +65,15 @@ if [ -n "$SETUP_TOKEN" ]; then
   curl -sf -X POST -H 'Content-Type: application/json' \
     -d "{\"setup_token\":\"$SETUP_TOKEN\",\"use_previous_config\":true}" "$BASE/api/admin/setup" >/dev/null || true
 fi
-if curl -sf "$BASE/admin" | grep -q 'Administrator password'; then ok "/admin shows Login without session"; else bad "/admin shows Login without session"; fi
-if ! curl -sf "$BASE/admin" | grep -Eq 'admin token|id=\"token\"'; then ok "Login contains no fixed API token"; else bad "Login contains no fixed API token"; fi
+# 這套 smoke 全部跑在 loopback 上，而 loopback 就是機主本人：面板直接開，不出現登入框。
+# 「別的機器仍然要密碼」由 smoke-user-access.sh 用非 loopback 位址驗證。
+if ! curl -sf "$BASE/admin" | grep -Eq 'admin token|id=\"token\"'; then ok "Entry contains no fixed API token"; else bad "Entry contains no fixed API token"; fi
+CODE="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/admin")"
+if [ "$CODE" = 302 ]; then ok "Local browser enters without a password"; else bad "Local browser enters without a password (HTTP $CODE)"; fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/admin/status/overview")"
-if [ "$CODE" = 302 ]; then ok "Shell route redirects without session"; else bad "Shell route redirects without session (HTTP $CODE)"; fi
+if [ "$CODE" = 200 ]; then ok "Local browser opens the shell directly"; else bad "Local browser opens the shell directly (HTTP $CODE)"; fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/packages/unknown/")"
-if [ "$CODE" = 302 ]; then ok "Package WebUI route shares Browser Session gate"; else bad "Package WebUI route shares Browser Session gate (HTTP $CODE)"; fi
+if [ "$CODE" = 404 ]; then ok "Package WebUI route resolves for a local browser"; else bad "Package WebUI route resolves for a local browser (HTTP $CODE)"; fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/admin/sdk-guide")"
 if [ "$CODE" = 401 ]; then ok "SDK Agent guide requires authentication"; else bad "SDK Agent guide auth gate (HTTP $CODE)"; fi
 
@@ -114,14 +118,49 @@ else
 fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AUTH_TOKEN" "$BASE/api/admin/credentials/system-key")"
 if [ "$CODE" = 401 ]; then ok "full System Key copy endpoint rejects Bearer API clients"; else bad "full System Key copy endpoint Bearer HTTP $CODE"; fi
-CODE="$(curl -s -o "$WORK/password-no-old.json" -w '%{http_code}' -b "$COOKIE" -H "X-CSRF-Token: $(node -e 'process.stdout.write(require(process.argv[1]).csrf_token)' "$WORK/login.json")" \
-  -H 'Content-Type: application/json' --data '{"new_password":"a-long-new-password","confirm_password":"a-long-new-password"}' \
+# 本機不問舊密碼——這裡只驗其餘規則仍在，而且刻意不去改動密碼，免得後面的測試失去憑證。
+# 「別的設備必須證明舊密碼」由 smoke-user-access.sh 在非 loopback 位址上驗證。
+CODE="$(curl -s -o "$WORK/password-short.json" -w '%{http_code}' -b "$COOKIE" -H "X-CSRF-Token: $(node -e 'process.stdout.write(require(process.argv[1]).csrf_token)' "$WORK/login.json")" \
+  -H 'Content-Type: application/json' --data '{"new_password":"short","confirm_password":"short"}' \
   "$BASE/api/admin/credentials/login-password")"
-if [ "$CODE" = 400 ] && grep -q current_password_required "$WORK/password-no-old.json"; then ok "password update requires the current password"; else bad "password update current-password requirement HTTP $CODE"; fi
-CODE="$(curl -s -o "$WORK/password-wrong-old.json" -w '%{http_code}' -b "$COOKIE" -H "X-CSRF-Token: $(node -e 'process.stdout.write(require(process.argv[1]).csrf_token)' "$WORK/login.json")" \
-  -H 'Content-Type: application/json' --data '{"current_password":"wrong-old-password","new_password":"a-long-new-password","confirm_password":"a-long-new-password"}' \
+if [ "$CODE" = 400 ] && grep -q login_password_too_short "$WORK/password-short.json"; then ok "password rules still apply locally"; else bad "password rules still apply locally HTTP $CODE"; fi
+CODE="$(curl -s -o "$WORK/password-mismatch.json" -w '%{http_code}' -b "$COOKIE" -H "X-CSRF-Token: $(node -e 'process.stdout.write(require(process.argv[1]).csrf_token)' "$WORK/login.json")" \
+  -H 'Content-Type: application/json' --data '{"new_password":"a-long-new-password","confirm_password":"a-different-password"}' \
   "$BASE/api/admin/credentials/login-password")"
-if [ "$CODE" = 401 ] && grep -q current_password_invalid "$WORK/password-wrong-old.json"; then ok "password update rejects a wrong current password"; else bad "password update wrong-current-password HTTP $CODE"; fi
+if [ "$CODE" = 400 ] && grep -q login_password_mismatch "$WORK/password-mismatch.json"; then ok "password confirmation still required locally"; else bad "password confirmation locally HTTP $CODE"; fi
+
+# 本機免密碼是因為機主就在那台機器前面。從別的位址改密碼仍然要先證明知道舊的，
+# 否則只要連得到這個埠就能把管理員鎖在門外。
+LAN_IP=$(node -e '
+  const os = require("os");
+  const hit = Object.values(os.networkInterfaces()).flat()
+    .find((i) => i && i.family === "IPv4" && !i.internal);
+  process.stdout.write(hit ? hit.address : "");
+')
+if [ -n "$LAN_IP" ]; then
+  REMOTE="http://$LAN_IP:$PORT"
+  curl -s -c "$WORK/remote-ck" -H 'Content-Type: application/json' \
+    --data "{\"password\":\"$AUTH_PASSWORD\"}" "$REMOTE/api/auth/login" -o "$WORK/remote-login.json"
+  RCSRF=$(node -e 'try{process.stdout.write(require(process.argv[1]).csrf_token||"")}catch{}' "$WORK/remote-login.json")
+  CODE="$(curl -s -o "$WORK/remote-pw.json" -w '%{http_code}' -b "$WORK/remote-ck" -H "X-CSRF-Token: $RCSRF" \
+    -H 'Content-Type: application/json' --data '{"new_password":"a-long-new-password","confirm_password":"a-long-new-password"}' \
+    "$REMOTE/api/admin/credentials/login-password")"
+  if [ "$CODE" = 400 ] && grep -q current_password_required "$WORK/remote-pw.json"; then
+    ok "remote password change still proves the old password"
+  else
+    bad "remote password change still proves the old password HTTP $CODE"
+  fi
+  CODE="$(curl -s -o "$WORK/remote-pw2.json" -w '%{http_code}' -b "$WORK/remote-ck" -H "X-CSRF-Token: $RCSRF" \
+    -H 'Content-Type: application/json' --data '{"current_password":"wrong-old-password","new_password":"a-long-new-password","confirm_password":"a-long-new-password"}' \
+    "$REMOTE/api/admin/credentials/login-password")"
+  if [ "$CODE" = 401 ] && grep -q current_password_invalid "$WORK/remote-pw2.json"; then
+    ok "remote password change rejects a wrong old password"
+  else
+    bad "remote password change rejects a wrong old password HTTP $CODE"
+  fi
+else
+  echo "SKIP remote password checks: no non-loopback IPv4 address on this machine"
+fi
 curl -sf -b "$COOKIE" "$BASE/packages/github.termux-os.service.example-counter/" >"$WORK/package.html"
 if grep -q '/admin/session.js' "$WORK/package.html"; then
   ok "host upgrades immutable Package HTML to Browser Session without rewriting Release"
@@ -312,8 +351,21 @@ CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AUTH_T
   -X POST -H 'Content-Type: application/json' \
   --data '{"host":"example-invalid"}' "$BASE/api/admin/network")"
 if [ "$CODE" = 400 ]; then ok "arbitrary bind addresses are refused"; else bad "network endpoint accepts arbitrary host (HTTP $CODE)"; fi
-grep -q "Allow access from the local network" "$ROOT/web/admin/app-core.js" \
-  && ok "Administration exposes the LAN toggle" || bad "LAN toggle missing from Administration"
+grep -q "允许局域网访问" "$ROOT/web/admin/app-core.js" \
+  && ok "Administration exposes the LAN control" || bad "LAN control missing from Administration"
+# 埠會撞，撞了面板就打不開，而使用者沒有 shell 可以改設定檔——所以這件事必須在面板裡做得到。
+grep -q "控制台端口" "$ROOT/web/admin/app-core.js" \
+  && ok "Administration exposes the port control" || bad "port control missing from Administration"
+CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AUTH_TOKEN" \
+  -X POST -H 'Content-Type: application/json' --data '{"port":80}' "$BASE/api/admin/network")"
+if [ "$CODE" = 400 ]; then ok "privileged ports are refused"; else bad "privileged port accepted (HTTP $CODE)"; fi
+CODE="$(curl -s -o "$WORK/port.json" -w '%{http_code}' -H "Authorization: Bearer $AUTH_TOKEN" \
+  -X POST -H 'Content-Type: application/json' --data "{\"port\":$PORT}" "$BASE/api/admin/network")"
+if [ "$CODE" = 200 ] && grep -q '"restart_required":false' "$WORK/port.json"; then
+  ok "setting the running port needs no restart"
+else
+  bad "port endpoint HTTP $CODE"
+fi
 
 # 設定生效需要重啟，而重啟必須能在瀏覽器裡完成——使用者不該為此去開 Termux
 CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AUTH_TOKEN" \

@@ -46,4 +46,12 @@ post-update review reveal credentials, so both answer local requests only; every
 the login form regardless of state. Whoever reaches the panel over the network is not the person
 holding the phone.
 
+A loopback browser is the person holding the phone, so it enters the panel without a password and
+changes that password without proving the old one. The password exists to keep other machines out;
+requiring it on the device only sends the user looking for a credential they were never shown. This
+is a real session rather than an authentication bypass, so CSRF still applies to writes: another page
+on the device can post to loopback, but it cannot read the token that makes the post count. Every
+non-loopback origin keeps the full password path, and that is what the remote half of the access
+smoke exists to prove.
+
 Credentials and browser sessions stay in Termux-private storage. Administration code must not expose secrets. Device verification must report the exact installed release it inspected.

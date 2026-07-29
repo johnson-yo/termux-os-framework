@@ -31,7 +31,8 @@ json.dump({"schema": "termux-os-framework.conf.v1", "device_name": "smoke-device
            "integrations": {"app": {"enabled": False, "url": "http://127.0.0.1:1", "token": ""}}},
           open(sys.argv[1], "w"))
 PY
-CONFIG="$WORK/config.json" BROWSER_SESSION_PATH="$WORK/browser-sessions.v1.json" PACKAGES_INSTALLED_DIR="$WORK/pkgs" node src/server.mjs >"$WORK/fw.log" 2>&1 &
+# 綁 0.0.0.0 才能同時測「本機直接進」與「別的位址仍要密碼」這兩件事。
+HOST=0.0.0.0 CONFIG="$WORK/config.json" BROWSER_SESSION_PATH="$WORK/browser-sessions.v1.json" PACKAGES_INSTALLED_DIR="$WORK/pkgs" node src/server.mjs >"$WORK/fw.log" 2>&1 &
 FW_PID=$!
 for _ in $(seq 1 40); do
   curl -s -m 1 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
@@ -89,11 +90,35 @@ curl -s -m 3 -X POST -H 'Content-Type: application/json' \
   "http://127.0.0.1:$PORT/api/admin/setup" >/dev/null
 C=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/api/admin/setup")
 [ "$C" = 404 ] && ok "認領後 Setup 不再交出憑證" || bad "認領後 Setup 關閉" "http=$C"
-C=$(curl -s -o "$WORK/admin.html" -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/admin")
-[ "$C" = 200 ] && grep -q 'Administrator password' "$WORK/admin.html" \
-  && ok "/admin → Browser Login" || bad "/admin → Browser Login" "http=$C"
-C=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/admin/status/overview")
-[ "$C" = 302 ] && ok "受保护 Admin 页面未登录 → Login" || bad "受保护 Admin 页面未登录 → Login" "http=$C"
+# 手機上的瀏覽器就是機主。密碼是用來擋別的機器的，在本機要求它只會讓使用者去找一組
+# 從來沒給過他的密碼——所以本機直接進，不出現登入框。
+C=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/admin")
+[ "$C" = 302 ] && ok "本機 /admin 直接進入，不要密碼" || bad "本機 /admin 直接進入" "http=$C"
+C=$(curl -s -o /dev/null -w '%{http_code}' -m 3 -L "http://127.0.0.1:$PORT/admin/status/overview")
+[ "$C" = 200 ] && ok "本機可直接開受保護頁面" || bad "本機可直接開受保護頁面" "http=$C"
+
+# 這是上面那條放寬的邊界：別的機器不是機主，必須有密碼。
+LAN_IP=$(node -e '
+  const os = require("os");
+  const hit = Object.values(os.networkInterfaces()).flat()
+    .find((i) => i && i.family === "IPv4" && !i.internal);
+  process.stdout.write(hit ? hit.address : "");
+')
+if [ -n "$LAN_IP" ]; then
+  C=$(curl -s -o "$WORK/remote.html" -w '%{http_code}' -m 3 "http://$LAN_IP:$PORT/admin")
+  if [ "$C" = 200 ] && grep -q 'Administrator password' "$WORK/remote.html"; then
+    ok "非本機 /admin 仍然要密碼"
+  else
+    bad "非本機 /admin 仍然要密碼" "http=$C"
+  fi
+  C=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://$LAN_IP:$PORT/admin/status/overview")
+  [ "$C" = 302 ] && ok "非本機受保護頁面仍導向登入" || bad "非本機受保護頁面仍導向登入" "http=$C"
+  C=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://$LAN_IP:$PORT/api/admin/setup")
+  [ "$C" = 404 ] && ok "非本機拿不到 Setup 憑證" || bad "非本機拿不到 Setup 憑證" "http=$C"
+
+else
+  echo "SKIP 非本機測試：這台機器沒有非 loopback 的 IPv4 位址"
+fi
 curl -s -c "$WORK/cookie" -H 'Content-Type: application/json' -d '{"password":"smoketoken"}' \
   "http://127.0.0.1:$PORT/api/auth/login" >/dev/null
 curl -s -m 3 -b "$WORK/cookie" "http://127.0.0.1:$PORT/admin/status/runtime" >"$WORK/runtime-shell.html"

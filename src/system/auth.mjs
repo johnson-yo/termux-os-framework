@@ -175,6 +175,28 @@ export function loginBrowser(password, remote = 'unknown') {
   return { ok: true, status: 200, session };
 }
 
+/**
+ * Mint a session without a password, for a request that came from this device.
+ *
+ * The administrator password exists to keep other machines out. On the phone itself there is
+ * nobody else to keep out, and demanding it there only sends the user looking for a password they
+ * were never shown. This is still a real session rather than a bypass, so CSRF continues to apply
+ * to writes: another page on the device can send a request to loopback, but it cannot read the
+ * token needed to make that request count.
+ */
+export function openLocalSession() {
+  const now = Date.now();
+  prune(now);
+  const id = crypto.randomBytes(32).toString('base64url');
+  const csrf = crypto.randomBytes(24).toString('base64url');
+  const session = {
+    id, csrf, permissions: ['read', 'write'], createdAt: now, lastSeen: now, lastPersistedAt: now, local: true,
+  };
+  sessions.set(id, session);
+  persistSessions();
+  return session;
+}
+
 export function authenticateRequest(req) {
   prune();
   const bearer = String(req.headers.authorization ?? '').match(/^Bearer\s+(.+)$/i)?.[1] ?? null;

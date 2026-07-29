@@ -581,19 +581,27 @@ async function renderAdministration() {
   );
 
   const password = section('Login password');
-  password.body.append(text('p', 'Enter the current password before setting a new one. Existing Browser Sessions are signed out after a successful change.', 'description'));
+  // 本機進入面板本來就不需要密碼，再要求舊密碼只會擋住唯一有權改它的人。
+  // 這個密碼是給別的設備用的——所以說清楚它擋的是誰。
+  password.body.append(text('p', credentials.local
+    ? '这个密码只在别的设备通过局域网访问时才需要；本机进入不用密码。改完后其他设备上的登录会失效。'
+    : 'Enter the current password before setting a new one. Existing Browser Sessions are signed out after a successful change.',
+  'description'));
   const passwordForm = document.createElement('form'); passwordForm.className = 'credential-form';
-  const currentPassword = document.createElement('input'); currentPassword.type = 'password'; currentPassword.placeholder = 'Current password'; currentPassword.required = true; currentPassword.autocomplete = 'current-password';
+  const currentPassword = document.createElement('input'); currentPassword.type = 'password'; currentPassword.placeholder = 'Current password'; currentPassword.required = !credentials.local; currentPassword.autocomplete = 'current-password';
+  currentPassword.hidden = Boolean(credentials.local);
   const newPassword = document.createElement('input'); newPassword.type = 'password'; newPassword.placeholder = 'New password'; newPassword.minLength = credentials.login_password?.minimum_length ?? 16; newPassword.autocomplete = 'new-password';
   const confirmPassword = document.createElement('input'); confirmPassword.type = 'password'; confirmPassword.placeholder = 'Repeat new password'; confirmPassword.minLength = newPassword.minLength; confirmPassword.autocomplete = 'new-password';
   const savePassword = actionButton('Update login password', 'primary', () => {}, !canWrite() || !credentials.editable);
   savePassword.type = 'submit';
-  passwordForm.append(currentPassword, newPassword, confirmPassword, savePassword);
+  if (!credentials.local) passwordForm.append(currentPassword);
+  passwordForm.append(newPassword, confirmPassword, savePassword);
   passwordForm.addEventListener('submit', async (event) => {
     event.preventDefault(); savePassword.disabled = true;
     try {
       await apiData('/api/admin/credentials/login-password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword.value, new_password: newPassword.value, confirm_password: confirmPassword.value }) });
-      location.replace('/admin/login');
+      // 回 /admin 而不是登入頁：本機會就地重新取得 Session，別的設備才會看到登入框。
+      location.replace('/admin');
     } catch (error) { administrationNotice = { kind: 'bad', text: `Login password: ${error.message ?? error}` }; renderAdministration(); }
   });
   password.body.append(passwordForm, valueRow('Minimum length', `${credentials.login_password?.minimum_length ?? 16} characters`));
@@ -627,38 +635,91 @@ async function renderAdministration() {
       renderAdministration();
     }, !canWrite()));
     network.body.append(restartRow);
-    const toggle = document.createElement('label');
-    toggle.className = 'enable-toggle';
-    const input = document.createElement('input');
-    input.type = 'checkbox';
-    input.checked = net.lan_enabled;
-    input.disabled = !canWrite();
-    input.addEventListener('change', async () => {
-      input.disabled = true;
+    // 一句話加一個勾選框說不清後果，而後果是「同一個 WiFi 上的任何人都到得了這個面板」。
+    // 做成一個明說自己要幹什麼的按鈕，狀態寫在旁邊。
+    const lanRow = document.createElement('div');
+    lanRow.className = 'button-row';
+    lanRow.append(actionButton(
+      net.lan_enabled ? '只允许本机访问' : '允许局域网访问',
+      net.lan_enabled ? '' : 'primary',
+      async () => {
+        const next = !net.lan_enabled;
+        if (next && !confirm('允许局域网访问？\n\n同一个网络上的任何设备都能打开这个控制台，'
+          + '唯一的屏障是登录密码。本机进入不需要密码，但别的设备需要。')) return;
+        try {
+          const result = await apiData('/api/admin/network', {
+            method: 'POST', body: JSON.stringify({ lan_enabled: next }),
+          });
+          administrationNotice = { kind: result.restart_required ? 'warning' : 'good',
+            text: result.restart_required
+              ? `绑定地址已设为 ${result.host}，重启后生效。`
+              : `绑定地址是 ${result.host}。` };
+        } catch (error) {
+          administrationNotice = { kind: 'bad', text: `Network access: ${error.message ?? error}` };
+        }
+        renderAdministration();
+      }, !canWrite()));
+    network.body.append(lanRow);
+
+    // 埠會撞。撞了就開不了面板，而使用者沒有 shell 可以去改設定檔——所以這裡必須能改。
+    const portForm = document.createElement('form');
+    portForm.className = 'inline-form';
+    const portInput = document.createElement('input');
+    portInput.type = 'number'; portInput.id = 'admin-port'; portInput.min = '1024'; portInput.max = '65535';
+    portInput.value = String(net.port ?? 8980); portInput.required = true; portInput.disabled = !canWrite();
+    const portLabel = document.createElement('label');
+    portLabel.setAttribute('for', 'admin-port');
+    portLabel.textContent = '控制台端口';
+    portForm.append(portLabel, portInput, actionButton('更改端口', '', null, !canWrite(), 'submit'));
+    portForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const port = Number(portInput.value);
+      if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+        administrationNotice = { kind: 'bad', text: '端口必须是 1024–65535 之间的整数。' };
+        return renderAdministration();
+      }
+      if (port !== Number(net.port) && !confirm(`把控制台端口改成 ${port}？\n\n`
+        + `重启后当前地址会失效，请改用新端口打开。`)) return;
       try {
         const result = await apiData('/api/admin/network', {
-          method: 'POST', body: JSON.stringify({ lan_enabled: input.checked }),
+          method: 'POST', body: JSON.stringify({ port }),
         });
         administrationNotice = { kind: result.restart_required ? 'warning' : 'good',
           text: result.restart_required
-            ? `Bind address set to ${result.host}. Restart the Framework to apply it.`
-            : `Bind address is ${result.host}.` };
+            ? `端口已设为 ${result.port}，重启后请用新端口打开控制台。`
+            : `端口是 ${result.port}。` };
       } catch (error) {
-        administrationNotice = { kind: 'bad', text: `Network access: ${error.message ?? error}` };
+        administrationNotice = { kind: 'bad', text: `端口更改失败：${error.message ?? error}` };
       }
       renderAdministration();
     });
-    toggle.append(input, text('span', 'Allow access from the local network (0.0.0.0)'));
-    network.body.append(toggle);
+    network.body.append(portForm);
   }
 
-  const addresses = section('Reachable addresses');
+  // 綁在 loopback 時，這些位址上沒有東西在聽。把它們列成「可達」是在說一件不成立的事，
+  // 使用者照著打開只會連不上，然後去查一個根本不存在的網路問題。
+  const listeningEverywhere = (net?.running_host ?? '127.0.0.1') === '0.0.0.0';
+  const addresses = section(listeningEverywhere ? 'Reachable addresses' : 'Addresses on this device');
+  if (!listeningEverywhere) {
+    addresses.body.append(text('p',
+      `控制台目前只在 ${net?.running_host ?? '127.0.0.1'}:${net?.port ?? 8980} 上监听，`
+      + '下面这些地址上没有东西在听。要让别的设备打得开，先用上面的「允许局域网访问」。',
+      'description'));
+  }
   if (!access.addresses?.length) addresses.body.append(text('p', 'No non-loopback address is currently reported.', 'empty'));
   for (const item of access.addresses ?? []) {
-    const link = document.createElement('a');
-    link.className = 'list-link'; link.href = item.admin_url;
-    link.append(text('b', item.admin_url), text('span', item.kind));
-    addresses.body.append(link);
+    const reachable = listeningEverywhere || item.kind === 'loopback';
+    if (reachable) {
+      const link = document.createElement('a');
+      link.className = 'list-link'; link.href = item.admin_url;
+      link.append(text('b', item.admin_url), text('span', item.kind));
+      addresses.body.append(link);
+    } else {
+      const row = document.createElement('div');
+      row.className = 'list-link muted-row';
+      row.append(text('b', item.admin_url), text('span', `${item.kind} · 未监听`));
+      addresses.body.append(row);
+    }
   }
   replacePage(panel.card, password.card, network.card, addresses.card);
 }
@@ -936,13 +997,14 @@ const pageLink = (label, href, className) => {
   return link;
 };
 
-const actionButton = (label, className, handler, disabled = false) => {
+const actionButton = (label, className, handler, disabled = false, type = 'button') => {
   const button = document.createElement('button');
-  button.type = 'button';
+  button.type = type;
   button.textContent = label;
   button.className = className ?? '';
   button.disabled = disabled;
-  button.addEventListener('click', handler);
+  // A submit button inside a form is driven by the form's own handler.
+  if (handler) button.addEventListener('click', handler);
   return button;
 };
 

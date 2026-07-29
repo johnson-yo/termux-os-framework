@@ -28,7 +28,7 @@ import { listAppsWithState, getAppState, prepareApp } from './apps/coordinator.m
 import { collectMetrics } from './system/metrics.mjs';
 import { accessInfo } from './system/access.mjs';
 import {
-  authenticateRequest, browserSessionInfo, clearSessionCookie, configureBrowserAuth, csrfValid,
+  authenticateRequest, browserSessionInfo, clearSessionCookie, configureBrowserAuth, csrfValid, openLocalSession,
   hasPermission, loginBrowser, logoutBrowser, sessionCookie, updateBrowserAuth, verifyBrowserPassword,
 } from './system/auth.mjs';
 import { adminMenuHasPath, buildAdminMenu } from './system/menu.mjs';
@@ -268,8 +268,8 @@ const json = (res, code, body, headers = {}) => {
   res.end(JSON.stringify(body));
 };
 
-const redirect = (res, location) => {
-  res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
+const redirect = (res, location, headers = {}) => {
+  res.writeHead(302, { Location: location, 'Cache-Control': 'no-store', ...headers });
   res.end();
 };
 
@@ -342,7 +342,17 @@ const pwaInjection = () => `<link rel="manifest" href="/admin/manifest.webmanife
 <link rel="icon" href="/admin/icon.svg" type="image/svg+xml">
 <meta name="theme-color" content="#18212b">
 <script>if('serviceWorker'in navigator){window.addEventListener('load',function(){
-navigator.serviceWorker.register('/admin/sw.js?v=${encodeURIComponent(FRAMEWORK_VERSION)}',{scope:'/admin'}).catch(function(){});});}</script>`;
+// updateViaCache:'none' 讓瀏覽器每次都去問這支腳本本身，否則裝成 App 之後可能長期停在舊的一份。
+navigator.serviceWorker.register('/admin/sw.js?v=${encodeURIComponent(FRAMEWORK_VERSION)}',
+  {scope:'/admin',updateViaCache:'none'}).then(function(r){
+  r.update().catch(function(){});
+  // Framework 更新後腳本位址會變，新的 worker 接手時整頁重載一次，
+  // 否則使用者會在新的 Framework 上繼續看著上一版的介面。
+  var reloading=false;
+  navigator.serviceWorker.addEventListener('controllerchange',function(){
+    if(reloading)return; reloading=true; location.reload();
+  });
+}).catch(function(){});});}</script>`;
 
 function injectPwa(html) {
   if (html.includes('/admin/manifest.webmanifest')) return html;
@@ -808,7 +818,8 @@ const stageRoute = async (req, res, url, query) => {
 const server = http.createServer(async (req, res) => {
   const parsed = new URL(req.url, 'http://x');
   const url = parsed.pathname;
-  const auth = authenticateRequest(req);
+  // 本機瀏覽器進入面板時會就地取得一個 Session（見下方 localEntry），所以這裡不是 const。
+  let auth = authenticateRequest(req);
 
   // Browser Session 与 SDK Bearer 分离：login 只接密码；Cookie 不可被 JS 读取，写请求另验 CSRF。
   if (url === '/api/auth/login' && req.method === 'POST') {
@@ -940,7 +951,9 @@ const server = http.createServer(async (req, res) => {
   };
   if (url === '/api/admin/credentials' && req.method === 'GET') {
     if (!hasPermission(auth, 'read')) return json(res, 401, { ok: false, error: 'unauthorized' });
-    return json(res, 200, credentialSnapshot(), { 'Cache-Control': 'no-store' });
+    // 讓面板知道這次請求是不是來自本機，它才能決定要不要問舊密碼。
+    return json(res, 200, { ...credentialSnapshot(), local: isLoopbackAddress(req.socket?.remoteAddress) },
+      { 'Cache-Control': 'no-store' });
   }
   if (url === '/api/admin/credentials/system-key' && req.method === 'GET') {
     // A full key is available only for an authenticated Browser Session's explicit Copy action.
@@ -973,11 +986,16 @@ const server = http.createServer(async (req, res) => {
     const currentPassword = body?.current_password ?? body?.old_password;
     const password = body?.new_password ?? body?.password;
     const confirmation = body?.confirm_password ?? body?.confirm;
-    if (typeof currentPassword !== 'string' || !currentPassword) {
-      return json(res, 400, { ok: false, error: 'current_password_required' });
-    }
-    if (!verifyBrowserPassword(currentPassword)) {
-      return json(res, 401, { ok: false, error: 'current_password_invalid' });
+    // 本機不問舊密碼。舊密碼是用來證明「發請求的人就是知道密碼的那個人」，而在這台手機上
+    // 進入面板本來就不需要密碼——再問一次只會攔住唯一有權改它的人。別的來源照舊要驗。
+    const local = isLoopbackAddress(req.socket?.remoteAddress);
+    if (!local) {
+      if (typeof currentPassword !== 'string' || !currentPassword) {
+        return json(res, 400, { ok: false, error: 'current_password_required' });
+      }
+      if (!verifyBrowserPassword(currentPassword)) {
+        return json(res, 401, { ok: false, error: 'current_password_invalid' });
+      }
     }
     if (typeof password !== 'string' || password.length < AUTH_PASSWORD_MIN_LENGTH) {
       return json(res, 400, { ok: false, error: 'login_password_too_short', detail: `Login password must be at least ${AUTH_PASSWORD_MIN_LENGTH} characters.` });
@@ -1075,30 +1093,47 @@ const server = http.createServer(async (req, res) => {
       host: CFG.server?.host ?? '127.0.0.1',
       port: Number(CFG.server?.port) || 8980,
       lan_enabled: (CFG.server?.host ?? '127.0.0.1') === '0.0.0.0',
-      // 生效需要重啟：HOST 在進程啟動時就綁定了，改配置不會重新 bind。
-      restart_required: (CFG.server?.host ?? '127.0.0.1') !== HOST,
+      // 生效需要重啟：位址與埠都是在進程啟動時綁定的，改配置不會重新 bind。
+      restart_required: (CFG.server?.host ?? '127.0.0.1') !== HOST
+        || (Number(CFG.server?.port) || 8980) !== PORT,
       running_host: HOST,
+      running_port: PORT,
     }, { 'Cache-Control': 'no-store' });
   }
   if (url === '/api/admin/network' && req.method === 'POST') {
     if (!hasPermission(auth, 'write')) return json(res, 401, { ok: false, error: 'unauthorized' });
     const body = await readBody(req);
-    if (typeof body?.lan_enabled !== 'boolean') {
-      return json(res, 400, { ok: false, error: 'lan_enabled_required' });
+    const wantsHost = typeof body?.lan_enabled === 'boolean';
+    const wantsPort = body?.port !== undefined;
+    if (!wantsHost && !wantsPort) {
+      return json(res, 400, { ok: false, error: 'lan_enabled_or_port_required' });
     }
-    // 只允許這兩個值。開放監聽是不可逆的暴露——同一 WiFi 下任何設備都能連上管理台，
-    // 唯一的防線是登入密碼——所以不接受任意位址，避免綁到意料之外的介面。
-    const host = body.lan_enabled ? '0.0.0.0' : '127.0.0.1';
+    // 只允許這兩個位址。開放監聽是不可逆的暴露——同一 WiFi 下任何設備都能連上管理台——
+    // 所以不接受任意位址，避免綁到意料之外的介面。
+    const host = wantsHost
+      ? (body.lan_enabled ? '0.0.0.0' : '127.0.0.1')
+      : (CFG.server?.host ?? '127.0.0.1');
+    // 埠會撞，撞了面板就打不開。使用者沒有 shell 可以去改設定檔，所以這件事必須能在
+    // 瀏覽器裡做完。特權埠不開放：Termux 不是 root，綁不上去只會變成另一種打不開。
+    let port = Number(CFG.server?.port) || 8980;
+    if (wantsPort) {
+      port = Number(body.port);
+      if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+        return json(res, 400, { ok: false, error: 'port_invalid',
+          detail: 'Port must be an integer between 1024 and 65535.' });
+      }
+    }
     try {
-      CFG.server = { ...(CFG.server ?? {}), host };
+      CFG.server = { ...(CFG.server ?? {}), host, port };
       persistConfiguration();
     } catch (error) {
       return json(res, 500, { ok: false, error: 'config_write_failed', detail: String(error?.message ?? error) });
     }
+    const restartRequired = host !== HOST || port !== PORT;
     return json(res, 200, {
-      ok: true, host, lan_enabled: body.lan_enabled,
-      restart_required: host !== HOST,
-      note: host === HOST ? null : 'Restart the Framework for the new bind address to take effect.',
+      ok: true, host, port, lan_enabled: host === '0.0.0.0',
+      restart_required: restartRequired,
+      note: restartRequired ? 'Restart the Framework for the new address to take effect.' : null,
     });
   }
   if (url === '/api/admin/workspaces' && req.method === 'GET') {
@@ -1697,16 +1732,30 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': MIME['.js'], 'Service-Worker-Allowed': '/admin' });
     return res.end(fs.readFileSync(file));
   }
+  // 手機上的瀏覽器就是機主本人。密碼是用來擋別的機器的，在本機要求它只會讓使用者
+  // 去找一組從來沒給過他的密碼。這裡發的是真的 Session 而不是繞過認證，所以寫入仍然
+  // 受 CSRF 保護：設備上的其他網頁能對 loopback 發請求，但讀不到讓請求生效的 token。
+  const localEntry = () => {
+    if (auth?.kind === 'session' || !isLoopbackAddress(req.socket?.remoteAddress)) return null;
+    const session = openLocalSession();
+    auth = { kind: 'session', permissions: session.permissions, session };
+    return sessionCookie(session);
+  };
+
   if (url === '/admin' || url === '/admin/') {
     // Setup 在這裡直接以 200 回應，而不是導向 /admin/setup。更新期間跑 core-check 的是
     // **舊版本的** 控制器，它要求 /admin 回 200；改成轉址會讓每一次從舊版本上來的更新
     // 都在 post-check 失敗並回滾——也就是新版本誰都裝不上。
     if (setupStep() !== 'none') return serveAdminFile(res, 'setup.html');
-    return auth?.kind === 'session'
-      ? redirect(res, '/admin/status/overview')
-      : serveAdminFile(res, 'login.html');
+    const cookie = localEntry();
+    if (auth?.kind === 'session') {
+      return redirect(res, '/admin/status/overview', cookie ? { 'Set-Cookie': cookie } : {});
+    }
+    return serveAdminFile(res, 'login.html');
   }
   if (url.startsWith('/admin/')) {
+    const cookie = localEntry();
+    if (cookie) res.setHeader('Set-Cookie', cookie);
     if (auth?.kind !== 'session') return redirect(res, `/admin/login?next=${encodeURIComponent(url)}`);
     const file = ADMIN_FILES.get(url);
     if (file) return serveAdminFile(res, file);
@@ -1719,6 +1768,8 @@ const server = http.createServer(async (req, res) => {
   // Package WebUI 静态也只接受统一 Browser Session；SDK/CLI 仍只走 Bearer API。
   // 029：Dev Mount 的頁面由 Framework 注入 DEV banner + 自動刷新輪詢；載入失敗顯示錯誤頁不冒充成功
   if (url.startsWith('/packages/')) {
+    const cookie = localEntry();
+    if (cookie) res.setHeader('Set-Cookie', cookie);
     if (auth?.kind !== 'session') return redirect(res, `/admin/login?next=${encodeURIComponent(url)}`);
     const m = url.match(/^\/packages\/([\w.@-]+)(\/.*)?$/);
     if (!m) return json(res, 404, { ok: false, error: 'unknown_package' });

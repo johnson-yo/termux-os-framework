@@ -37,3 +37,10 @@ that admits it cannot reach the Framework, because the user acts on what it show
 carries the Framework version, or an updated device would keep running the previous release's
 JavaScript against the new API. Installation requires a secure context, so it is offered on
 `127.0.0.1` and not over a LAN address; the prompt simply does not appear there.
+
+The worker caches nothing it did not ask for. Its first version pre-cached the shell on install,
+which happens on the login page, where every script URL redirects back to that page: it stored the
+login HTML under `/admin/app.js`, and after signing in the browser was handed HTML where it expected
+JavaScript, so the panel never started. Clearing the browser cache did not help, because this store
+is separate and the next install poisoned it again. There is no pre-cache, a redirected response is
+never stored, and a stored entry whose content type does not match the request is discarded.
