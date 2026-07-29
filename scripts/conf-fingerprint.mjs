@@ -12,11 +12,22 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import { configFingerprint } from '../src/system/config-migrate.mjs';
+
+// Defaults come from the runtime this script ships inside, so an update compares the old version's
+// defaults before the switch and the new version's after it. Without them every key counts, and a
+// file merely rewritten into the stored shape reads as tampering — which is what happens the first
+// time a device installed under the old scheme starts a version that normalises its configuration.
+const defaultsPath = path.join(path.dirname(new URL(import.meta.url).pathname),
+  '..', 'config', 'defaults', 'framework.v1.json');
+const defaults = (() => {
+  try { return JSON.parse(fs.readFileSync(defaultsPath, 'utf8')); } catch { return null; }
+})();
 
 const file = process.argv[2];
 try {
-  process.stdout.write(configFingerprint(JSON.parse(fs.readFileSync(file, 'utf8'))));
+  process.stdout.write(configFingerprint(JSON.parse(fs.readFileSync(file, 'utf8')), defaults));
 } catch {
   process.stdout.write('unreadable');
 }

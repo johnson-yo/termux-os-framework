@@ -217,7 +217,35 @@ run_control stop >/dev/null
 if run_control backup >/dev/null 2>&1; then bad "unhealthy backup rejected"; else ok "unhealthy backup rejected"; fi
 if run_control start >/dev/null; then ok "runtime restart after negative test"; else bad "runtime restart after negative test"; fi
 
-echo "--- 8. 舊版本的 core-check 仍然接受這個候選 ---"
+echo "--- 8. 把整份預設寫出來的舊 conf 規範化，不算越界 ---"
+# 舊版本安裝的設備，conf 裡是整份預設。新版本啟動時會把它改寫成只留覆蓋項——
+# 邊界檢查若比對位元組就會把這當成竄改而回滾，於是那些設備一個也更新不上來。
+FP_BEFORE=$(node "$RUNTIME/scripts/conf-fingerprint.mjs" "$PERSIST/conf/framework.v1.json")
+node -e '
+  const fs = require("fs");
+  const defaults = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+  const stored = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  fs.writeFileSync(process.argv[1], JSON.stringify({ ...defaults, ...stored }, null, 2) + "\n");
+' "$PERSIST/conf/framework.v1.json" "$RUNTIME/config/defaults/framework.v1.json"
+FP_MATERIALISED=$(node "$RUNTIME/scripts/conf-fingerprint.mjs" "$PERSIST/conf/framework.v1.json")
+if [ "$FP_BEFORE" = "$FP_MATERIALISED" ]; then
+  ok "寫出預設值不改變使用者設定指紋"
+else
+  bad "寫出預設值不改變使用者設定指紋"
+fi
+node -e '
+  const fs = require("fs");
+  const stored = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  stored.device_name = "someone-else";
+  fs.writeFileSync(process.argv[1], JSON.stringify(stored, null, 2) + "\n");
+' "$PERSIST/conf/framework.v1.json"
+if [ "$FP_BEFORE" != "$(node "$RUNTIME/scripts/conf-fingerprint.mjs" "$PERSIST/conf/framework.v1.json")" ]; then
+  ok "改動使用者選過的值仍然被抓到"
+else
+  bad "改動使用者選過的值仍然被抓到"
+fi
+
+echo "--- 9. 舊版本的 core-check 仍然接受這個候選 ---"
 # 更新期間跑 post-check 的是**舊版本的**控制器。任何改動了它所檢查的回應的變更，
 # 都會讓每一次從舊版本上來的更新失敗回滾——也就是新版本誰都裝不上，而且症狀
 # 出現在使用者的設備上，不在這裡。所以這些契約要當場釘住。
@@ -230,7 +258,7 @@ else
 fi
 if curl -sf -m 5 "$BASE_URL/health" >/dev/null; then ok "/health 可用"; else bad "/health 可用"; fi
 
-echo "--- 9. 起不來的 Framework 仍然更新得動 ---"
+echo "--- 10. 起不來的 Framework 仍然更新得動 ---"
 # 一個因為配置或程式碼而起不來的 Framework，正是最需要更新的那一個。
 # 這裡曾經直接拒絕，於是設備卡死在壞掉的版本上，只能開 shell 手動救——而使用者沒有 shell。
 LAST_GOOD_BEFORE="$(sha256sum "$PERSIST/backups/last-good.tar.gz" | awk '{print $1}')"
