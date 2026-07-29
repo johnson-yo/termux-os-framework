@@ -57,6 +57,23 @@
       </div>
     </form>
   </dialog>
+  <!-- 引导安装：下载 → 检查 → 报告 → 确认 → 安装 → 重启恢复，全程在这一个对话框里走完。
+       先前用户点完下载会拿到一句「去某某页面看看」，然后要自己找到卡片、点检查、再点安装。 -->
+  <dialog id="install-dialog" class="confirm-dialog install-dialog">
+    <h2 id="install-title">安装</h2>
+    <ol class="install-steps" id="install-steps"></ol>
+    <div id="install-report" class="confirm-details" hidden></div>
+    <p id="install-warning" class="alert warning" hidden></p>
+    <p id="install-error" class="alert error" hidden></p>
+    <label id="install-ack-wrap" class="confirm-ack" hidden>
+      <input id="install-ack" type="checkbox">
+      <span id="install-ack-text"></span>
+    </label>
+    <div class="button-row">
+      <button class="btn" id="install-cancel" type="button">关闭</button>
+      <button class="btn is-primary" id="install-confirm" type="button" hidden>同意并安装</button>
+    </div>
+  </dialog>
   <script src="/admin/session.js"></script>
   <script src="/admin/app-core.js"></script>
   <script src="/admin/admin-controls.js"></script>

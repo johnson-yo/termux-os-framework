@@ -611,3 +611,19 @@ main:not(.content) > h1 { font-size: 1.35rem; }
 .panel.is-collapsible .panel-head { cursor: default; }
 .panel.is-collapsed .panel-body { display: none; }
 .panel.is-collapsed { padding-bottom: 0; }
+
+/* 引导安装对话框：一列步骤 + 报告。竖屏优先，宽度跟随视口。 */
+.install-dialog { width: min(520px, 94vw); }
+.install-steps { display: grid; gap: 6px; margin: 12px 0; padding: 0; list-style: none; }
+.install-steps li {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: #fafbfc; color: var(--muted); font-size: .86rem;
+}
+.install-steps li::before { content: '○'; font-size: .9rem; }
+.install-steps li.is-active { border-color: var(--brand); background: #eef6fc; color: var(--brand-dark); font-weight: 650; }
+.install-steps li.is-active::before { content: '⟳'; }
+.install-steps li.is-done { color: var(--text); }
+.install-steps li.is-done::before { content: '✓'; color: var(--good); }
+.install-steps li.is-failed { border-color: var(--bad); background: #fdf1f0; color: var(--bad); font-weight: 650; }
+.install-steps li.is-failed::before { content: '✕'; }

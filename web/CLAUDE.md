@@ -84,3 +84,13 @@ version, whether a newer one exists, the download and its result, and the way ba
 candidates whose check failed, and files uploaded weeks ago are not choices; they are residue, and
 the recovery card already covers going back. The server prunes them rather than relying on the page
 to hide them, because a file nobody can see is still occupying a phone's storage.
+
+Installing is one flow, not a trail of breadcrumbs. Download, check, report, consent, install and
+restart happen inside a single dialog that opens the instant the button is pressed — before anything
+is known about whether the download will even start, because the first thing the user needs is
+confirmation that the command was received. Previously a download ended with a sentence telling
+them to go to another tab, find a card, run a check and press install: three interactions to finish
+one intention, with a pending state in between that looked like an unfinished chore.
+
+Framework updates and Package installs share that flow. They differ in where the archive comes from,
+not in what the user does, so they must not be two screens that drift apart.
