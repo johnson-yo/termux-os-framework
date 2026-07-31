@@ -142,7 +142,19 @@ const resolveProject = (slug, config) => {
   const safe = toWorkspaceSlug(slug);
   if (!safe) return null;
   const root = workspaceRoot(config);
-  const dir = path.join(root, safe);
+  // Directory name to slug is lossy: dots become dashes. Rebuilding the path by
+  // concatenating the slug therefore points at something that does not exist for
+  // every directory named after a Package id, which is all of them created outside
+  // this UI. They list fine and then refuse to delete with unknown_workspace.
+  // The mapping only works in one direction, so look the directory up instead.
+  let name = safe;
+  try {
+    const match = fs.readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .find((entry) => toWorkspaceSlug(entry.name) === safe);
+    if (match) name = match.name;
+  } catch { /* Root may not exist yet; fall back to the slug itself. */ }
+  const dir = path.join(root, name);
   // Refuse anything that escapes the root even after normalisation.
   if (!path.resolve(dir).startsWith(path.resolve(root) + path.sep)) return null;
   return { safe, root, dir };
