@@ -1327,6 +1327,18 @@ const server = http.createServer(async (req, res) => {
         uploads: snapshot.uploads.map((upload) => ({
           ...upload,
           registry_verified: packageRegistryContainsSha256(upload.sha256),
+          /**
+           * ⭐ 依賴計畫**隨快照一起交出來**，不另開一個往返。
+           *
+           * 這樣安裝對話框看到的，就是安裝路由拒絕時用的同一份數據——
+           * 「界面說能裝、後端說不能」這種矛盾在結構上不可能發生。
+           */
+          dependencies: upload.preflight?.dependencies?.requires?.length
+            ? resolveDeclaredDependencies(
+              upload.preflight.dependencies.requires,
+              { catalog: packageRegistryFindByPackageId },
+            )
+            : null,
         })),
         registry: packageRegistrySnapshot(),
       });

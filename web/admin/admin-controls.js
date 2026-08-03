@@ -719,13 +719,62 @@ async function startInstalledAction(item, action) {
   await loadPackageManager();
 }
 
+
+/**
+ * 依賴計畫 → 確認對話框的明細行。
+ *
+ * ⭐ 每一項都說出**它卡在哪一級**，而不是一個 ready/not ready 的布林：
+ * `missing` 要去下載，`installed` 是裝了沒配，`healthy` 多半是版本不夠——
+ * 三者要做的事完全不同，壓成一個布林使用者就不知道該去修哪個。
+ *
+ * ⚠ 只報下載量，不報「所需磁盘空间」：解壓後多大沒有任何一方聲明過，
+ * 編一个数字出來比不報更糟。
+ */
+const DEP_KIND_LABEL = { package: 'Package', capability: 'Adapter', asset: 'Asset' };
+const DEP_STATE_LABEL = {
+  missing: '缺失', installed: '已装未配置', configured: '已配置未连通',
+  reachable: '连通但不健康', healthy: '版本不满足', compatible: '机型不匹配', ready: '就绪',
+};
+const bytesLabel = (n) => {
+  const value = Number(n);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value >= 1048576 ? `${(value / 1048576).toFixed(1)} MB` : `${(value / 1024).toFixed(0)} KB`;
+};
+
+function dependencyRows(plan) {
+  if (!plan?.nodes?.length) return [];
+  const rows = [['依赖', `${plan.nodes.length} 项 · ${plan.installable ? '可安装' : '不可安装'}`]];
+  for (const node of plan.nodes) {
+    const kind = DEP_KIND_LABEL[node.kind] ?? node.kind;
+    const need = node.required ? '必需' : '可选';
+    const state = DEP_STATE_LABEL[node.state] ?? node.state;
+    const parts = [`${state}`];
+    if (node.installed_version) parts.push(`已装 ${node.installed_version}`);
+    if (node.version) parts.push(`要求 ${node.version}`);
+    if (node.download) {
+      parts.push(`将安装 ${node.download.version}`);
+      const size = bytesLabel(node.download.size);
+      if (size) parts.push(size);
+      // 来源与校验状态：装的东西从哪来、有没有可比对的哈希，是同一个问题的两半。
+      if (node.download.repository) parts.push(node.download.repository);
+      parts.push(node.download.sha256 ? 'SHA-256 已登记' : '⚠ 无 SHA-256');
+    } else if (node.state !== 'ready' && node.required) {
+      parts.push('⚠ Catalog 里没有');
+    }
+    rows.push([`${kind} · ${need}`, `${node.id} — ${parts.join(' · ')}`]);
+  }
+  if (plan.install_order?.length) rows.push(['安装顺序', plan.install_order.join(' → ')]);
+  const total = bytesLabel(plan.download_bytes);
+  if (total) rows.push(['需要下载', total]);
+  return rows;
+}
+
 async function installUpload(upload) {
   const identity = upload.identity;
   const snapshot = await (await api('/api/admin/package-manager')).json();
   const current = snapshot.packages?.find((p) => p.id === identity.id);
   const accepted = await confirmAction({
     title: `Install ${identity.name ?? identity.id}`,
-    label: current ? 'Install update' : 'Install',
     details: [
       ['Package ID', identity.id],
       ['Current version', current?.version ?? 'not installed'],
@@ -735,12 +784,25 @@ async function installUpload(upload) {
       ['会停止的服务', identity.services?.length ? identity.services.join(', ') : 'none declared'],
       ['配置 / 数据', 'preserved'],
       ['失败时的行为', current ? 'the previous version is restored automatically' : 'the incomplete install is removed'],
+      ...dependencyRows(upload.dependencies),
     ],
+    // ⛔ 依赖补不齐时按钮直接换成「无法安装」：装一个永远补不齐依赖的包，比不装更难查。
+    label: upload.dependencies && upload.dependencies.installable === false
+      ? '无法安装（依赖不在 Catalog）'
+      : (upload.dependencies?.nodes?.length ? '安装缺失依赖并继续' : (current ? 'Install update' : 'Install')),
     acknowledgement: upload.registry_verified === true
       ? null
       : 'I understand this archive SHA-256 is not in the verified Registry list and I want to install it manually.',
   });
   if (!accepted) return;
+  if (upload.dependencies && upload.dependencies.installable === false) {
+    packageNotice = {
+      kind: 'bad',
+      text: `无法安装：${upload.dependencies.missing_from_catalog.map((n) => n.id).join(', ')} 不在 Registry 目录里。`,
+    };
+    await loadPackageManager();
+    return;
+  }
   try {
     const response = await api(`/api/admin/package-manager/uploads/${upload.id}/install`, {
       method: 'POST',
