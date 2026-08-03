@@ -7,6 +7,7 @@
  */
 
 import { describeAsset, resolveAsset as resolveFromRegistry, listResolvedAssets } from './resolver.mjs';
+import { checkFreeSpace, fetchAssetFiles, pendingBytes } from './fetch.mjs';
 
 const providers = new Map(); // assetId → { id, kind, package, payload, files }
 
@@ -42,6 +43,42 @@ export function listAssets(opts = {}) {
 }
 
 export const resolveAsset = (id, opts = {}) => resolveFromRegistry(id, opts);
+
+/**
+ * 按需取一個**可選**資產。
+ *
+ * ⭐ 坐標全部來自宣告它的那個 Package 的 Manifest——調用方只給一個 id，不給 URL。
+ * 讓調用方傳路徑會讓「這台機器上的這個資產到底是什麼」變成一個沒人答得出的問題。
+ *
+ * ⛔ 只有 `optional: true` 的資產走這條路。必需資產在安裝時就該到位；
+ * 允許事後補取會讓「裝好了」這個狀態失去意義。
+ */
+export async function fetchOptionalAsset(id, {
+  packageManifest,
+  storeDirFor,
+  activate,
+  via = 'registry',
+  registryBase = '',
+  onProgress = () => {},
+} = {}) {
+  const declared = (packageManifest?.assets?.provides ?? []).find((a) => a.id === id);
+  if (!declared) return { ok: false, error: 'unknown_asset', detail: `${id} is not declared by this package` };
+  if (declared.optional !== true) {
+    return { ok: false, error: 'not_optional', detail: `${id} is installed with its package, not fetched on demand` };
+  }
+  const files = declared.source?.files ?? [];
+  if (!files.length) return { ok: false, error: 'no_remote_source', detail: `${id} has no source.files to fetch` };
+
+  const destDir = storeDirFor(declared);
+  const need = pendingBytes(files, destDir);
+  const space = checkFreeSpace(destDir, need);
+  if (!space.ok) {
+    return { ok: false, error: 'insufficient_space', need_bytes: need, free_bytes: space.free_bytes };
+  }
+  await fetchAssetFiles(files, destDir, { via, registryBase, onProgress });
+  const entry = activate(declared, destDir, Object.fromEntries(files.map((f) => [f.path, f.sha256])));
+  return { ok: true, id, path: destDir, bytes: need, entry };
+}
 export { describeAsset };
 
 // ============================================================

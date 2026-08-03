@@ -407,6 +407,16 @@ async function installAssetPayloads(stagedPkg, manifest, targetId, options = {})
   const installed = [];
   try {
     for (const a of provides) {
+      /**
+       * ⛔ 可選資產安裝時不取。它仍然被登記為 provider（`package.mjs` 的 register 照跑），
+       * 所以狀態頁看得見「有這個檔位、尚未取得」——那與「不存在」是兩件事。
+       * 取它由明確的動作觸發（`POST /api/assets/<id>/fetch`），因為「要哪一檔」
+       * 是安裝之後才做的選擇。
+       */
+      if (a.optional === true) {
+        console.log(`asset ${a.id}: optional, not fetched at install`);
+        continue;
+      }
       // 遠程宣告的 payload 不在歸檔裡——它按坐標去取，不必也不該被打進包。
       if (a.source?.files?.length) {
         installed.push(await installRemoteAssetPayload(a, manifest, targetId, options));

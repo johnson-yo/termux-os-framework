@@ -245,6 +245,17 @@ function validateAssets(e, assets) {
           if (typeof f !== 'string' || !f || f.includes('/')) e(`${where}.files.${role} must be a bare filename`);
         }
       }
+      /**
+       * ⭐ `optional` = 本包**能**提供它，但安裝時不取。
+       *
+       * 真實形狀是「一台裝置要編碼器 + 恰好一檔解碼器」，而哪一檔是安裝之後才做的選擇。
+       * 沒有這個欄位，宣告三個資產就等於安裝時下載三個——實測 1.8 GB，其中一半永遠用不到。
+       * ⚠ 它仍然會被**登記**為 provider：使用者要能看見「有這個檔位、只是還沒取」，
+       * 那與「這個資產不存在」是兩件不同的事。
+       */
+      if (a.optional !== undefined && typeof a.optional !== 'boolean') {
+        e(`${where}.optional must be boolean`);
+      }
       validateAssetSource(e, where, a);
     });
     const ids = provides.map((a) => a?.id).filter(Boolean);
@@ -753,6 +764,16 @@ if (process.argv.includes('--self-test')
       { path: 'm.onnx', repo: 'o/r', revision: 'a'.repeat(40), size: 1, sha256: 'b'.repeat(64) },
       { path: 'm.onnx', repo: 'o/r', revision: 'a'.repeat(40), size: 1, sha256: 'b'.repeat(64) },
     ] } })).ok);
+
+  /**
+   * ⭐ 實測發現的洞：宣告三個資產 = 安裝時下載三個，1.8 GB 其中一半永遠用不到。
+   * `optional` 讓「本包能提供」與「這台裝置要取」分開——那本來就是兩個問題。
+   */
+  t('an asset may be offered without being fetched at install',
+    validateManifest(remoteAsset({ optional: true })).ok
+    && validateManifest(remoteAsset()).assets === undefined);
+  t('optional must be a boolean, not a truthy string',
+    !validateManifest(remoteAsset({ optional: 'yes' })).ok);
 
   t('public dependency/security metadata accepted', validateManifest({ ...base,
     public_metadata: {
