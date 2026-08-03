@@ -67,7 +67,27 @@ const publicMount = (m) => ({
   // Coexistence removed shadowing; the field stays so older clients keep parsing.
   shadow: null,
   watch_mode: m.watch_mode ?? null, seq: m.seq, last_error: m.last_error ?? null,
+  /**
+   * 依賴檢查的開發者豁免。⭐ 只存在於 **Dev Mount** 上——正式 Release 沒有這個欄位，
+   * 也就無從宣告自己可以跳過依賴檢查。一道能被被檢查者自己關掉的門不是門。
+   * 預設 false：開發環境同樣先執行檢查，豁免必須是一次明確的動作。
+   */
+  dependency_override: m.dependency_override === true,
 });
+
+/**
+ * 開關依賴豁免。⚠ 它必須在狀態裡看得見（`publicMount` 已帶）並在每次生效時寫日誌——
+ * 一個看不見的豁免會讓「本機能跑、裝到別人機器上不能跑」變成無法解釋的現象。
+ */
+export function devSetDependencyOverride(idOrInstance, enabled) {
+  const id = resolveMountKey(idOrInstance);
+  const m = id ? mounts.get(id) : null;
+  if (!m) return { ok: false, error: 'not_mounted' };
+  m.dependency_override = enabled === true;
+  saveState();
+  CFG.log(`dev dependency override ${m.dependency_override ? 'enabled' : 'disabled'} for ${id}`);
+  return { ok: true, mount: publicMount(m) };
+}
 
 // ============================================================
 // 生命週期

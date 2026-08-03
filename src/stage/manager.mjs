@@ -134,6 +134,22 @@ export async function checkServiceHealth(id) {
   return probeHealth(def, (await getServiceStatus(id)).process.state);
 }
 
+/**
+ * 服務啟動門禁，由 Core 在啟動時注入（見 `src/server.mjs`）。
+ *
+ * ⚠ 刻意用**注入**而不是 import。`capabilities/resolver` 已經 import 本檔，
+ * 而依賴解析要用到 loader 與 capability——頂層或惰性 import 都會構成
+ * 「模組還沒評估完就等自己」的環，本檔自測裡的頂層 await 一撞就死鎖。
+ *
+ * 預設放行：Core 在沒有任何 Package 的情況下必須能起來（README 的硬性要求），
+ * 而那時根本沒有依賴可查。
+ */
+let startGate = async () => ({ ok: true, reason: 'no_gate_installed' });
+
+export function setServiceStartGate(fn) {
+  startGate = typeof fn === 'function' ? fn : (async () => ({ ok: true, reason: 'no_gate_installed' }));
+}
+
 // ============================================================
 // 生命週期 —— start/stop 冪等；restart 固定 = stop→start
 // ============================================================
@@ -143,6 +159,15 @@ export async function startService(id) {
   setServiceDesiredState(id, 'running');
   const meta = readMeta(id);
   if (pidValid(meta)) return { ok: true, changed: false, ...(await getServiceStatus(id)) };
+  /**
+   * 依賴門禁。⚠ 放在 `pidValid` 之後：已經在跑的服務不重新過門，否則一次探針抖動
+   * 就會讓「查一下狀態」變成「把它關掉」。
+   */
+  const gate = await startGate(def);
+  if (!gate.ok) {
+    clearMeta(id);
+    return { ok: false, ...gate };
+  }
   if (meta) clearMeta(id); // exited/stale 記錄讓位給新一輪
   fs.mkdirSync(STAGE_DIR, { recursive: true });
   const logFd = fs.openSync(logPath(id), 'a');
@@ -281,6 +306,35 @@ if (process.argv.includes('--self-test')) {
   const s8 = await getServiceStatus(ID);
   t('exited process detected', s8.process.state === 'exited' && s8.process.exit_signal === 'SIGKILL' && s8.health.state === 'unknown');
   await stopService(ID); // 清場（exited 冪等）
+  clearMeta(ID);
+
+  // ---- Dependency v1：啟動門禁真的擋得住 ----------------------------------
+  //
+  // ⭐ 測的是**接線**，不是階梯本身（階梯在 dependencies.mjs 自測裡）。
+  // 一個算得完全正確卻沒人調用的門禁，與沒有門禁一模一樣——而那種錯誤
+  // 在單測全綠的情況下完全看不出來。
+  setServiceStartGate(async () => ({
+    ok: false, error: 'dependencies_not_ready',
+    blocked: [{ kind: 'asset', id: 'model.absent', state: 'missing', blocked_by: 'not installed' }],
+  }));
+  const blocked = await startService(ID);
+  t('an unmet dependency stops the service from starting at all',
+    !blocked.ok && blocked.error === 'dependencies_not_ready' && !procStat(readMeta(ID)?.pid));
+  t('the refusal names what is missing, so the UI can point somewhere',
+    blocked.blocked?.[0]?.id === 'model.absent' && blocked.blocked[0].state === 'missing');
+  // ⚠ 被擋下不得留下 metadata：留著會讓下一次 `getServiceStatus` 報一個並不存在的 pid。
+  t('a blocked start leaves no stale metadata behind', !readMeta(ID));
+
+  setServiceStartGate(async () => ({ ok: true, reason: 'satisfied' }));
+  const allowed = await startService(ID);
+  t('the same service starts once its dependency is satisfied',
+    allowed.ok && allowed.process.state === 'running');
+  await stopService(ID);
+  clearMeta(ID);
+  setServiceStartGate(null);
+  t('clearing the gate restores the default open state',
+    (await startService(ID)).ok);
+  await stopService(ID);
   clearMeta(ID);
 
   process.exit(fails ? 1 : 0);

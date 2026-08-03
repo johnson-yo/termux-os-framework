@@ -142,6 +142,42 @@ export async function dependencyTree(rootManifest, manifestFor = () => null) {
   };
 }
 
+/**
+ * 服務啟動門禁。依賴沒 ready 就不啟動，並回一個**結構化**的原因。
+ *
+ * ⚠ 錯誤必須結構化而不是一句話：WebUI 要據此列出缺了什麼、跳到哪去補。
+ * 一句 "dependencies not ready" 對使用者的價值等於沒說。
+ *
+ * ⭐ Dev override 只認**開發掛載**上的旗標（`record.dev`）。它刻意不從 Manifest 讀——
+ * 正式 Release 若能自己宣告「跳過依賴檢查」，這道門就是給守規矩的包設的，
+ * 而只擋君子的門不是門。用了 override 一定寫進日誌與狀態，不許無聲通過。
+ */
+export async function serviceDependencyGate(def, { log = () => {} } = {}) {
+  const packageId = def?.package;
+  if (!packageId) return { ok: true, reason: 'core_service' };
+  const record = getPackage(packageId);
+  if (!record?.manifest) return { ok: true, reason: 'no_manifest' };
+  const resolved = await resolvePackageDependencies(record.manifest);
+  if (resolved.ready) return { ok: true, reason: 'satisfied', ...resolved };
+
+  const override = record.dev?.dependency_override === true;
+  if (override) {
+    log(`dependency override: starting ${def.id} with ${resolved.blocked.length} unmet dependency(ies)`);
+    return { ok: true, reason: 'dev_override', overridden: true, ...resolved };
+  }
+  return {
+    ok: false,
+    error: 'dependencies_not_ready',
+    reason: 'blocked',
+    package: packageId,
+    blocked: resolved.blocked.map((node) => ({
+      kind: node.kind, id: node.id, state: node.state, blocked_by: node.blocked_by,
+      required_version: node.version ?? null, installed_version: node.installed_version ?? null,
+    })),
+    ...resolved,
+  };
+}
+
 /** 反向依賴：誰在依賴我。⛔ 卸載前必問——被別人依賴的東西不許刪。 */
 export function reverseDependencies(targetId, { kind = DEP_KIND.PACKAGE } = {}) {
   const users = [];

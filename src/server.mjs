@@ -1,12 +1,14 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
  * [INPUT]: Runtime inputs documented by this file, its public API, and adjacent documentation.
- * [OUTPUT]: Authenticated HTTP/WebSocket routes, Package Registry details, and explicit local-install safety confirmation.
+ * [OUTPUT]: Authenticated HTTP/WebSocket routes, Package Registry details, explicit local-install safety confirmation,
+ *           and Package HTML compatibility that preserves marked external-provider credential fields.
  * [POS]: src/server.mjs in termux-os-framework.
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
 
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
@@ -15,15 +17,17 @@ import { registerAction, listActions, performScene } from './theatre/runtime.mjs
 import { acts, scenes, scripts } from './theatre/catalog.mjs';
 import { builtinActions } from './theatre/adapters.mjs';
 import * as stage from './stage/manager.mjs';
+import { serviceDependencyGate, reverseDependencies, dependencyTree } from './packages/dependency-runtime.mjs';
 import {
   loadPackages, loadSinglePackage, unregisterPackage, _getRecord,
   listPackages, getPackage, getPackageWebRoot, dispatchPackageRoute, dispatchPackageWebSocket, listArtifactContracts,
 } from './packages/loader.mjs';
 import { resolveInstalledPackages } from './packages/installed-root.mjs';
 import {
-  initDevRuntime, devMount, devUnmount, devReload, listDevMounts, isDevMounted, devEvents,
+  initDevRuntime, devMount, devUnmount, devReload, listDevMounts, devSetDependencyOverride, isDevMounted, devEvents,
 } from './packages/dev-runtime.mjs';
 import { listCapabilities, describeCapability, setCapabilityBinding, invokeCapability } from './capabilities/resolver.mjs';
+import { getState, listStates, setState } from './state/registry.mjs';
 import { listAppsWithState, getAppState, prepareApp } from './apps/coordinator.mjs';
 import { collectMetrics } from './system/metrics.mjs';
 import { accessInfo } from './system/access.mjs';
@@ -340,6 +344,21 @@ DEV WORKSPACE — 載入失敗（Framework 本體正常）</div>
 // PWA：/admin 是使用者的日常入口，桌面圖示讓它不必先開瀏覽器再找網址。
 // Service Worker 的 scope 只有 /admin/，並且把版本帶進 URL——否則更新後仍會拿到舊版本的 shell。
 const uiLanguage = () => (typeof CFG.ui?.language === 'string' && CFG.ui.language ? CFG.ui.language : 'zh-Hans');
+
+/**
+ * 控制台外壳的内容指纹，用作 Service Worker 的缓存键。
+ *
+ * 先前用的是版本号。开发中同一个版本会被反复重新部署，缓存键不变，于是浏览器一直在用
+ * 上一次的 JavaScript——界面明明改了，看到的还是旧的，而且清浏览器缓存也没用，
+ * 因为 Service Worker 的存储是另一套。指纹跟着文件内容走，改了就一定失效。
+ */
+const ASSET_REVISION = (() => {
+  const hash = crypto.createHash('sha256');
+  for (const name of ['style.css', 'session.js', 'app-core.js', 'admin-controls.js', 'app.js', 'i18n.js', 'index.html']) {
+    try { hash.update(fs.readFileSync(path.join(ROOT, 'web/admin', name))); } catch { hash.update(name); }
+  }
+  return hash.digest('hex').slice(0, 12);
+})();
 const pwaInjection = () => `<link rel="manifest" href="/admin/manifest.webmanifest">
 <link rel="icon" href="/admin/icon.svg" type="image/svg+xml">
 <meta name="theme-color" content="#18212b">
@@ -347,7 +366,7 @@ const pwaInjection = () => `<link rel="manifest" href="/admin/manifest.webmanife
 <script>window.__TERMUX_OS_LANGUAGE__=${JSON.stringify(uiLanguage())};</script>
 <script>if('serviceWorker'in navigator){window.addEventListener('load',function(){
 // updateViaCache:'none' 讓瀏覽器每次都去問這支腳本本身，否則裝成 App 之後可能長期停在舊的一份。
-navigator.serviceWorker.register('/admin/sw.js?v=${encodeURIComponent(FRAMEWORK_VERSION)}',
+navigator.serviceWorker.register('/admin/sw.js?v=${encodeURIComponent(`${FRAMEWORK_VERSION}-${ASSET_REVISION}`)}',
   {scope:'/admin',updateViaCache:'none'}).then(function(r){
   r.update().catch(function(){});
   // Framework 更新後腳本位址會變，新的 worker 接手時整頁重載一次，
@@ -366,15 +385,21 @@ function injectPwa(html) {
 }
 
 function injectBrowserSession(html) {
-  let out = html.replace(/(<input\b[^>]*\bid=["']token["'][^>]*\bvalue=)(["'])[^"']*\2/gi, '$1""');
+  const providerCredential = (tag) => /\bdata-provider-credential(?:\s|=|>)/i.test(tag);
+  let out = html.replace(/<input\b[^>]*\bid=["']token["'][^>]*>/gi, (tag) => {
+    if (providerCredential(tag)) return tag;
+    return tag.replace(/\bvalue=(["'])[^"']*\1/i, 'value=""');
+  });
   if (!out.includes('/admin/session.js')) {
     const tag = '<script src="/admin/session.js"></script>';
     out = out.replace(/(<script\b[^>]*\bsrc=(["'])(?:\.\/)?app\.js\2[^>]*>)/i, `${tag}\n$1`);
     if (!out.includes(tag)) out = out.replace('</body>', `${tag}</body>`);
   }
-  const compat = `<style>#token,label[for="token"]{display:none!important}</style>
+  const compat = `<style>#token:not([data-provider-credential]){display:none!important}</style>
 <script>window.TermuxOS.ready.then(function(){
-  var t=document.getElementById('token'); if(t){t.type='hidden';t.value='browser-session';
+  var t=document.getElementById('token'); if(t&&!t.hasAttribute('data-provider-credential')){
+    t.type='hidden';t.value='browser-session';
+    document.querySelectorAll('label[for="token"]').forEach(function(l){l.hidden=true;});
     var a=t.closest('.auth');if(a)a.hidden=true;}
   var b=document.getElementById('connect')||document.getElementById('reconnect');if(b)b.click();
 });</script>`;
@@ -451,6 +476,14 @@ setObservationRoot(ROOT);
 setObservationServices(() => stageServices.map((s) => s.id));
 // 029：Dev Runtime 先清殘留（重啟不自動恢復 Dev Mount）再載正式 Packages
 initDevRuntime({ frameworkRoot: ROOT, frameworkVersion: FRAMEWORK_VERSION, config: CFG, configPath: CONFIG_PATH, saveConfig: persistConfiguration, log: console.log });
+/**
+ * Dependency v1：服務啟動前先過依賴門禁。
+ *
+ * ⚠ 用注入而不是讓 stage 去 import 依賴解析——`capabilities/resolver` 已經 import stage，
+ * 反向 import 會構成環（stage 自測裡的頂層 await 一撞就死鎖）。
+ * 這裡是唯一知道兩邊都已就緒的地方。
+ */
+stage.setServiceStartGate((def) => serviceDependencyGate(def, { log: console.log }));
 await loadPackages({ frameworkVersion: FRAMEWORK_VERSION, config: CFG, configPath: CONFIG_PATH, saveConfig: persistConfiguration });
 
 // 025 §8：Session 只操作 Stage 管的 framework 自有 Service（§8.4 邊界：不碰 Android/Termux/APK/Core）
@@ -936,9 +969,17 @@ const server = http.createServer(async (req, res) => {
     const code = error?.code ?? 'package_control_failed';
     const status = code === 'upload_too_large' ? 413
       : code.startsWith('unknown_') ? 404
-        : ['package_job_active', 'upload_job_active', 'preflight_required', 'confirmation_mismatch', 'unverified_release_confirmation_required']
+        : ['package_job_active', 'upload_job_active', 'preflight_required', 'confirmation_mismatch',
+          'unverified_release_confirmation_required', 'required_by_others']
           .includes(code) ? 409 : 400;
-    return json(res, status, { ok: false, error: code, detail: String(error?.message ?? error) });
+    return json(res, status, {
+      ok: false,
+      error: code,
+      detail: String(error?.message ?? error),
+      // 結構化的引用者清單。⚠ 只給一句 detail，WebUI 就只能把它當字串印出來，
+      // 使用者點不進去那個真正該先處理的包。
+      ...(error?.required_by ? { required_by: error.required_by } : {}),
+    });
   };
   const packageRegistryError = (error) => {
     const code = error?.code ?? 'registry_unavailable';
@@ -1346,6 +1387,27 @@ const server = http.createServer(async (req, res) => {
         if (m[2] === 'rollback' && !item.previous_version) {
           throw Object.assign(new Error('Package has no previous version'), { code: 'preflight_required' });
         }
+        /**
+         * ⛔ 被別人依賴的東西不許卸。⚠ 必須**指名道姓**列出引用者——
+         * 只說「有人依賴它」，使用者無從判斷是該先卸那個包還是這次操作本身就是誤點。
+         *
+         * 一個 Asset 包同時是 Package 也是 Asset 提供方，兩種引用都要查：
+         * 只查一種會讓「沒人依賴」這個答案在另一半上是錯的。
+         */
+        if (m[2] === 'uninstall') {
+          const byPackage = reverseDependencies(item.id);
+          const assetIds = (getPackage(item.id)?.manifest?.assets?.provides ?? [])
+            .map((asset) => asset?.id).filter(Boolean);
+          const byAsset = assetIds.flatMap((assetId) => reverseDependencies(assetId, { kind: 'asset' })
+            .map((user) => ({ ...user, via_asset: assetId })));
+          const users = [...byPackage, ...byAsset];
+          if (users.length) {
+            throw Object.assign(
+              new Error(`still required by: ${users.map((u) => u.id).join(', ')}`),
+              { code: 'required_by_others', required_by: users },
+            );
+          }
+        }
         const job = startPackageJob(m[2], { package_id: item.id });
         return json(res, 202, { ok: true, job });
       } catch (error) { return packageControlError(error); }
@@ -1523,6 +1585,34 @@ const server = http.createServer(async (req, res) => {
     return json(res, 404, { ok: false, error: 'not found' });
   }
 
+  // 狀態總線（054）——第三種機制：Capability 說「誰能做」，state 說「此刻是什麼」。
+  // 寫入只允許擁有者（System Key + 名字的登記人），讀取自由；因此值有 1 KB 硬上限，
+  // 且不得承載任何憑證/路徑/字節——高頻或不許丟的資料一律走 feed。
+  if (url === '/api/states' || url.startsWith('/api/states/')) {
+    if (url === '/api/states' && req.method === 'GET') {
+      return json(res, 200, { ok: true, ...await listStates() });
+    }
+    if (url === '/api/states' && req.method === 'POST') {
+      if (!authed(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
+      const body = await readBody(req);
+      if (!body?.name) return json(res, 400, { ok: false, error: 'name required' });
+      if (!('value' in body)) return json(res, 400, { ok: false, error: 'value required' });
+      try {
+        const entry = setState(body.name, body.value, { package: body.package ?? null });
+        return json(res, 200, { ok: true, state: await getState(entry.name) });
+      } catch (e) {
+        const code = e?.code === 'unknown_state' ? 404 : e?.code === 'not_owner' ? 403 : 400;
+        return json(res, code, { ok: false, error: e?.code ?? 'invalid_state_write', reason: String(e?.message ?? e) });
+      }
+    }
+    const one = url.match(/^\/api\/states\/([a-z0-9._]+)$/);
+    if (one && req.method === 'GET') {
+      const state = await getState(one[1]);
+      return json(res, state.known ? 200 : 404, { ok: state.known, state });
+    }
+    return json(res, 404, { ok: false, error: 'not found' });
+  }
+
   // Capability / Provider API（021 §9）——App 只認 Capability，綁定可換；feed 不走 invoke
   if (url === '/api/capabilities' || url.startsWith('/api/capabilities/')) {
     if (!authed(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
@@ -1556,6 +1646,25 @@ const server = http.createServer(async (req, res) => {
     const m = url.match(/^\/api\/packages\/([\w.@-]+)(\/.*)?$/);
     if (!m) return json(res, 404, { ok: false, error: 'not found' });
     const [, pkgId, sub] = m;
+    /**
+     * Dependency v1 的 doctor 口：整棵依賴樹、每一項卡在哪一級、拓撲安裝順序、
+     * 以及誰在反向依賴這個包（卸載前要看的那個問題）。
+     *
+     * ⚠ 走 Core 自己的路由而不是轉發給 Package——依賴是**框架對這個包的判斷**，
+     * 讓包自己回答等於問嫌疑人自己有沒有罪。
+     */
+    if (sub === '/dependencies') {
+      if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'method not allowed' });
+      const record = getPackage(pkgId);
+      if (!record?.manifest) return json(res, 404, { ok: false, error: 'unknown_package' });
+      const tree = await dependencyTree(record.manifest, (id) => getPackage(id)?.manifest ?? null);
+      return json(res, 200, {
+        ok: true,
+        package: pkgId,
+        dependencies: tree,
+        required_by: reverseDependencies(pkgId),
+      });
+    }
     if (!sub || sub === '/') {
       if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'method not allowed' });
       const p = getPackage(pkgId);
@@ -1647,6 +1756,13 @@ const server = http.createServer(async (req, res) => {
     if (m && req.method === 'POST') {
       const r = m[2] === 'stop' ? await devUnmount(m[1]) : await devReload(m[1]);
       return json(res, r.error === 'not_mounted' ? 404 : r.ok ? 200 : 400, r);
+    }
+    // 依賴豁免：只在 Dev Mount 上存在，開關都寫日誌，狀態裡看得見（`dependency_override`）。
+    const ov = url.match(/^\/api\/dev\/packages\/([\w.@-]+)\/dependency-override$/);
+    if (ov && req.method === 'POST') {
+      const b = await readBody(req);
+      const r = devSetDependencyOverride(ov[1], b?.enabled === true);
+      return json(res, r.error === 'not_mounted' ? 404 : 200, r);
     }
     return json(res, 404, { ok: false, error: 'not found' });
   }
