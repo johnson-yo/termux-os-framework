@@ -25,6 +25,7 @@ import {
   listPackages, getPackage, getPackageWebRoot, dispatchPackageRoute, dispatchPackageWebSocket, listArtifactContracts,
 } from './packages/loader.mjs';
 import { resolveInstalledPackages } from './packages/installed-root.mjs';
+import { deviceProfile } from './packages/runtime-contract.mjs';
 import {
   initDevRuntime, devMount, devUnmount, devReload, listDevMounts, devSetDependencyOverride, isDevMounted, devEvents,
 } from './packages/dev-runtime.mjs';
@@ -1733,6 +1734,17 @@ const server = http.createServer(async (req, res) => {
     // 沒登記也沒宣稱 = 真的不知道這個 id；已登記但沒裝好 = 200 帶 ready:false + reason
     if (!d.package && !d.version) return json(res, 404, { ok: false, error: 'unknown_asset', asset: d });
     return json(res, 200, { ok: true, asset: d });
+  }
+
+  /**
+   * 本機設備畫像（023 §6）。只讀，無參數。
+   *
+   * ⭐ 存在的理由是「裝不上」這句話必須能被回答。一個 target 化的 Asset 拒絕安裝時，
+   * 唯一有用的下一句是「本機是什麼」——沒有這個端點，使用者只看得到 mismatch 而看不到自己那一側。
+   */
+  if (url === '/api/system/device' && req.method === 'GET') {
+    if (!authed(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
+    return json(res, 200, { ok: true, device: deviceProfile() });
   }
 
   // 029 §12.4：跨組件 Artifact 只讀契約——消費方問這裡拿 owner/schema/位置，不硬編碼別家裸路徑；
