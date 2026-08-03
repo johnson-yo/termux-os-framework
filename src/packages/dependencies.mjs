@@ -187,6 +187,49 @@ export function installOrder(rootId, edges) {
   return { ok: true, order, cycle: null };
 }
 
+/**
+ * 安裝預檢計畫。
+ *
+ * ⭐ 判據是「缺的那些**拿得到**嗎」，不是「已經 ready 了嗎」。
+ * 用後者會讓**沒有任何包裝得上**——提供方多半要等安裝完才起得來。
+ * 這是預檢與啟動門禁的根本差別：同一道階梯，問的是兩個不同的問題。
+ *
+ * @param declared preflight 交出來的聲明（`{kind,id,version,required}`）
+ * @param catalog `(packageId) => {version,size,sha256} | null`
+ */
+export function installPlan(declared, { probes = {}, catalog = () => null } = {}) {
+  const manifest = {
+    packages: { requires: declared.filter((d) => d.kind === DEP_KIND.PACKAGE) },
+    integrations: {
+      requires: declared.filter((d) => d.kind === DEP_KIND.CAPABILITY)
+        .map((d) => ({ ...d, capability: d.id })),
+    },
+    assets: { requires: declared.filter((d) => d.kind === DEP_KIND.ASSET) },
+  };
+  const withCatalog = {
+    ...probes,
+    [DEP_KIND.PACKAGE]: (id, node) => {
+      const facts = probes[DEP_KIND.PACKAGE]?.(id, node) ?? null;
+      if (facts?.installed) return facts;
+      // 缺席時附上 Catalog 的答案：使用者要的不是「缺了」，是「去哪拿、多大」。
+      return { ...(facts ?? {}), installed: false, download: catalog(id) ?? null };
+    },
+  };
+  const resolved = resolveDependencies(manifest, withCatalog);
+  const missingFromCatalog = resolved.missing
+    .filter((node) => node.kind === DEP_KIND.PACKAGE && node.required && !node.download);
+  return {
+    ...resolved,
+    // ⛔ 缺 Catalog 條目 = 硬失敗。裝一個永遠補不齊依賴的包，比不裝更難查。
+    installable: missingFromCatalog.length === 0,
+    missing_from_catalog: missingFromCatalog,
+    download_bytes: resolved.nodes.reduce((sum, node) => sum + (node.download?.size ?? 0), 0),
+    install_order: resolved.nodes
+      .filter((node) => node.kind === DEP_KIND.PACKAGE && node.download)
+      .map((node) => node.id),
+  };
+}
+
 /** 兩個狀態誰更靠前。用來把一組依賴壓成「整體卡在哪一級」。 */
 export function lowestState(states) {
   let lowest = DEP_STATE.READY;
@@ -284,6 +327,54 @@ if (process.argv.includes('--self-test')
   // ⚠ 「有環」對使用者是句廢話——必須說出是哪幾個包咬在一起。
   t('a cycle is refused and names the packages caught in it',
     !cycled.ok && cycled.cycle.join('→') === 'a→b→a');
+
+  // --- 安裝預檢 ---
+  {
+    const declared = [
+      { kind: DEP_KIND.PACKAGE, id: 'a.b.c.have', version: '>=1.0.0', required: true },
+      { kind: DEP_KIND.PACKAGE, id: 'a.b.c.getit', required: true },
+      { kind: DEP_KIND.CAPABILITY, id: 'x.y', required: true },
+      { kind: DEP_KIND.ASSET, id: 'model.z', required: true },
+    ];
+    const catalog = (id) => (id === 'a.b.c.getit'
+      ? { package_id: id, version: '1.0.0', size: 2_141_836, sha256: 'ab'.repeat(32) } : null);
+    const probes = {
+      [DEP_KIND.PACKAGE]: (id) => (id === 'a.b.c.have' ? { ...ready, version: '1.0.0' } : null),
+      [DEP_KIND.CAPABILITY]: () => null,
+      [DEP_KIND.ASSET]: () => null,
+    };
+    const plan = installPlan(declared, { probes, catalog });
+
+    /**
+     * ⭐ 這一條是預檢存在的全部理由。啟動門禁問「ready 了嗎」，預檢若也問這個，
+     * 就沒有任何包裝得上——提供方要等安裝完才起得來。
+     */
+    t('a preflight passes even though nothing is ready yet, as long as the gaps are obtainable',
+      plan.installable === true && plan.ready === false);
+    t('an obtainable gap carries where to get it and how big it is',
+      plan.nodes.find((n) => n.id === 'a.b.c.getit')?.download?.size === 2_141_836
+      && plan.download_bytes === 2_141_836
+      && plan.install_order.join(',') === 'a.b.c.getit');
+    t('an already-installed dependency needs no download',
+      plan.nodes.find((n) => n.id === 'a.b.c.have')?.download == null
+      && !plan.install_order.includes('a.b.c.have'));
+
+    // ⛔ 目錄裡沒有 = 現在就拒。裝一個永遠補不齊依賴的包，比不裝更難查。
+    const hopeless = installPlan(
+      [{ kind: DEP_KIND.PACKAGE, id: 'a.b.c.nowhere', required: true }],
+      { probes: { [DEP_KIND.PACKAGE]: () => null }, catalog: () => null },
+    );
+    t('a dependency that exists nowhere is refused before install, not after',
+      hopeless.installable === false && hopeless.missing_from_catalog[0].id === 'a.b.c.nowhere');
+
+    // 可選依賴缺席不該擋住安裝，也不該讓它看起來像必需的。
+    const optional = installPlan(
+      [{ kind: DEP_KIND.PACKAGE, id: 'a.b.c.nice', required: false }],
+      { probes: { [DEP_KIND.PACKAGE]: () => null }, catalog: () => null },
+    );
+    t('a missing optional dependency never blocks an install',
+      optional.installable === true && optional.missing_from_catalog.length === 0);
+  }
 
   t('lowestState reports the rung the whole set is stuck on',
     lowestState([DEP_STATE.READY, DEP_STATE.CONFIGURED, DEP_STATE.HEALTHY]) === DEP_STATE.CONFIGURED

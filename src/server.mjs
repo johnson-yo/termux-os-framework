@@ -17,7 +17,9 @@ import { registerAction, listActions, performScene } from './theatre/runtime.mjs
 import { acts, scenes, scripts } from './theatre/catalog.mjs';
 import { builtinActions } from './theatre/adapters.mjs';
 import * as stage from './stage/manager.mjs';
-import { serviceDependencyGate, reverseDependencies, dependencyTree } from './packages/dependency-runtime.mjs';
+import {
+  serviceDependencyGate, reverseDependencies, dependencyTree, resolveDeclaredDependencies,
+} from './packages/dependency-runtime.mjs';
 import {
   loadPackages, loadSinglePackage, unregisterPackage, _getRecord,
   listPackages, getPackage, getPackageWebRoot, dispatchPackageRoute, dispatchPackageWebSocket, listArtifactContracts,
@@ -45,6 +47,7 @@ import {
 import {
   DEFAULT_PACKAGE_REGISTRY_URL, configurePackageRegistry, downloadPackageFromRegistry,
   downloadFrameworkFromRegistry, frameworkRegistryInfo, packageRegistryContainsSha256,
+  packageRegistryFindByPackageId,
   packageRegistryDetails, packageRegistrySnapshot, refreshPackageRegistry,
 } from './system/package-registry.mjs';
 import {
@@ -970,7 +973,7 @@ const server = http.createServer(async (req, res) => {
     const status = code === 'upload_too_large' ? 413
       : code.startsWith('unknown_') ? 404
         : ['package_job_active', 'upload_job_active', 'preflight_required', 'confirmation_mismatch',
-          'unverified_release_confirmation_required', 'required_by_others']
+          'unverified_release_confirmation_required', 'required_by_others', 'dependency_not_in_catalog']
           .includes(code) ? 409 : 400;
     return json(res, status, {
       ok: false,
@@ -979,6 +982,8 @@ const server = http.createServer(async (req, res) => {
       // 結構化的引用者清單。⚠ 只給一句 detail，WebUI 就只能把它當字串印出來，
       // 使用者點不進去那個真正該先處理的包。
       ...(error?.required_by ? { required_by: error.required_by } : {}),
+      // 依賴計畫要結構化交出去，WebUI 才能列出缺什麼、多大、按什麼順序裝。
+      ...(error?.dependencies ? { dependencies: error.dependencies } : {}),
     });
   };
   const packageRegistryError = (error) => {
@@ -1365,6 +1370,24 @@ const server = http.createServer(async (req, res) => {
             throw Object.assign(new Error('this archive is not present in the verified Registry catalog; explicit acknowledgement is required'), {
               code: 'unverified_release_confirmation_required',
             });
+          }
+          /**
+           * Dependency v1 安裝預檢。⛔ 依賴補不齊就不裝。
+           *
+           * 判據刻意**不是**「依賴 ready 了嗎」——提供方多半要等安裝完才起得來，
+           * 那樣沒有任何包裝得上。判據是「缺的那些在 Catalog 裡拿得到嗎」：
+           * 拿得到就報出下載量與安裝順序讓使用者確認，拿不到就現在拒絕。
+           * 裝一個永遠補不齊依賴的包，比不裝更難查。
+           */
+          const declared = upload.preflight?.dependencies?.requires ?? [];
+          if (declared.length) {
+            const plan = resolveDeclaredDependencies(declared, { catalog: packageRegistryFindByPackageId });
+            if (!plan.installable) {
+              throw Object.assign(
+                new Error(`missing from the Registry catalog: ${plan.missing_from_catalog.map((n) => n.id).join(', ')}`),
+                { code: 'dependency_not_in_catalog', dependencies: plan },
+              );
+            }
           }
         }
         const job = startPackageJob(m[2], { upload_id: upload.id });

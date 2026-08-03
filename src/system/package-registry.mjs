@@ -447,6 +447,35 @@ export function packageRegistryContainsSha256(sha256) {
     version.files.some((file) => String(file.sha256 ?? '').toLowerCase() === wanted)));
 }
 
+/**
+ * 按 Package ID 在**已快取的目錄**裡找一個可安裝的最新版本。
+ *
+ * ⚠ 只讀快取，不發網路請求：安裝預檢會對每個缺席的依賴問一次，而預檢必須是
+ * 一次可以立刻回答的判斷。目錄陳舊的處理方式是讓使用者按刷新，不是讓預檢卡住。
+ *
+ * @returns `{ package_id, repository, source, version, size, sha256, kind, file }` 或 `null`
+ */
+export function packageRegistryFindByPackageId(packageId) {
+  const wanted = String(packageId ?? '').trim();
+  if (!wanted) return null;
+  const project = state.packages.find((item) => item.package_id === wanted);
+  if (!project) return null;
+  const version = project.versions.find((item) => item.version === project.latest_version)
+    ?? project.versions.at(-1);
+  const file = version?.files.find((item) => item.kind === 'source_tar' && item.name.endsWith('.tar.gz'));
+  if (!version || !file) return null;
+  return {
+    package_id: wanted,
+    source: project.source,
+    repository: project.repository,
+    version: version.version,
+    kind: 'source_tar',
+    file: file.name,
+    size: file.size ?? null,
+    sha256: file.sha256 ?? null,
+  };
+}
+
 async function downloadSelectedFromRegistry(selectionInput, requiredType = null) {
   const selection = assertSelection(selectionInput);
   const listed = listedFile(selection, requiredType);

@@ -12,6 +12,7 @@ import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { MANIFEST_FILENAME, validateManifest, manifestTargets, TARGET_GENERIC } from '../src/packages/manifest.mjs';
+import { declaredDependencies } from '../src/packages/dependencies.mjs';
 import {
   checkBundled, checkExternal, deviceProfile, resolveTarget, archiveName, scanForbiddenPaths, preflight,
 } from '../src/packages/runtime-contract.mjs';
@@ -465,6 +466,14 @@ async function cmdCheck(tarPath, args) {
     console.log(JSON.stringify({
       ...r,
       port_contract: portContract,
+      /**
+       * ⭐ 只报**声明**，不报状态。
+       *
+       * 这个进程认识这个归档，但不认识这台设备正在跑什么：Capability 注册表活在
+       * Framework 进程的内存里。所以这里交出「它要什么」，由 server 回答「拿到了没有」——
+       * 两边各答自己真的知道的那一半，比任何一边猜另一半都准。
+       */
+      dependencies: { requires: declaredDependencies(v.manifest) },
       package: {
         id: v.id,
         name: v.manifest.name,

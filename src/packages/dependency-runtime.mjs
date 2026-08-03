@@ -14,7 +14,7 @@ import { getPackage, listPackages } from './loader.mjs';
 import { describeCapability } from '../capabilities/resolver.mjs';
 import { describeAsset } from '../assets/runtime.mjs';
 import {
-  DEP_KIND, DEP_STATE, declaredDependencies, installOrder, resolveDependencies,
+  DEP_KIND, DEP_STATE, declaredDependencies, installOrder, installPlan, resolveDependencies,
 } from './dependencies.mjs';
 
 /**
@@ -140,6 +140,26 @@ export async function dependencyTree(rootManifest, manifestFor = () => null) {
     cycle: order.cycle,
     ok: order.ok && resolved.ready,
   };
+}
+
+/**
+ * 安裝預檢：把 preflight 交出來的**聲明**在這台設備上解析。
+ *
+ * ⭐ 聲明來自打包子進程（它認識這個歸檔），狀態只有這裡知道（Capability 註冊表
+ * 活在本進程記憶體裡）。兩邊各答自己真的知道的那一半。
+ *
+ * ⚠ Capability 在預檢時**刻意不探**：安裝前提供方多半還沒起來，探它只會得到一個
+ * 誠實但無用的 missing。它歸啟動門禁管，那時候答案才有意義。
+ */
+export function resolveDeclaredDependencies(declared, { catalog = () => null } = {}) {
+  return installPlan(declared, {
+    catalog,
+    probes: {
+      [DEP_KIND.PACKAGE]: (id) => packageFacts(id),
+      [DEP_KIND.ASSET]: (id) => assetFacts(id),
+      [DEP_KIND.CAPABILITY]: () => null,
+    },
+  });
 }
 
 /**
