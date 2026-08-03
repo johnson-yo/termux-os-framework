@@ -13,6 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { MANIFEST_FILENAME, validateManifest, manifestTargets, TARGET_GENERIC } from '../src/packages/manifest.mjs';
 import { declaredDependencies } from '../src/packages/dependencies.mjs';
+import { checkFreeSpace, fetchAssetFiles, pendingBytes } from '../src/assets/fetch.mjs';
 import {
   checkBundled, checkExternal, deviceProfile, resolveTarget, archiveName, scanForbiddenPaths, preflight,
 } from '../src/packages/runtime-contract.mjs';
@@ -368,7 +369,37 @@ function writeActive(id, active) {
  * 為何 sha 不同要拒：那說明「同一個版本」有兩種內容，與 022 的 Release 不可變一脈相承；
  *   且靜默覆蓋別人 /sdcard 上的模型是 022 明令的紅線。
  */
-function installAssetPayloads(stagedPkg, manifest, targetId) {
+/**
+ * 遠程 payload：直接取到最終版本目錄。
+ *
+ * ⭐ 不經 `.staging` 再搬——那一步是為了「解包後再原子換入」，而這裡每個檔案本來就是
+ * 先寫 `.part`、校驗通過才 rename，原子性已經在檔案這一層做到了。多搬一次 937 MB
+ * 只是把同樣的字節在同一個檔案系統上再抄一遍。
+ *
+ * ⚠ 版本目錄不可變：同版本已有內容且 sha 相符就復用，不相符就拒絕覆蓋。
+ */
+async function installRemoteAssetPayload(asset, manifest, targetId, options) {
+  const finalDir = path.join(assetVersionDir(manifest.id, manifest.version, targetId), path.basename(asset.payload));
+  const files = asset.source.files;
+  const need = pendingBytes(files, finalDir);
+  const space = checkFreeSpace(path.dirname(finalDir), need);
+  if (!space.ok) {
+    die(`asset ${asset.id}: needs ${need} bytes, only ${space.free_bytes} available in ${sharedStore()}`);
+  }
+  if (need > 0) console.log(`asset ${asset.id}: fetching ${need} bytes → ${finalDir}`);
+  const landed = await fetchAssetFiles(files, finalDir, {
+    via: options.via, registryBase: options.registryBase,
+    onProgress: ({ file, stage, bytes, total }) => {
+      if (stage === 'done') console.log(`  ${file}: ${bytes} bytes verified`);
+      if (stage === 'reused') console.log(`  ${file}: already present, reused`);
+    },
+  });
+  const checksums = Object.fromEntries(files.map((f) => [f.path, f.sha256]));
+  console.log(`asset ${asset.id}: payload installed → ${finalDir}`);
+  return { asset, dir: finalDir, checksums, landed };
+}
+
+async function installAssetPayloads(stagedPkg, manifest, targetId, options = {}) {
   const provides = manifest.assets?.provides ?? [];
   if (!provides.length) return [];
   const store = sharedStore();
@@ -376,6 +407,11 @@ function installAssetPayloads(stagedPkg, manifest, targetId) {
   const installed = [];
   try {
     for (const a of provides) {
+      // 遠程宣告的 payload 不在歸檔裡——它按坐標去取，不必也不該被打進包。
+      if (a.source?.files?.length) {
+        installed.push(await installRemoteAssetPayload(a, manifest, targetId, options));
+        continue;
+      }
       const srcDir = path.join(stagedPkg, a.payload);
       if (!fs.existsSync(srcDir)) throw new Error(`asset payload missing in archive: ${a.payload}`);
 
@@ -566,7 +602,10 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     await stopOwnedServices(manifest);
 
     // 024：大 payload 先落共享 store（失敗就在這裡拋，active 尚未動）
-    assetsInstalled = installAssetPayloads(stagedPkg, manifest, t.target?.id ?? TARGET_GENERIC);
+    assetsInstalled = await installAssetPayloads(stagedPkg, manifest, t.target?.id ?? TARGET_GENERIC, {
+      via: args.includes('--direct') ? 'direct' : 'registry',
+      registryBase: process.env.PACKAGE_REGISTRY_URL || 'https://package.termux-os.com',
+    });
 
     const versionDir = path.join(pkgDir, 'versions', version);
     fs.rmSync(versionDir, { recursive: true, force: true }); // 殘留半成品清掉（同版本不同 hash 已在上面擋）

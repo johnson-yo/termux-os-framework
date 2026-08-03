@@ -172,6 +172,56 @@ function validateTargets(e, targets) {
 // ============================================================
 const ASSET_KINDS = new Set(['model']);
 
+/**
+ * 遠程 payload（`assets.provides[].source`）。
+ *
+ * ⭐ **每個檔案自帶來源坐標**，而不是整包共用一個 repo。理由是同一份資產的檔案
+ * 常常歸屬不同：SenseVoice 的 `am.mvn` 與上游逐位相同（該 import），`tokens.json`
+ * 四個第三方導出給出同一個 hash（公共產物，該 import），而 `model.onnx` 是我們自己
+ * 導出的（必須自托管）。整包一個 repo 就表達不了這件事，只能把別人的檔案抄一份——
+ * 而抄一份正是這個設計要避免的東西。
+ *
+ * ⚠ revision 必須是不可變 commit。分支會動，用它登記等於承諾一個守不住的 hash。
+ */
+function validateAssetSource(e, where, asset) {
+  const source = asset.source;
+  if (source === undefined) return;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    e(`${where}.source must be an object`); return;
+  }
+  const files = source.files;
+  if (!Array.isArray(files) || files.length === 0) {
+    e(`${where}.source.files must be a non-empty array`); return;
+  }
+  const seen = new Set();
+  for (const [i, f] of files.entries()) {
+    const at = `${where}.source.files[${i}]`;
+    if (!f || typeof f !== 'object') { e(`${at} must be an object`); continue; }
+    if (typeof f.path !== 'string' || !f.path || f.path.includes('/')) {
+      e(`${at}.path must be a bare filename inside the payload directory`);
+    } else {
+      if (seen.has(f.path)) e(`${at}.path is declared twice: ${f.path}`);
+      seen.add(f.path);
+    }
+    if (!/^[\w.-]+\/[\w.-]+$/.test(String(f.repo ?? ''))) e(`${at}.repo must be "owner/name"`);
+    if (!/^[0-9a-f]{40}$/.test(String(f.revision ?? ''))) {
+      e(`${at}.revision must be a full 40-character commit sha (a branch moves)`);
+    }
+    if (f.remote_path !== undefined && !relPathOk(f.remote_path)) {
+      e(`${at}.remote_path must be a relative path inside the source repository`);
+    }
+    if (!Number.isSafeInteger(f.size) || f.size <= 0) e(`${at}.size must be a positive integer`);
+    if (!/^[0-9a-f]{64}$/.test(String(f.sha256 ?? ''))) e(`${at}.sha256 must be 64 hex characters`);
+  }
+  // ⛔ 角色映射指向的檔案必須真的在 BOM 裡。少了這一條，一個拼錯的角色名要到
+  // 設備上解析資產時才炸，而那時候看起來像「資產壞了」而不是「manifest 寫錯了」。
+  for (const [role, name] of Object.entries(asset.files ?? {})) {
+    if (typeof name === 'string' && name && !seen.has(name)) {
+      e(`${where}.files.${role} = "${name}" is not declared in source.files`);
+    }
+  }
+}
+
 function validateAssets(e, assets) {
   if (assets === undefined) return;
   if (!assets || typeof assets !== 'object' || Array.isArray(assets)) { e('assets must be an object'); return; }
@@ -184,8 +234,9 @@ function validateAssets(e, assets) {
       if (!a || typeof a !== 'object') { e(`${where} must be an object`); return; }
       if (typeof a.id !== 'string' || !a.id.trim()) e(`${where}.id is required`);
       if (!ASSET_KINDS.has(a.kind)) e(`${where}.kind must be one of [${[...ASSET_KINDS].join(', ')}]`);
-      // payload 與 entrypoints/bundled 同一條紅線：包內相對路徑
-      if (!relPathOk(a.payload)) e(`${where}.payload must be a relative path inside the package`);
+      // payload：bundled 時是包內相對路徑，remote 時是共享 store 下的子目錄名。
+      // 兩種情況都不許絕對路徑或 `..`——它決定字節最終落在哪裡。
+      if (!relPathOk(a.payload)) e(`${where}.payload must be a relative path`);
       if (!a.files || typeof a.files !== 'object' || Array.isArray(a.files)) {
         e(`${where}.files must be an object mapping role → filename`);
       } else {
@@ -194,6 +245,7 @@ function validateAssets(e, assets) {
           if (typeof f !== 'string' || !f || f.includes('/')) e(`${where}.files.${role} must be a bare filename`);
         }
       }
+      validateAssetSource(e, where, a);
     });
     const ids = provides.map((a) => a?.id).filter(Boolean);
     if (new Set(ids).size !== ids.length) e('assets.provides[].id must be unique');
@@ -651,6 +703,56 @@ if (process.argv.includes('--self-test')
   t('an asset dependency may pin the asset package version',
     validateManifest({ ...base, assets: { requires: [{ id: 'model.sensevoice', version: '>=1.0.0' }] } }).ok
     && !validateManifest({ ...base, assets: { requires: [{ id: 'model.sensevoice', version: 'newest' }] } }).ok);
+
+  // --- 遠程 asset payload ---
+  const remoteAsset = (over = {}) => ({
+    ...base,
+    types: ['asset'],
+    components: { ...base.components, assets: ['model.x'] },
+    assets: { provides: [{
+      id: 'model.x', kind: 'model', payload: 'payload/x',
+      files: { model: 'm.onnx' },
+      source: { files: [{
+        path: 'm.onnx', repo: 'owner/repo', revision: 'a'.repeat(40),
+        size: 123, sha256: 'b'.repeat(64),
+      }] },
+      ...over,
+    }] },
+  });
+  t('a remote asset payload is accepted', validateManifest(remoteAsset()).ok);
+  t('a bundled asset payload still works without source',
+    validateManifest({ ...base, types: ['asset'], components: { ...base.components, assets: ['model.x'] },
+      assets: { provides: [{ id: 'model.x', kind: 'model', payload: 'payload/x', files: { model: 'm.onnx' } }] } }).ok);
+  // ⚠ 分支會動；用它登記等於承諾一個守不住的 hash。
+  t('a source file pinned to a branch is refused',
+    !validateManifest(remoteAsset({ source: { files: [{
+      path: 'm.onnx', repo: 'owner/repo', revision: 'main', size: 1, sha256: 'b'.repeat(64) }] } })).ok);
+  t('a source file needs a real size and hash',
+    !validateManifest(remoteAsset({ source: { files: [{
+      path: 'm.onnx', repo: 'owner/repo', revision: 'a'.repeat(40), sha256: 'b'.repeat(64) }] } })).ok
+    && !validateManifest(remoteAsset({ source: { files: [{
+      path: 'm.onnx', repo: 'owner/repo', revision: 'a'.repeat(40), size: 1, sha256: 'nope' }] } })).ok);
+  /**
+   * ⭐ 每個檔案自帶來源，所以一個資產可以同時 import 別人的與自托管我們的。
+   * 這是 SenseVoice 的真實形狀：am.mvn 與上游逐位相同、tokens.json 是公共產物、
+   * model.onnx 是我們自己導出的。
+   */
+  t('one asset may draw its files from different repositories',
+    validateManifest(remoteAsset({
+      files: { model: 'm.onnx', cmvn: 'up.mvn' },
+      source: { files: [
+        { path: 'm.onnx', repo: 'us/ours', revision: 'a'.repeat(40), size: 1, sha256: 'b'.repeat(64) },
+        { path: 'up.mvn', repo: 'them/theirs', revision: 'c'.repeat(40), size: 2, sha256: 'd'.repeat(64) },
+      ] },
+    })).ok);
+  // ⛔ 角色指向一個 BOM 裡沒有的檔案，要在這裡炸，不是到設備上才炸。
+  t('a role that points at a file the BOM never declares is refused',
+    !validateManifest(remoteAsset({ files: { model: 'typo.onnx' } })).ok);
+  t('the same file declared twice is refused',
+    !validateManifest(remoteAsset({ source: { files: [
+      { path: 'm.onnx', repo: 'o/r', revision: 'a'.repeat(40), size: 1, sha256: 'b'.repeat(64) },
+      { path: 'm.onnx', repo: 'o/r', revision: 'a'.repeat(40), size: 1, sha256: 'b'.repeat(64) },
+    ] } })).ok);
 
   t('public dependency/security metadata accepted', validateManifest({ ...base,
     public_metadata: {

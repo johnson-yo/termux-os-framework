@@ -162,6 +162,7 @@ src/apps/CLAUDE.md
 src/apps/coordinator.mjs
 src/apps/session.mjs
 src/assets/CLAUDE.md
+src/assets/fetch.mjs
 src/assets/registry.mjs
 src/assets/resolver.mjs
 src/assets/runtime.mjs

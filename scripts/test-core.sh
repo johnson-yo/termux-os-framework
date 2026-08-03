@@ -21,6 +21,7 @@ for file in \
   src/packages/dependencies.mjs \
   src/packages/runtime-contract.mjs \
   src/packages/loader.mjs \
+  src/assets/fetch.mjs \
   src/assets/registry.mjs \
   src/assets/resolver.mjs \
   src/capabilities/resolver.mjs \
