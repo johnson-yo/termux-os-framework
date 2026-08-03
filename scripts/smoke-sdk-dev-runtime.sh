@@ -209,6 +209,24 @@ else
   ok "正式 persist 未被 Dev 觸碰"
 fi
 
+echo "--- 10.5 依賴 override 對啟動門禁可見 ---"
+# ⚠ 這裡斷言的**不是** API 的返回值，而是啟動門禁真正讀的那份（`record.dev`）。
+#    真機踩過：override 設置成功、日誌也印了，但門禁照樣攔——因為 mount 上的值
+#    改了，而門禁讀的是**掛載那一刻**拍下的快照，還被用 package_id 取成了正式版那份。
+#    只驗返回值的測試會全綠通過這個 bug。
+curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"enabled":true}' "$B/api/dev/packages/$INST/dependency-override" \
+  | jq "assert d['ok'] and d['mount']['dependency_override'] is True" \
+  && ok "override 設置返回成功" || bad "override 設置"
+curl -s -H "$AUTH" "$B/api/packages/$INST" \
+  | jq "assert d['package']['dev']['dependency_override'] is True" \
+  && ok "已載入 record 上可見（門禁讀的就是這份）" || bad "override 未達門禁：record.dev 是陳舊快照"
+curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"enabled":false}' "$B/api/dev/packages/$INST/dependency-override" >/dev/null
+curl -s -H "$AUTH" "$B/api/packages/$INST" \
+  | jq "assert d['package']['dev']['dependency_override'] is False" \
+  && ok "關閉同樣即時可見" || bad "override 關閉未達門禁"
+
 echo "--- 11. dev stop 只移除工作區實例 ---"
 $SDK dev stop $ID --slug $SLUG --json | jq "assert d['ok'] and d['restored'] is None" \
   && ok "dev stop（無 restore：正式版從未被移走）" || bad "dev stop"

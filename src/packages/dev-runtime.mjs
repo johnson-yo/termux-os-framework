@@ -92,7 +92,7 @@ export function devSetDependencyOverride(idOrInstance, enabled) {
    * 只改 mount 不刷 record，開關會「設置成功」然後毫無作用——而且不報錯：
    * 讀得出值，只是那是舊值。實測踩過一次。
    */
-  const record = _getRecord(m.package_id);
+  const record = _getRecord(m.instance_id);
   if (record) record.dev = publicMount(m);
   CFG.log(`dev dependency override ${m.dependency_override ? 'enabled' : 'disabled'} for ${id}`);
   return { ok: true, mount: publicMount(m) };
@@ -275,7 +275,9 @@ function classifyChange(m, relPath) {
   if (!relPath) return 'backend'; // 事件沒帶路徑就保守整包重載
   const top = relPath.split(path.sep)[0];
   if (SKIP.has(top)) return null;
-  const r = _getRecord(m.package_id);
+  // ⚠ `m.instance_id`，不是 `m.package_id`：工作區以 `<id>@<slug>` 註冊，
+  //    用 package_id 取到的是**正式版**那份 record（或什麼都取不到）。
+  const r = _getRecord(m.instance_id);
   const webDir = r?.manifest ? path.dirname(r.manifest.entrypoints.webui) : 'web';
   return relPath.startsWith(`${webDir}${path.sep}`) || relPath.startsWith(`${webDir}/`) ? 'web' : 'backend';
 }
