@@ -24,6 +24,45 @@ function run(cmd, args, timeout = PROBE_TIMEOUT) {
 // Device Profile（023 §6）
 // ============================================================
 
+/**
+ * SoC → Hexagon DSP 架構。發布事實表，不是推測。
+ *
+ * ⚠ 一份 HTP ctx 只在同 DSP 架構內可用，換架構就是廢的。認不出的 SoC 一律 unknown——
+ * 猜一個會讓「裝上了但每次執行都失敗」取代「明確拒絕安裝」。
+ */
+const SOC_HTP = {
+  sm8450: 'v69', sm8475: 'v69',
+  sm8550: 'v73', sm8635: 'v73',
+  sm8650: 'v75',
+  sm8750: 'v79',
+};
+
+/**
+ * ORT 將要加載的那個 QNN 運行時的版本。
+ *
+ * ⭐ **讀它將要加載的那個二進位，不要問它**。QNN 版本是 App 的構建期事實，而權威副本就是
+ * APK 裡（已解壓到 `lib/arm64/`）的 `libQnnHtp.so` 本身。讓 App 用一個 API 自報，
+ * 等於在「它說的」與「它載入的」之間新開一條會漂移的縫——而這條縫的症狀是加載期
+ * `Error code: 5000`，最貴的那種失敗。文件變了版本就跟著變，不可能過期。
+ *
+ * ⚠ 只認 `lib/arm64/`（ort_worker 用的那份）。GenieX 的 QNN 2.45 在 capsule assets 裡，
+ * 不在這裡，也不加載 ctx。
+ */
+function detectQnn() {
+  const line = run('pm', ['path', 'com.termux_os.app']);
+  const apk = /^package:(.+)$/m.exec(line ?? '')?.[1];
+  if (!apk) return null;
+  const so = path.join(path.dirname(apk), 'lib/arm64/libQnnHtp.so');
+  let fd;
+  try {
+    fd = fs.openSync(so, 'r');
+    // 版本串在頭部附近；讀滿 4 MiB 就停，不為了一個版本號掃完整個檔案
+    const buf = Buffer.alloc(Math.min(4 << 20, fs.fstatSync(fd).size));
+    fs.readSync(fd, buf, 0, buf.length, 0);
+    return /v(\d+\.\d+)\.[\d.]+/.exec(buf.toString('latin1'))?.[1] ?? null;
+  } catch { return null; } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch { /* already gone */ } }
+}
+
 /** 當前設備畫像；任一項取不到=「unknown」（§6.1 不得猜測） */
 export function deviceProfile() {
   const soc = process.env.DEVICE_SOC ?? run('getprop', ['ro.soc.model']) ?? null;
@@ -35,11 +74,14 @@ export function deviceProfile() {
     os: isAndroid ? 'android' : (process.platform || 'unknown'),
     arch,
     soc: soc || 'unknown',
-    htp: process.env.DEVICE_HTP ?? 'unknown',
-    qnn: process.env.DEVICE_QNN ?? 'unknown',
+    htp: process.env.DEVICE_HTP ?? SOC_HTP[String(soc ?? '').toLowerCase()] ?? 'unknown',
+    qnn: process.env.DEVICE_QNN ?? detectQnn() ?? 'unknown',
     python: /(\d+\.\d+)\.\d+/.exec(py ?? '')?.[1] ?? 'unknown',
   };
 }
+
+/** 導出僅為自檢：SoC 表是事實，值得被鎖住 */
+export const _socHtp = SOC_HTP;
 
 /** Release target 選擇：Manifest 聲明的 targets 中挑一個能裝的（§6.2） */
 export function resolveTarget(manifest, profile) {
@@ -369,6 +411,31 @@ if (process.argv.includes('--self-test')
       const p = deviceProfile(); if (s === undefined) delete process.env.DEVICE_SOC; else process.env.DEVICE_SOC = s;
       if (h !== undefined) process.env.DEVICE_HTP = h;
       return p.htp === 'unknown' && p.soc === 'SM0000'; })());
+  t('known soc derives htp from the fact table (SM8550 → v73)',
+    (() => { const s = process.env.DEVICE_SOC; const h = process.env.DEVICE_HTP;
+      process.env.DEVICE_SOC = 'SM8550'; delete process.env.DEVICE_HTP;
+      const p = deviceProfile(); if (s === undefined) delete process.env.DEVICE_SOC; else process.env.DEVICE_SOC = s;
+      if (h !== undefined) process.env.DEVICE_HTP = h;
+      return p.htp === 'v73'; })());
+  t('soc lookup is case-insensitive (getprop casing is not a contract)',
+    (() => { const s = process.env.DEVICE_SOC; const h = process.env.DEVICE_HTP;
+      process.env.DEVICE_SOC = 'sm8750'; delete process.env.DEVICE_HTP;
+      const p = deviceProfile(); if (s === undefined) delete process.env.DEVICE_SOC; else process.env.DEVICE_SOC = s;
+      if (h !== undefined) process.env.DEVICE_HTP = h;
+      return p.htp === 'v79'; })());
+  // ⚠ 每一條都是「這個 SoC 的 ctx 拿到別的架構上一定不能用」，錯一格就是靜默的錯 ctx
+  t('soc→htp table matches the shipped device set',
+    _socHtp.sm8550 === 'v73' && _socHtp.sm8750 === 'v79' && _socHtp.sm8650 === 'v75');
+  t('explicit DEVICE_HTP overrides the table (unknown hardware stays testable)',
+    (() => { const s = process.env.DEVICE_SOC; const h = process.env.DEVICE_HTP;
+      process.env.DEVICE_SOC = 'SM8550'; process.env.DEVICE_HTP = 'v79';
+      const p = deviceProfile(); if (s === undefined) delete process.env.DEVICE_SOC; else process.env.DEVICE_SOC = s;
+      if (h === undefined) delete process.env.DEVICE_HTP; else process.env.DEVICE_HTP = h;
+      return p.htp === 'v79'; })());
+  t('no app installed → qnn unknown, never a plausible-looking default',
+    (() => { const q = process.env.DEVICE_QNN; delete process.env.DEVICE_QNN;
+      const p = deviceProfile(); if (q !== undefined) process.env.DEVICE_QNN = q;
+      return p.qnn === 'unknown' || /^\d+\.\d+$/.test(p.qnn); })());
 
   // --- archive naming ---
   t('generic archive name has no target suffix',
