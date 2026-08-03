@@ -85,6 +85,15 @@ export function devSetDependencyOverride(idOrInstance, enabled) {
   if (!m) return { ok: false, error: 'not_mounted' };
   m.dependency_override = enabled === true;
   saveState();
+  /**
+   * ⚠ 必須同時刷新已載入 record 上的那份快照。
+   *
+   * `record.dev` 是**掛載那一刻**拍的 `publicMount(m)`，啟動門禁讀的是它。
+   * 只改 mount 不刷 record，開關會「設置成功」然後毫無作用——而且不報錯：
+   * 讀得出值，只是那是舊值。實測踩過一次。
+   */
+  const record = _getRecord(m.package_id);
+  if (record) record.dev = publicMount(m);
   CFG.log(`dev dependency override ${m.dependency_override ? 'enabled' : 'disabled'} for ${id}`);
   return { ok: true, mount: publicMount(m) };
 }
