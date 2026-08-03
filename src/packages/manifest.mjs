@@ -6,6 +6,8 @@
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
 
+import { CONSTRAINT_SYNTAX, parseConstraint } from './version.mjs';
+
 export const MANIFEST_FILENAME = 'termux-os.package.json';
 export const MANIFEST_SCHEMA = 'termux-os.package.v1';
 
@@ -50,6 +52,62 @@ function checkProbe(e, where, probe) {
   if (!n) { e(`${where}.probe must be a string or { type, value }`); return; }
   if (!PROBE_TYPES.has(n.type)) e(`${where}.probe.type must be one of [${[...PROBE_TYPES].join(', ')}]`);
   if (typeof n.value !== 'string' || !n.value.trim()) e(`${where}.probe.value is required`);
+}
+
+// 054 狀態總線：一個名字只能有一個寫入者，所以 provides 是「我負責告訴大家的事實」，
+// 沒有對應的 requires——讀取本來就是自由的，不需要宣告。
+function validateStates(e, states) {
+  if (states === undefined) return;
+  if (!states || typeof states !== 'object' || Array.isArray(states)) return e('states must be an object');
+  if (states.provides === undefined) return;
+  if (!Array.isArray(states.provides)) return e('states.provides must be an array');
+  const seen = new Set();
+  for (const item of states.provides) {
+    if (!item || typeof item !== 'object') { e('states.provides entries must be objects'); continue; }
+    const id = String(item.id ?? '');
+    if (!/^[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*){1,3}$/.test(id)) { e(`invalid state id: ${id || '(empty)'}`); continue; }
+    if (seen.has(id)) e(`duplicate state id: ${id}`);
+    seen.add(id);
+    const type = item.type ?? 'bool';
+    if (!['bool', 'enum', 'number', 'string'].includes(type)) e(`state ${id} has unsupported type ${type}`);
+    if (type === 'enum' && (!Array.isArray(item.values) || item.values.length < 2)) {
+      e(`enum state ${id} needs a values array with at least two entries`);
+    }
+    if (item.max_age_ms !== undefined && !(Number(item.max_age_ms) > 0)) {
+      e(`state ${id} has a non-positive max_age_ms`);
+    }
+  }
+}
+
+/**
+ * 依賴版本約束。⚠ 與 `compatibility.framework` **共用同一套語法**（見 version.mjs）——
+ * 同一個概念在一個系統裡出現兩種寫法，使用者遲早會把一種寫進另一種的位置。
+ */
+function checkConstraint(e, where, value) {
+  if (value === undefined || value === null) return;
+  if (!parseConstraint(value)) e(`${where} must be ${CONSTRAINT_SYNTAX}`);
+}
+
+// ============================================================
+// Dependency v1：Package 依賴（本輪唯一新增的欄位）
+// ============================================================
+function validatePackages(e, pkgs) {
+  if (pkgs === undefined) return;
+  if (!pkgs || typeof pkgs !== 'object' || Array.isArray(pkgs)) { e('packages must be an object'); return; }
+  const requires = pkgs.requires;
+  if (requires === undefined) return;
+  if (!Array.isArray(requires)) { e('packages.requires must be an array'); return; }
+  const seen = new Set();
+  requires.forEach((r, i) => {
+    const where = `packages.requires[${i}]`;
+    if (!r || typeof r !== 'object') { e(`${where} must be an object`); return; }
+    const id = String(r.id ?? '');
+    if (!id.trim()) e(`${where}.id is required`);
+    else if (seen.has(id)) e(`duplicate package dependency: ${id}`);
+    seen.add(id);
+    if (r.required !== undefined && typeof r.required !== 'boolean') e(`${where}.required must be boolean`);
+    checkConstraint(e, `${where}.version`, r.version);
+  });
 }
 
 function validateRuntime(e, runtime) {
@@ -149,6 +207,7 @@ function validateAssets(e, assets) {
       if (!a || typeof a !== 'object') { e(`${where} must be an object`); return; }
       if (typeof a.id !== 'string' || !a.id.trim()) e(`${where}.id is required`);
       if (a.required !== undefined && typeof a.required !== 'boolean') e(`${where}.required must be boolean`);
+      checkConstraint(e, `${where}.version`, a.version);
       // target:"current" = 必須與本機 profile 相符（024 §8）；其餘值保留未用
       if (a.target !== undefined && a.target !== 'current') e(`${where}.target must be "current" (v0)`);
     });
@@ -186,6 +245,9 @@ function validateIntegrations(e, integ) {
       if (!r || typeof r !== 'object') { e(`integrations.requires[${i}] must be an object`); return; }
       if (typeof r.capability !== 'string' || !r.capability.trim()) e(`integrations.requires[${i}].capability is required`);
       if (r.required !== undefined && typeof r.required !== 'boolean') e(`integrations.requires[${i}].required must be boolean`);
+      // 提供方的最低版本。Capability 名字相同不代表行為相同——一個舊 Adapter
+      // 可以「提供」這個 Capability 卻缺掉消費方要用的那半個契約。
+      checkConstraint(e, `integrations.requires[${i}].version`, r.version);
       if (r.required !== true && (typeof r.degraded_behavior !== 'string' || !r.degraded_behavior.trim())) {
         e(`integrations.requires[${i}].degraded_behavior is required for optional integrations（缺了它用戶不知道少什麼）`);
       }
@@ -379,6 +441,8 @@ export function validateManifest(m, { frameworkVersion } = {}) {
     }
   }
 
+  validatePackages(e, m.packages); // Dependency v1：可選（Package 依賴 + 版本約束）
+  validateStates(e, m.states);     // 054：可選（狀態總線；聲明後不跑起來也能審計整個命名空間）
   validateRuntime(e, m.runtime);   // 023：皆可選，不聲明=legacy
   validateTargets(e, m.targets);   // 023：不聲明=generic
   validateAssets(e, m.assets);     // 024：可選
@@ -540,12 +604,54 @@ if (process.argv.includes('--self-test')
   t('session.quiesce_unrelated_services must be boolean',
     !validateManifest({ ...base, session: { ...sess, quiesce_unrelated_services: 'yes' } }).ok);
 
+  // --- 054 states ---
+  const states = { provides: [
+    { id: 'speech.stage', type: 'enum', values: ['rms', 'kws', 'vad', 'asr'] },
+    { id: 'speech.input', type: 'bool' },
+    { id: 'speech.tts', type: 'bool', max_age_ms: 60000 },
+  ] };
+  t('state declaration accepted', validateManifest({ ...base, states }).ok);
+  t('manifest without states still ok', validateManifest(base).ok);
+  t('state id must be a lowercase dotted name',
+    !validateManifest({ ...base, states: { provides: [{ id: 'Speech.Stage' }] } }).ok
+    && !validateManifest({ ...base, states: { provides: [{ id: 'speech' }] } }).ok);
+  t('an enum state needs a real value domain',
+    !validateManifest({ ...base, states: { provides: [{ id: 'speech.stage', type: 'enum', values: ['rms'] }] } }).ok
+    && !validateManifest({ ...base, states: { provides: [{ id: 'speech.stage', type: 'enum' }] } }).ok);
+  t('duplicate state ids rejected',
+    !validateManifest({ ...base, states: { provides: [{ id: 'speech.input' }, { id: 'speech.input' }] } }).ok);
+  t('non-positive max_age_ms rejected',
+    !validateManifest({ ...base, states: { provides: [{ id: 'speech.tts', max_age_ms: 0 }] } }).ok);
+
   const ports = [{ id: 'http', protocol: 'http', preferred: 9120, visibility: 'loopback', health: '/health' }];
   t('Package HTTP port declaration accepted', validateManifest({ ...base, ports }).ok);
   t('invalid Package port declaration rejected',
     !validateManifest({ ...base, ports: [{ ...ports[0], preferred: 80 }] }).ok
     && !validateManifest({ ...base, ports: [{ ...ports[0], visibility: 'public' }] }).ok
     && !validateManifest({ ...base, ports: [{ ...ports[0], health: '../health' }] }).ok);
+  // --- Dependency v1 ---
+  t('package dependency with a constraint is accepted', validateManifest({ ...base,
+    packages: { requires: [{ id: 'github.termux-os.asset.sensevoice', version: '>=1.0.0' }] } }).ok);
+  t('a manifest without packages.requires is still valid', validateManifest(base).ok);
+  t('package dependency needs an id',
+    !validateManifest({ ...base, packages: { requires: [{ version: '>=1.0.0' }] } }).ok);
+  t('duplicate package dependencies rejected',
+    !validateManifest({ ...base, packages: { requires: [{ id: 'a.b.c.d' }, { id: 'a.b.c.d' }] } }).ok);
+  // ⚠ 依賴約束與 compatibility.framework 共用同一套語法；接受第二種寫法就是埋一個
+  // 「寫對了但不生效」的坑（`^1.0.0` 看起來完全合理，卻永遠匹配不上）。
+  t('dependency constraints use the one constraint syntax',
+    !validateManifest({ ...base, packages: { requires: [{ id: 'a.b.c.d', version: '^1.0.0' }] } }).ok
+    && !validateManifest({ ...base, packages: { requires: [{ id: 'a.b.c.d', version: '1.0.0' }] } }).ok
+    && validateManifest({ ...base, packages: { requires: [{ id: 'a.b.c.d', version: '=1.0.0' }] } }).ok);
+  t('a capability dependency may pin the provider version',
+    validateManifest({ ...base, integrations: { requires: [
+      { capability: 'android.app.api', required: true, version: '>=0.2.0' }] } }).ok
+    && !validateManifest({ ...base, integrations: { requires: [
+      { capability: 'android.app.api', required: true, version: 'latest' }] } }).ok);
+  t('an asset dependency may pin the asset package version',
+    validateManifest({ ...base, assets: { requires: [{ id: 'model.sensevoice', version: '>=1.0.0' }] } }).ok
+    && !validateManifest({ ...base, assets: { requires: [{ id: 'model.sensevoice', version: 'newest' }] } }).ok);
+
   t('public dependency/security metadata accepted', validateManifest({ ...base,
     public_metadata: {
       dependencies: { framework: '>=0.1.6', termux_packages: ['tmux'] },

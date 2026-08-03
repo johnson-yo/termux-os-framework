@@ -16,7 +16,9 @@ python3 -m py_compile scripts/reproducible-archive.py
 
 echo "== Core module self-tests =="
 for file in \
+  src/packages/version.mjs \
   src/packages/manifest.mjs \
+  src/packages/dependencies.mjs \
   src/packages/runtime-contract.mjs \
   src/packages/loader.mjs \
   src/assets/registry.mjs \

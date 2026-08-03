@@ -168,6 +168,8 @@ src/assets/runtime.mjs
 src/capabilities/CLAUDE.md
 src/capabilities/resolver.mjs
 src/packages/CLAUDE.md
+src/packages/dependencies.mjs
+src/packages/dependency-runtime.mjs
 src/packages/dev-runtime.mjs
 src/packages/fixtures/github.termux-os.fixture.asset-model/AGENTS.md
 src/packages/fixtures/github.termux-os.fixture.asset-model/LICENSE
@@ -202,8 +204,11 @@ src/packages/installed-root.mjs
 src/packages/loader.mjs
 src/packages/manifest.mjs
 src/packages/runtime-contract.mjs
+src/packages/version.mjs
 src/packages/workspace-hash.mjs
 src/server.mjs
+src/state/CLAUDE.md
+src/state/registry.mjs
 src/stage/CLAUDE.md
 src/stage/catalog.mjs
 src/stage/fixture.mjs
