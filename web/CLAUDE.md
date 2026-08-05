@@ -15,6 +15,27 @@ external provider. The browser may submit that value once through the shared Bro
 must never persist it; the Adapter backend stores it in private Package configuration and masks it
 from read responses.
 
+## Known issue — the install dialog never closes (reported 2026-08-05, unfixed)
+
+After a package install succeeds the dialog stays open and the confirm button does nothing;
+only a page reload clears it.
+
+`install-cancel` is a plain `type="button"` outside any form, so it closes the dialog only
+through a JS listener. The confirmation step attaches that listener and its `done()` cleanup
+removes it when the user confirms, which is correct for leaving the confirm role. The flow
+then finishes by relabelling that button as "done" and attaches nothing, so the control is
+given a new role after its only handler was taken away. It is decoration.
+
+The shape to avoid: a control whose label is reassigned without reassigning its behaviour.
+Nothing errors, and the button looks exactly as usable as before.
+
+Affects both the package install flow and the Framework update flow, which end the same way.
+The page behind the modal is already re-rendered correctly, which is why a reload appears to
+fix it and hides how long it has been broken.
+
+Fix by giving the button a close handler when it takes the final role, and assert it in
+`scripts/smoke-admin-shell.sh`.
+
 The Packages group exposes `Package Setting` as its operational control page.
 Its writes use the authenticated Admin API: port edits are persisted before a
 separate Package restart applies them, and disable/enable changes unload or
