@@ -2,6 +2,21 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.21
+
+- The login password is changed by a command you paste into Termux, not by the panel.
+  Rewriting the credential file voids every session including the one making the request,
+  so a panel doing it pulls the floor out from under itself — any step that goes wrong
+  removes exactly the entrance needed to fix it. Type the password, copy the command, paste
+  it. The command starts with a space, which keeps it out of Termux's shell history.
+- A service can name the app that owns it, and such workers no longer appear under Services.
+  They are that app's implementation detail, started and stopped from its own page; listing
+  them asked the user to manage something they never meant to, with two sets of controls
+  doing one thing. They stay supervised, and the page says how many there are and where
+  they live.
+- Packages can restart a worker they registered themselves. Configuration is read once at
+  start, so leaving the restart to the user turns a necessary step into a forgettable one.
+
 ## 0.2.20
 
 - **A missing capability now names the package that supplies it.** A capability
