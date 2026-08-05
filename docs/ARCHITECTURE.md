@@ -12,6 +12,7 @@ Authenticated HTTP and WebSocket API
 Framework Core
   |-- Package lifecycle and immutable Installed Root
   |-- Capability and Action registries
+  |-- State bus: one writer per fact, read by anyone
   |-- Stage service supervisor and desired state
   |-- App coordinator and capability coordination
   |-- Asset metadata and target verification
@@ -37,12 +38,38 @@ Framework loads Installed Packages. Development mounts are explicit, temporary s
 
 - `src/packages/`: manifest validation, Installed Root discovery, runtime contracts, and development mounts
 - `src/capabilities/`: provider discovery, binding, and invocation descriptors
+- `src/state/`: the state bus — declared facts, one writer each, in memory only
 - `src/stage/`: service definitions, desired state, process identity, health, and logs
 - `src/apps/`: application sessions and capability coordination
 - `src/assets/`: immutable asset registration and resolution metadata
 - `src/system/`: authentication, administration, jobs, access reporting, observations, and update control
 - `src/theatre/`: generic Action registry and sequential scene runner
 - `src/server.mjs`: authenticated HTTP/WebSocket entry point
+
+## Capability, feed, state
+
+Three mechanisms answer three different questions, and modelling one as another produces a
+system that looks right and reports wrong.
+
+| Mechanism | Question | Providers | Persistence |
+|---|---|---|---|
+| Capability | who can perform this ability | several, resolved by a binding | none |
+| Feed | what happened, in order | one, read by cursor | durable, lossless |
+| State | what is the fact right now | exactly one writer, no binding | none |
+
+A state has no binding because two writers of the same fact cannot both be right. It keeps no
+history and may drop intermediate values by design: a reader wants the current value, and an
+expired one is worse than none. Anything that must not lose an entry belongs in a feed, which
+already carries a cursor.
+
+Every state reports whether it is still `live`. A value whose writer has gone silent is served with
+the reason it went stale rather than withheld, because "the last thing we knew, and when" is a
+different and more useful answer than an empty field. Unloading a package revokes the states it
+declared immediately — a fact with no informant is not a fact.
+
+Writers reach the bus two ways, and both end at the same registry: a package loaded in the
+Framework process calls `context.states.set(...)`, while an independent service posts to
+`/api/states` with its injected System Key.
 
 ## Empty-Core invariant
 

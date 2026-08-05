@@ -2,7 +2,48 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
-## Unreleased
+## 0.2.19
+
+### Core mechanisms
+
+- **Dependencies became a ladder instead of a boolean.** A package's requirements now resolve
+  through missing -> installed -> configured -> reachable -> healthy -> compatible -> ready, so
+  "not ready" says which rung it stopped on. Service start, uninstall and doctor consult it, and
+  an install whose dependencies exist nowhere is refused up front rather than at first use. The
+  install preflight asks whether the gaps are *obtainable*, not whether they are already met —
+  otherwise nothing with a dependency could ever be installed first.
+- **A state bus, alongside capabilities and feeds.** A capability answers who can perform an
+  ability and may have several providers; a state answers what a fact is right now and therefore
+  has exactly one writer, no binding and no persistence. States are declared by a package,
+  written in-process through `context.states` or over `/api/states` by an independent service,
+  and revoked the moment the package unloads — a fact with no informant is not a fact. Each
+  reports whether it is still `live`, and a stale value is served with the reason instead of
+  being hidden. System -> States shows who informs whom.
+- **Assets can be fetched from where they already live.** An `assets.provides[].source` lists
+  files with a repository, an immutable revision and a SHA-256 each, so a large model is streamed
+  from its upstream home instead of being repackaged into an archive that duplicates every byte.
+  The hash is computed while streaming, which is what catches a truncated resume: a partial
+  download can otherwise look complete and report a plausible length.
+- **An asset may be offered without being fetched.** `optional: true` keeps a payload out of the
+  install and behind an explicit action, so a device does not download a variant it will never
+  load — one package offering two decoder tiers no longer costs every device both.
+- **The device profile is measured rather than assumed.** `htp` and `arch`/`qnn` were placeholders
+  that no code ever set, so every device reported "unknown" and every hardware-targeted package
+  resolved to needs-force; target matching was decorative. The DSP architecture now comes from a
+  published SoC table and the accelerator runtime version is read from the binary that will
+  actually be loaded. An unrecognised SoC still reports unknown: guessing here replaces "refuses
+  to install" with "installs and fails on every execution". `GET /api/system/device` exposes it,
+  because a rejected install is unanswerable without seeing your own side of the comparison.
+- Fixed a development dependency override that reported success and did nothing. The start gate
+  reads a snapshot taken when the workspace was mounted, and flipping the flag left that copy
+  untouched; the same lookup also resolved the released package instead of the workspace instance.
+- SDK-generated WebUI derives its package id from the active path instead of a constant, so a
+  workspace page no longer controls the installed package by accident.
+- An adapter may collect an external provider's credential through a marked password field that
+  is submitted once to its backend and never stored in the browser. Framework credentials remain
+  in the Browser Session; doctor now distinguishes the two rather than rejecting both.
+
+### Control centre and workspace
 
 - The control center is now operable without a shell. Changing the bind address is a
   toggle under System -> Administration, and because a bind only takes effect at startup
