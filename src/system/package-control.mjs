@@ -264,11 +264,25 @@ export function startPackageJob(action, target) {
     code: 'package_job_active', job: active,
   });
 
+  /**
+   * ⭐ 一次安裝可以是**一串**歸檔：依賴先裝，目標最後。
+   *
+   * 一個作業帶多個上傳，而不是排隊多個作業——作業引擎本來就一次只跑一個（有鎖），
+   * 排隊會讓「這一筆安裝」變成幾筆各自可能中斷的操作，而中斷點恰好是最難查的地方。
+   * 一個作業＝一把鎖＝一條恢復路徑。
+   */
+  const uploadIds = action === 'install' && Array.isArray(target.upload_ids)
+    ? target.upload_ids.map((id) => packageId(id, 'upload_id'))
+    : null;
   const normalized = action === 'check' || action === 'install'
-    ? { upload_id: packageId(target.upload_id, 'upload_id') }
+    ? (uploadIds
+      ? { upload_ids: uploadIds, upload_id: uploadIds.at(-1) }
+      : { upload_id: packageId(target.upload_id, 'upload_id') })
     : { package_id: packageId(target.package_id, 'package_id') };
-  if (normalized.upload_id && !getPackageUpload(normalized.upload_id, { internal: true })) {
-    throw Object.assign(new Error('unknown_upload'), { code: 'unknown_upload' });
+  for (const id of normalized.upload_ids ?? (normalized.upload_id ? [normalized.upload_id] : [])) {
+    if (!getPackageUpload(id, { internal: true })) {
+      throw Object.assign(new Error('unknown_upload'), { code: 'unknown_upload' });
+    }
   }
 
   const id = randomId('job');

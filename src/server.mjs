@@ -1376,6 +1376,8 @@ const server = http.createServer(async (req, res) => {
       try {
         const upload = getPackageUpload(m[1]);
         if (!upload) throw Object.assign(new Error('unknown_upload'), { code: 'unknown_upload' });
+        // 依賴在前、目標在後的安裝順序。只有 install 會用到它。
+        const installOrder = [];
         if (m[2] === 'install') {
           const body = await readBody(req);
           if (!upload.preflight?.ok || upload.status !== 'preflight_passed') {
@@ -1407,9 +1409,33 @@ const server = http.createServer(async (req, res) => {
                 { code: 'dependency_not_in_catalog', dependencies: plan },
               );
             }
+            /**
+             * ⭐ 缺的依賴**一起裝**，不是留給使用者自己去補。
+             *
+             * 只報出「你還缺什麼」而不動手，等於把一次意圖拆成幾次操作；中間任何一次
+             * 沒做，結果就是一個裝上了卻不能用的包——正是這套機制要消滅的狀態。
+             *
+             * ⚠ 只補**必需且 Catalog 拿得到**的缺口。可選依賴照 opkg 的 `Suggests` 辦：
+             * 列出來，不預裝——它存在的意義是讓人知道有這東西，不是替人決定。
+             */
+            for (const item of plan.supply ?? []) {
+              const remote = await downloadPackageFromRegistry({
+                source: item.source, repository: item.repository,
+                version: item.version, kind: item.kind, file: item.file,
+              });
+              const stored = await storePackageRemoteDownload(remote.response, remote.filename, {
+                expectedSize: remote.expected_size,
+                expectedSha256: remote.expected_sha256,
+                origin: remote.origin,
+              });
+              installOrder.push(stored.id);
+            }
           }
         }
-        const job = startPackageJob(m[2], { upload_id: upload.id });
+        installOrder.push(upload.id);
+        const job = startPackageJob(m[2], m[2] === 'install' && installOrder.length > 1
+          ? { upload_ids: installOrder }
+          : { upload_id: upload.id });
         const current = updatePackageUpload(upload.id, { job_id: job.id });
         return json(res, 202, { ok: true, upload: current, job });
       } catch (error) { return packageControlError(error); }

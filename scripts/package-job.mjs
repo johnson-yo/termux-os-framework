@@ -71,31 +71,58 @@ try {
   const delay = Number(process.env.PACKAGE_JOB_TEST_DELAY_MS);
   if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
 
-  let cliArgs;
-  let upload = null;
-  if (job.target.upload_id) {
-    upload = getPackageUpload(job.target.upload_id, { internal: true });
-    if (!upload) throw new Error('unknown_upload');
-    cliArgs = job.action === 'check'
-      ? ['check', upload.archive_path]
-      : ['install', upload.archive_path, upload.sha_path];
-  } else {
-    cliArgs = [job.action, job.target.package_id];
-  }
-
-  const child = spawn(nodeExecutable(), [io.frameworkRoot + '/scripts/package-manager.mjs', ...cliArgs], {
-    cwd: io.frameworkRoot,
-    env: { ...process.env, PACKAGES_INSTALLED_DIR: io.installedRoot },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  /**
+   * 一次安裝可以是一串歸檔：依賴先裝，目標最後。
+   *
+   * ⚠ 第一個失敗就停。繼續往下裝會得到一個「目標裝上了、它依賴的東西沒裝上」的系統——
+   * 那比整筆失敗難查得多，因為它看起來是成功的。
+   */
+  const uploadIds = job.target.upload_ids ?? (job.target.upload_id ? [job.target.upload_id] : []);
+  const uploads = uploadIds.map((id) => {
+    const found = getPackageUpload(id, { internal: true });
+    if (!found) throw new Error('unknown_upload');
+    return found;
   });
+  const upload = uploads.at(-1) ?? null;
+
   let stdout = '';
   let stderr = '';
+  let exitCode = 0;
   const persistOutput = () => writePackageJob(jobId, {
     output: tail(`${stdout}${stderr ? `\n${stderr}` : ''}`.trim()),
   });
-  child.stdout.on('data', (chunk) => { stdout = tail(stdout + chunk); persistOutput(); });
-  child.stderr.on('data', (chunk) => { stderr = tail(stderr + chunk); persistOutput(); });
-  const exitCode = await new Promise((resolve) => child.on('close', resolve));
+
+  const runOne = async (cliArgs) => {
+    const child = spawn(nodeExecutable(), [io.frameworkRoot + '/scripts/package-manager.mjs', ...cliArgs], {
+      cwd: io.frameworkRoot,
+      env: { ...process.env, PACKAGES_INSTALLED_DIR: io.installedRoot },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (chunk) => { stdout = tail(stdout + chunk); persistOutput(); });
+    child.stderr.on('data', (chunk) => { stderr = tail(stderr + chunk); persistOutput(); });
+    return new Promise((resolve) => child.on('close', resolve));
+  };
+
+  if (!uploads.length) {
+    exitCode = await runOne([job.action, job.target.package_id]);
+  } else if (job.action === 'check') {
+    exitCode = await runOne(['check', upload.archive_path]);
+  } else {
+    for (const [index, item] of uploads.entries()) {
+      if (uploads.length > 1) {
+        stdout = tail(`${stdout}\n== installing ${index + 1}/${uploads.length}: ${item.original_name}\n`);
+        persistOutput();
+      }
+      exitCode = await runOne(['install', item.archive_path, item.sha_path]);
+      // 依賴沒裝上就別裝依賴它的東西：半裝的結果看起來是成功的。
+      if (exitCode !== 0) break;
+      if (item !== upload) {
+        fs.rmSync(item.archive_path, { force: true });
+        fs.rmSync(item.sha_path, { force: true });
+        updatePackageUpload(item.id, { status: 'installed', job_id: jobId });
+      }
+    }
+  }
 
   let result = null;
   if (job.action === 'check' && stdout.trim()) {
