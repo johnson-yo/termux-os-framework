@@ -2,6 +2,33 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.20
+
+- **A missing capability now names the package that supplies it.** A capability
+  dependency deliberately names an ability rather than a package, so a consumer never
+  hard-codes its provider; the cost was that resolution ended at "no provider registered",
+  which is true and useless. The Registry index closes the gap, and confirming an install
+  fetches the required dependencies and installs them in one job, dependencies first. The
+  sequence stops at the first failure — a target installed without what it depends on looks
+  like success and is worse than an outright failure. Optional dependencies are listed and
+  never installed.
+- **Capability dependencies are read from the field packages actually use.** Nine packages
+  declare `capabilities.requires[].id`; the ladder only ever read
+  `integrations.requires[].capability`, which one uses. Every declared capability dependency
+  was therefore invisible to the check meant to enforce it — the manifest validated, the
+  field read back, and nothing consulted it.
+- Picks the right archive when one registered version carries several, which is how an
+  asset ships a portable graph alongside one compiled context per DSP architecture. Taking
+  the first match installs a variant built for other hardware.
+- The login password is one visible field with no confirmation to mistype. Re-typing is a
+  patch for masked input; with the value shown it protects nothing and adds a way to lock
+  yourself out. When the control is unavailable the page says why instead of presenting a
+  dead button — credentials managed outside the Framework and a read-only session used to
+  look identical.
+- Runtime detail moved to the foot of Overview. That page had no action on it, so it split
+  "what is happening" from "why" across two navigations and offered nothing at the end of
+  the second.
+
 ## 0.2.19
 
 ### Core mechanisms
