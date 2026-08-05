@@ -15,6 +15,35 @@ external provider. The browser may submit that value once through the shared Bro
 must never persist it; the Adapter backend stores it in private Package configuration and masks it
 from read responses.
 
+## Known issue — the login password cannot be changed at all on some devices (reported 2026-08-05, unfixed)
+
+`framework.sh reset-password --password ...` refuses with *credentials are managed by
+.../conf/framework.v1.json; change the source configuration instead*, and the HTTP route
+answers 409 `credentials_managed_externally`. Both read the same condition: `auth.admin_token`
+or `auth.admin_password` present in the config file. A device set up before credentials moved
+to the private auth file still carries them there, and every route to change the password is
+then closed.
+
+Three separate faults, in the order they should be fixed:
+
+1. **The panel now hands out a command that will be refused.** Switching the password control
+   to "copy a command" dropped the check that used to explain a non-editable credential
+   source, so the page offers the one thing it knows cannot work. This is a regression
+   introduced with the command flow, not a pre-existing bug. Restore the check *before*
+   building the command.
+2. **The error is a dead end.** "Change the source configuration instead" names a file and
+   stops. It should say which keys to remove — `auth.admin_token`, `auth.admin_password` —
+   and that removing them hands control back to the private auth file, which already exists.
+   An instruction that does not say what to do is a refusal wearing an explanation.
+3. **There is no supported migration.** The guard is right for an operator who deliberately
+   pinned credentials in config; it is a trap for a device that inherited them. Consider
+   `reset-password --adopt`, which moves control to the private file after saying exactly
+   what it is about to drop.
+
+This is also why the change-password button appeared permanently disabled in the earlier
+report: it was gated on `credentials.editable`, which is false for exactly this condition.
+The disabled button and the refused command are one fault seen twice.
+
 ## Known issue — the install dialog never closes (reported 2026-08-05, unfixed)
 
 After a package install succeeds the dialog stays open and the confirm button does nothing;
