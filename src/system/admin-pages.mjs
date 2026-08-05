@@ -34,6 +34,8 @@ export const CORE_ADMIN_PAGES = [
   { path: '/admin/system', title: '系统', order: 60, default_child: '/admin/system/system' },
   { path: '/admin/system/system', parent: '/admin/system', title: '系统信息', order: 10,
     description: '设备信息，以及当前正在运行的确切 Framework 构建。', renderer: 'system' },
+  { path: '/admin/system/states', parent: '/admin/system', title: '状态信号', order: 15,
+    description: '各 Package 登记的事实：谁负责告诉大家、此刻的值、以及它是否还可信。', renderer: 'states' },
   { path: '/admin/system/administration', parent: '/admin/system', title: '管理', order: 20,
     description: '管理浏览器会话、System Key、登录密码，以及控制台的监听地址与端口。', renderer: 'administration' },
   { path: '/admin/system/framework-update', parent: '/admin/system', title: 'Framework 更新', order: 30,

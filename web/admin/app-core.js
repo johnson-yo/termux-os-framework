@@ -846,6 +846,51 @@ async function copyText(textValue) {
   return copied;
 }
 
+// 状态总线：一个名字一个写入者。这里只做一件事——把「谁负责告诉大家什么、此刻是什么、
+// 还可不可信」摆在同一行。不可观测的状态机会在第一次出问题时变成一个哑巴。
+async function renderStates() {
+  const data = await apiData('/api/states');
+  const list = data.states ?? [];
+  const card = section('状态信号');
+  if (!list.length) {
+    card.body.append(valueRow('已登记', '无 —— 还没有 Package 声明任何状态'));
+    replacePage(card.card);
+    return;
+  }
+  const byDomain = new Map();
+  for (const state of list) {
+    const domain = state.name.split('.')[0];
+    if (!byDomain.has(domain)) byDomain.set(domain, []);
+    byDomain.get(domain).push(state);
+  }
+  const cards = [card.card];
+  card.body.append(
+    valueRow('已登记', `${list.length} 个`),
+    valueRow('当前可信', `${list.filter((s) => s.live).length} 个`),
+  );
+  for (const [domain, group] of [...byDomain].sort()) {
+    const block = section(`${domain}.*`);
+    for (const state of group) {
+      const shown = state.live
+        ? String(state.value)
+        : `${state.value === null ? '—' : state.value}（${state.stale_reason ?? 'not live'}）`;
+      block.body.append(statusRow(
+        state.name,
+        shown,
+        state.live ? 'ok' : 'warn',
+      ));
+      block.body.append(valueRow(
+        '　由谁写入',
+        `${state.owner?.package ?? '未知'}${state.owner?.service ? ` · ${state.owner.service}` : ''}`
+        + ` · seq ${state.seq}`
+        + (state.age_ms === null ? '' : ` · ${(state.age_ms / 1000).toFixed(1)}s 前`),
+      ));
+    }
+    cards.push(block.card);
+  }
+  replacePage(...cards);
+}
+
 async function renderRuntime() {
   const [overview, integrity, dev] = await Promise.all([
     apiData('/api/admin/overview'), apiData('/api/admin/integrity'), apiData('/api/dev/packages'),

@@ -28,7 +28,8 @@ Core must start successfully with zero installed Packages and report an empty Pa
 - `docs/`: public architecture and maintenance documentation
 - `scripts/`: lifecycle, release, audit, and test commands
 - `sdk/`: Extension Package SDK, templates, schemas, and examples
-- `src/`: Framework Core server and runtime modules
+- `src/`: Framework Core server and runtime modules (`src/state/` is the state bus: one writer per
+  name, in-memory only, read freely)
 - `web/`: Framework-owned administration interface
 - `dist/`: ignored generated releases
 - `tmp/`: ignored temporary work
@@ -46,6 +47,13 @@ There is deliberately no first-party `packages/` directory. Package source is de
 - Keep localized user content outside file headers; localization is allowed when it is a deliberate product concern.
 - Do not add a device IP, SSH alias, workstation path, private hostname, access token, or default password.
 - Do not push or create a remote unless the repository owner explicitly requests it.
+- A Capability answers "who can provide this ability" and may have several providers with a binding;
+  a state answers "what is the fact right now" and therefore has exactly one writer, no binding, and
+  no persistence. Do not model one as the other. The state bus may drop intermediate values by
+  design — anything lossless belongs in a feed, which already carries a cursor.
+- Register every new source file in `scripts/public-files.txt`. It is a per-file allowlist, not a
+  per-directory one, and a missing entry does not fail locally: it ships a runtime with the file
+  absent, and only the installer smoke catches it.
 - Read configuration through the migration in `src/system/config-migrate.mjs`; never dereference a
   stored setting directly. A bare `CFG.section.key` throws on any device installed before that key
   existed, which fails the update and rolls the device back — the further behind it is, the harder

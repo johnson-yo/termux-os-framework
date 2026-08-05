@@ -21,6 +21,7 @@ const PAGE_RENDERERS = {
   logs: renderLogs,
   runtime: renderRuntime,
   system: renderSystem,
+  states: renderStates,
   administration: renderAdministration,
   workspace: renderWorkspace,
   package_settings: loadPackageSettings,

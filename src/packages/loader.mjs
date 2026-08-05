@@ -13,6 +13,7 @@ import { MANIFEST_FILENAME, validateManifest } from './manifest.mjs';
 import { resolveInstalledPackages } from './installed-root.mjs';
 import { preflight } from './runtime-contract.mjs';
 import { registerAction, getAction, unregisterAction } from '../theatre/runtime.mjs';
+import { getState, listStates, registerState, setState, unregisterPackageStates } from '../state/registry.mjs';
 import {
   registerAssetProvider, listAssets, unregisterAssetProvider,
   resolveAsset as resolveAssetById, describeAsset as describeAssetById,
@@ -102,7 +103,7 @@ export const getPackage = (id) => {
     dir: r.dir, status: r.status, error: r.error ?? null, manifest: r.manifest ?? null,
     source: r.source ?? 'root', install: r.install ?? null, dev: r.dev ?? null,
     ports: getPackagePorts(id),
-    registered: { services: [...(r.registered?.services ?? [])], apps: [...(r.registered?.apps ?? [])] },
+    registered: { services: [...(r.registered?.services ?? [])], apps: [...(r.registered?.apps ?? [])], states: [...(r.registered?.states ?? [])] },
     runtime: r.status === 'loaded' ? getPackageRuntime(id) : null };
 };
 
@@ -148,6 +149,8 @@ export async function unregisterPackage(id) {
   }
   r.registered.cleanups = [];
   for (const aid of r.registered.actions) unregisterAction(aid);
+  // 沒有知情者的事實就是謊言：包一卸載，它寫的狀態立刻消失，而不是留著最後一個值。
+  unregisterPackageStates(id);
   for (const sid of r.registered.services) {
     const i = stageServices.findIndex((s) => s.id === sid);
     if (i >= 0) stageServices.splice(i, 1);
@@ -280,6 +283,19 @@ function makeContext(record, config, configPath, overrides = null, saveConfig = 
       describe: (assetId, opts) => describeAssetById(assetId, opts),
       list: (opts) => listAssets(opts),
     },
+    // 狀態總線（第三種機制）。Capability 回答「誰能提供這個能力」，可多家競標由綁定裁決；
+    // state 回答「這件事此刻的事實是什麼」，只能有一個知情者，所以沒有綁定也不許重名。
+    // 寫入者 push（本進程內的包直接 set，獨立服務走 POST /api/states），讀取者 GET。
+    states: {
+      register(declaration) {
+        const entry = registerState({ ...declaration, package: id });
+        record.registered.states.push(entry.name);
+        return entry;
+      },
+      set: (name, value) => setState(name, value, { package: id }),
+      get: (name) => getState(name),
+      list: () => listStates(),
+    },
     actions: {
       register(action) {
         const existing = getAction(action.id);
@@ -403,14 +419,14 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
   if (!fs.existsSync(manifestPath)) {
     if (source === 'installed') {
       packages.set(expectId, { id: expectId, dir, manifest: null, status: 'failed', source, install,
-        error: `installed version has no ${MANIFEST_FILENAME}`, registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], cleanups: [] } });
+        error: `installed version has no ${MANIFEST_FILENAME}`, registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], states: [], cleanups: [] } });
       log(`package ${expectId}: FAILED — installed version has no manifest`);
     }
     return; // 原始掃描根下無 Manifest 的目錄=非 Package，跳過
   }
 
   const fail = (id, manifest, error) => {
-    packages.set(id, { id, dir, manifest, status: 'failed', source, install, error, registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], cleanups: [] } });
+    packages.set(id, { id, dir, manifest, status: 'failed', source, install, error, registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], states: [], cleanups: [] } });
     log(`package ${id}: FAILED — ${error}`);
   };
 
@@ -438,7 +454,7 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
   const record = {
     id, packageId, workspaceSlug, dir, packageRoot, manifest, source, install, status: 'loaded', error: null,
     webRoot: path.join(dir, path.dirname(manifest.entrypoints.webui)),
-    registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], cleanups: [] },
+    registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], states: [], cleanups: [] },
   };
 
   if (manifest.disabled === true || !isPackageEnabled(id)) {
@@ -472,6 +488,20 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
     const mod = await import(entryUrl);
     if (typeof mod.register !== 'function') throw new Error('backend must export async function register(context)');
     packages.set(id, record); // 先入表：register 內的衝突錯誤能指回本 Package
+    // 054：Manifest 宣告的狀態先登記，register() 裡才能直接 set。聲明式的好處是
+    // **不跑起來也能審計整個命名空間**——誰負責告訴大家什麼，裝之前就看得見。
+    for (const declaration of manifest.states?.provides ?? []) {
+      const entry = registerState({
+        ...declaration,
+        name: declaration.id,
+        package: id,
+        // service 用實例作用域 id：工作區實例與正式版的 liveness 不能互相冒充。
+        service: declaration.service
+          ? (workspaceSlug ? `${declaration.service}@${workspaceSlug}` : declaration.service)
+          : null,
+      });
+      record.registered.states.push(entry.name);
+    }
     await mod.register(makeContext(record, config, configPath, contextOverrides, saveConfig));
     // 029 §12：Manifest 宣告的 integration/artifact 契約在載入成功後登記（先到先得，卸載時回收）
     record.registered.integrations = [];
@@ -520,7 +550,7 @@ export async function loadPackages({ roots, frameworkVersion, config = {}, confi
     const { entries, errors } = resolveInstalledPackages();
     for (const e of errors) {
       packages.set(e.id, { id: e.id, dir: e.dir, manifest: null, status: 'failed', source: 'installed', install: null,
-        error: e.error, registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], cleanups: [] } });
+        error: e.error, registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], states: [], cleanups: [] } });
       log(`package ${e.id}: FAILED — ${e.error}`);
     }
     for (const en of entries) {
