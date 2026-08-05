@@ -121,7 +121,17 @@ export async function getServiceStatus(id) {
   else if (meta.exited_at) proc = { state: 'exited', exit_code: meta.exit_code ?? null, exit_signal: meta.exit_signal ?? null, exited_at: meta.exited_at };
   else { clearMeta(id); proc = { state: 'stopped' }; } // stale metadata：清除，絕不發 signal
   return {
-    id, name: def.name, package: def.package ?? null, desired: getServiceDesired(id), process: proc,
+    id, name: def.name, package: def.package ?? null,
+    /**
+     * 這個 worker 屬於哪個 App。
+     *
+     * ⭐ 有主人的 worker 不是一個「系統服務」——它是那個 App 的實作細節，起停歸 App
+     * 自己的頁面管。服務頁列出它，等於請使用者去管一個他沒打算管的東西，
+     * 而且那裡做的操作與 App 頁面上的是同一件事，只是看起來像兩件。
+     * 監管照舊（重啟、健康、日誌都在），變的只是它出現在哪。
+     */
+    app: def.app ?? null,
+    desired: getServiceDesired(id), process: proc,
     health: await probeHealth(def, proc.state), ...logActivity(id),
   };
 }

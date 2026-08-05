@@ -22,6 +22,7 @@ import {
 // 運行時調用，非 top-level，ESM 惰性綁定安全。鏡像 context.assets.resolve/describe 的既有形態。
 import { describeCapability, invokeCapability } from '../capabilities/resolver.mjs';
 import { services as stageServices, getServiceDef } from '../stage/catalog.mjs';
+import { restartService } from '../stage/manager.mjs';
 import { getPackagePorts, registerPackagePorts, prunePackagePorts } from '../system/port-registry.mjs';
 import { isPackageEnabled } from '../system/package-settings.mjs';
 import { nodeExecutable } from '../system/node-runtime.mjs';
@@ -316,6 +317,22 @@ function makeContext(record, config, configPath, overrides = null, saveConfig = 
        * Packages must derive those paths from this, not from a local constant.
        */
       id: (localId) => ns(localId),
+      /**
+       * 重啟本包自己註冊的一個 worker。
+       *
+       * ⭐ 存在的理由是「配置只在啟動時讀一次」：改完配置讓使用者自己記得再按一次
+       * 重啟，等於把一個必然的步驟做成一個可以忘的步驟。
+       *
+       * ⛔ 只能重啟**自己註冊過的** id。包能重啟別人的服務，就等於一個包可以把
+       * 另一個包停掉，而擁有者對此一無所知。
+       */
+      async restart(localId) {
+        const serviceId = ns(localId);
+        if (!record.registered.services.includes(serviceId)) {
+          throw new Error(`${id} did not register service "${serviceId}"`);
+        }
+        return restartService(serviceId);
+      },
       register(def) {
         const serviceId = ns(def.id);
         const existing = getServiceDef(serviceId);
@@ -336,6 +353,8 @@ function makeContext(record, config, configPath, overrides = null, saveConfig = 
         stageServices.push({
           ...def,
           id: serviceId,
+          // App 型 Package 的 worker 標明主人；服務頁據此不把它當系統服務列出。
+          app: def.app ? ns(def.app) : null,
           command: def.command === process.execPath ? nodeExecutable() : def.command,
           package: id,
           env: {

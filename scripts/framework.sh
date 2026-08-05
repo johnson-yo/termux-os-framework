@@ -190,7 +190,13 @@ cmd_reset_password() {
   [ "$managed" = no ] || die "credentials are managed by $CONF; change the source configuration instead"
 
   local password confirm
-  if [ "${1:-}" = "--generate" ]; then
+  if [ "${1:-}" = "--password" ]; then
+    # 面板复制来的命令走这条路。⚠ 密码会出现在命令行里，所以复制出去的那条命令
+    # **以一个空格开头**——Termux 的系统 bashrc 设了 HISTCONTROL=ignoreboth，
+    # 空格开头的命令不进历史。这是这条路径唯一的暴露面，别把它去掉。
+    password="${2:-}"
+    [ -n "$password" ] || die "--password needs a value"
+  elif [ "${1:-}" = "--generate" ]; then
     password="$(AUTH_HELPER="$RUNTIME/src/system/auth-file.mjs" node --input-type=module -e \
       'const { generateAdminPassword } = await import(process.env.AUTH_HELPER); process.stdout.write(generateAdminPassword())')"
   else
@@ -848,7 +854,7 @@ case "${1:-}" in
   preflight-update) cmd_preflight_update "${@:2}" ;;
   update) cmd_update "${@:2}" ;;
   *)
-    echo "usage: framework.sh {bootstrap|start|stop|restart|status|logs|health|credentials|reset-password [--generate]|backup|rollback|preflight-update <tar> [sha]|update <tar> [sha]}" >&2
+    echo "usage: framework.sh {bootstrap|start|stop|restart|status|logs|health|credentials|reset-password [--generate|--password <value>]|backup|rollback|preflight-update <tar> [sha]|update <tar> [sha]}" >&2
     exit 1
     ;;
 esac

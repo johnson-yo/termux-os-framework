@@ -502,7 +502,16 @@ async function renderServices() {
       td.dataset.label = label;
       return td;
     };
-    for (const service of result.services ?? []) {
+    /**
+     * ⭐ 有主人的 worker 不列在这里。
+     *
+     * 它是那个 App 的实作细节，起停归 App 自己的页面管——在这里再列一次，等于请
+     * 使用者去管一个他没打算管的东西，而且两处做的是同一件事，看起来却像两件。
+     * ⚠ 但也不能装作它不存在：数出来，并指路它归谁管。
+     */
+    const all = result.services ?? [];
+    const owned = all.filter((service) => service.app);
+    for (const service of all.filter((service) => !service.app)) {
       const row = document.createElement('tr');
       const name = cell('Service'); name.append(text('b', service.name), text('small', service.id));
       const pkg = cell('Package');
@@ -526,6 +535,20 @@ async function renderServices() {
       row.append(name, pkg, desired, process, health, activity, actions); body.append(row);
     }
     table.append(body); scroll.append(table); panel.body.append(scroll);
+    if (owned.length) {
+      // 不装作它不存在：数出来，并说清楚去哪管它。
+      const note = text('p', '', 'description');
+      note.append(document.createTextNode(
+        `${tr('另有')} ${owned.length} ${tr('个 worker 由应用自己管理，不在此列出：')}`));
+      owned.forEach((service, index) => {
+        if (index) note.append(document.createTextNode('、'));
+        const link = document.createElement('a');
+        link.href = `/packages/${service.package}/`;
+        link.textContent = service.name ?? service.id;
+        note.append(link);
+      });
+      panel.body.append(note);
+    }
   } catch (error) { componentError(panel.body, { error: String(error) }); }
   replacePage(panel.card);
 }
@@ -686,47 +709,51 @@ async function renderAdministration() {
   );
 
   const password = section('登录密码');
-  // 本機進入面板本來就不需要密碼，再要求舊密碼只會擋住唯一有權改它的人。
-  // 這個密碼是給別的設備用的——所以說清楚它擋的是誰。
   password.body.append(text('p', credentials.local
     ? '这个密码只在别的设备通过局域网访问时才需要；本机进入不用密码。改完后其他设备上的登录会失效。'
-    : '设置新密码前先输入当前密码。更改成功后，已有的浏览器会话都会退出登录。',
-  'description'));
+    : '改完后所有设备上已有的登录都会失效。', 'description'));
 
   /**
-   * ⭐ 一个失效的按钮必须说明它为什么失效。
+   * ⭐ 面板不改密码，它只把命令交给你。
    *
-   * 这里原本只是把两个前置条件与起来传给 `disabled`，于是「凭证由外部管理」和
-   * 「这个会话只读」在屏幕上长得一模一样——都是一个按不动的按钮，而两者要做的事
-   * 完全不同。使用者唯一能得到的信息是「坏了」。
+   * 改密码要重写 Framework 自己的凭证文件、作废全部会话——而发起它的那个会话，
+   * 正是执行这件事的凭据。让面板去做，等于让一个东西在自己脚下抽掉地板：任何一步
+   * 出错，使用者失去的恰好是修复它所需要的入口。命令跑在 Termux 里就没有这个问题，
+   * 那里的权限来自你已经登录的这台设备本身，不来自任何一个会话。
+   *
+   * ⚠ 复制出去的命令**以一个空格开头**：Termux 的系统 bashrc 设了
+   * `HISTCONTROL=ignoreboth`，空格开头的命令不进 shell 历史。
    */
-  const blocked = !credentials.editable
-    ? '凭证由 Framework 之外管理（环境变量或配置文件），面板改不了它——改动那个来源再重启。'
-    : !canWrite() ? '当前浏览器会话是只读的。' : null;
-  if (blocked) password.body.append(text('p', blocked, 'alert bad'));
-
   const minimumLength = credentials.login_password?.minimum_length ?? 16;
   const passwordForm = document.createElement('form'); passwordForm.className = 'credential-form';
-  // ⚠ 明文，不遮蔽。遮蔽换来的是打错字看不见，而这里打错的后果是把自己关在面板外面。
-  // 也因此不再要第二个确认栏：确认是遮蔽输入的补丁，值看得见时它只多一种失败方式。
-  const currentPassword = document.createElement('input');
-  currentPassword.type = 'text'; currentPassword.placeholder = '当前密码';
-  currentPassword.required = !credentials.local; currentPassword.autocomplete = 'off';
+  // 明文，不遮蔽：遮蔽换来的是打错字看不见，而这条路上打错的后果是把自己关在门外。
   const newPassword = document.createElement('input');
   newPassword.type = 'text'; newPassword.placeholder = `新密码（至少 ${minimumLength} 个字符）`;
   newPassword.minLength = minimumLength; newPassword.required = true; newPassword.autocomplete = 'off';
-  const savePassword = actionButton('更改登录密码', 'primary', null, Boolean(blocked), 'submit');
-  if (!credentials.local) passwordForm.append(currentPassword);
-  passwordForm.append(newPassword, savePassword);
+  const commandBox = document.createElement('pre'); commandBox.className = 'logview'; commandBox.hidden = true;
+  const hint = text('p', '', 'meta');
+  const copyCommand = actionButton('生成并复制命令', 'primary', null, false, 'submit');
+  passwordForm.append(newPassword, copyCommand);
   passwordForm.addEventListener('submit', async (event) => {
-    event.preventDefault(); savePassword.disabled = true;
-    try {
-      await apiData('/api/admin/credentials/login-password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword.value, new_password: newPassword.value }) });
-      // 回 /admin 而不是登入頁：本機會就地重新取得 Session，別的設備才會看到登入框。
-      location.replace('/admin');
-    } catch (error) { administrationNotice = { kind: 'bad', text: `Login password: ${error.message ?? error}` }; renderAdministration(); }
+    event.preventDefault();
+    const value = newPassword.value;
+    if (value.length < minimumLength) {
+      hint.textContent = `${tr('密码至少要')} ${minimumLength} ${tr('个字符')}`;
+      hint.className = 'meta bad';
+      return;
+    }
+    // 单引号内再出现单引号要按 shell 的规矩转义，否则粘出去的命令会断在半路。
+    const command = ` ~/framework.sh reset-password --password '${value.replaceAll("'", `'\\''`)}'`;
+    commandBox.textContent = command;
+    commandBox.hidden = false;
+    const copied = await copyText(command);
+    hint.textContent = copied
+      ? '已复制。到 Termux 粘贴并回车即可生效——开头那个空格是有意的，它让这条命令不进 shell 历史。'
+      : '复制没成功，请手动选中上面那行。开头那个空格要一起带上，它让这条命令不进 shell 历史。';
+    hint.className = 'meta';
   });
-  password.body.append(passwordForm, valueRow('最短长度', `${minimumLength} ${tr('个字符')}`));
+  password.body.append(passwordForm, commandBox, hint,
+    valueRow('最短长度', `${minimumLength} ${tr('个字符')}`));
 
   // 语言放在这一页的最前面：它决定了下面所有内容用什么语言显示。
   const language = section('语言');
