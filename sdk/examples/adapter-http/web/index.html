@@ -18,6 +18,14 @@
 <main>
   <h1>Example HTTP Adapter <a class="back" href="/admin">Back to administration</a></h1>
   <section class="card">
+    <h2>External provider</h2>
+    <label>Endpoint <input id="endpoint" type="url" autocomplete="url"></label>
+    <label for="token">Provider credential</label>
+    <input id="token" type="password" data-provider-credential autocomplete="new-password">
+    <button id="save" type="button">Save and test</button>
+    <p class="note">The credential is submitted once to the Adapter backend, never browser storage, and is masked by read APIs.</p>
+  </section>
+  <section class="card">
     <h2>Status</h2>
     <pre id="status">-</pre>
     <p id="note" class="note"></p>

@@ -44,6 +44,9 @@ node -e 'const fs=require("fs");fs.writeFileSync(process.argv[1],JSON.stringify(
 },null,2)+"\n")' "$WORK/framework-auth.json" "$AUTH_TOKEN" "$AUTH_PASSWORD"
 mkdir -p "$WORK/extra"
 cp -a "$ROOT/sdk/examples/service-basic" "$WORK/extra/github.termux-os.service.example-counter"
+printf '\n<label for="token">Legacy Framework token</label><input id="token" type="password" value="legacy-value">\n' \
+  >>"$WORK/extra/github.termux-os.service.example-counter/web/index.html"
+cp -a "$ROOT/sdk/examples/adapter-http" "$WORK/extra/github.termux-os.adapter.example-http"
 
 CONFIG="$WORK/config.json" FRAMEWORK_AUTH_FILE="$WORK/framework-auth.json" AUTH_AUDIT_PATH="$AUDIT" BROWSER_SESSION_PATH="$SESSION_STORE" PACKAGES_INSTALLED_DIR="$WORK/packages" \
   PACKAGES_EXTRA_DIR="$WORK/extra" \
@@ -166,6 +169,18 @@ if grep -q '/admin/session.js' "$WORK/package.html"; then
   ok "host upgrades immutable Package HTML to Browser Session without rewriting Release"
 else
   bad "host upgrades immutable Package HTML to Browser Session without rewriting Release"
+fi
+if grep -q 'id="token" type="password" value=""' "$WORK/package.html" \
+  && ! grep -q 'value="legacy-value"' "$WORK/package.html"; then
+  ok "host clears legacy Framework token fields"
+else
+  bad "host clears legacy Framework token fields"
+fi
+curl -sf -b "$COOKIE" "$BASE/packages/github.termux-os.adapter.example-http/" >"$WORK/adapter.html"
+if grep -q 'id="token" type="password" data-provider-credential' "$WORK/adapter.html"; then
+  ok "host preserves marked external-provider credential fields"
+else
+  bad "host preserves marked external-provider credential fields"
 fi
 kill "$FW_PID" 2>/dev/null || true
 wait "$FW_PID" 2>/dev/null || true

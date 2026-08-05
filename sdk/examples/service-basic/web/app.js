@@ -6,7 +6,10 @@
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
 
-const PKG = '/api/packages/github.termux-os.service.example-counter';
+const pathPackageId = decodeURIComponent(location.pathname.split('/')[2] ?? '');
+const ACTIVE_PACKAGE_ID = /^[\w.@-]+$/.test(pathPackageId)
+  ? pathPackageId : 'github.termux-os.service.example-counter';
+const PKG = '/api/packages/' + ACTIVE_PACKAGE_ID;
 const $ = (id) => document.getElementById(id);
 const api = (path, opts = {}) => window.TermuxOS.api(path, opts);
 

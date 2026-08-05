@@ -97,11 +97,20 @@ export async function collectDoctor(id) {
     if (hasSharedSession) add('PASS', 'webui_uses_browser_session');
     else add('FAIL', 'webui_uses_browser_session', null,
       'Load /admin/session.js and call same-origin APIs through window.TermuxOS.api.');
-    const storesCredential = /\bid=["']token["']|localStorage|sessionStorage|Authorization\s*:\s*['"`]Bearer/i
+    const inputs = html.match(/<input\b[^>]*>/gi) ?? [];
+    const tokenInputs = inputs.filter((tag) => /\bid=["']token["']/i.test(tag));
+    const markedProviderInputs = inputs.filter((tag) =>
+      /\bdata-provider-credential(?:\s|=|>)/i.test(tag));
+    const unmarkedTokenInput = tokenInputs.some((tag) =>
+      !/\bdata-provider-credential(?:\s|=|>)/i.test(tag));
+    const browserCredentialStorage = /localStorage|sessionStorage|Authorization\s*:\s*['"`]Bearer/i
       .test(`${html}\n${webCode}`);
-    if (storesCredential) add('FAIL', 'webui_no_credential_input', null,
-      'Remove token fields, browser-stored credentials, and custom Bearer authentication.');
-    else add('PASS', 'webui_no_credential_input');
+    const providerCredentialOutsideAdapter = markedProviderInputs.length > 0
+      && !(m?.types ?? []).includes('adapter');
+    if (unmarkedTokenInput || browserCredentialStorage || providerCredentialOutsideAdapter) {
+      add('FAIL', 'webui_no_credential_input', null,
+        'Framework credentials stay in Browser Session. Only an Adapter may mark an external-provider password input with data-provider-credential; submit it once to the backend, never browser storage or custom Bearer code.');
+    } else add('PASS', 'webui_no_credential_input');
   }
 
   // Heuristic source scan for unsafe local assumptions.

@@ -75,6 +75,11 @@ grep -q '/admin/session.js' "$PKGS/$SVC/web/index.html" \
   && grep -q 'window.TermuxOS.api' "$PKGS/$SVC/web/app.js" \
   && ! grep -rqE 'id="token"|localStorage|FRAMEWORK_TOKEN' "$PKGS/$SVC/web" "$PKGS/$APP" \
   && ok "generated WebUI uses Browser Session without a token field" || bad "generated Browser Session contract"
+grep -q 'id="token".*data-provider-credential' "$PKGS/$ADP/web/index.html" \
+  && grep -q 'ACTIVE_PACKAGE_ID' "$PKGS/$ADP/web/app.js" \
+  && ! grep -rqE 'localStorage|sessionStorage|Authorization.*Bearer' "$PKGS/$ADP/web" \
+  && ok "generated Adapter separates external credentials and supports Workspace instance routes" \
+  || bad "generated Adapter credential or Workspace route contract"
 grep -q 'process.env.PORT' "$PKGS/$SVC/service/main.mjs" \
   && grep -q 'TERMUX_OS_SYSTEM_KEY' "$PKGS/$SVC/service/main.mjs" \
   && grep -q 'TERMUX_OS_FRAMEWORK_URL' "$PKGS/$APP/app/worker.mjs" \
@@ -83,8 +88,13 @@ grep -q 'process.env.PORT' "$PKGS/$SVC/service/main.mjs" \
 
 echo "--- 2. doctor positive and negative checks ---"
 t "generated Package has zero doctor FAIL items" $SDK doctor $SVC
+t "generated Adapter provider credential boundary passes doctor" $SDK doctor $ADP
 $SDK doctor $SVC --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] and d["counts"]["FAIL"]==0' \
   && ok "doctor JSON includes counts" || bad "doctor JSON"
+cp "$PKGS/$SVC/web/index.html" "$PKGS/$SVC/web/index.html.bak"
+printf '\n<input id="token" type="password" data-provider-credential>\n' >>"$PKGS/$SVC/web/index.html"
+tf "external provider credential field outside Adapter fails doctor" $SDK doctor $SVC
+mv "$PKGS/$SVC/web/index.html.bak" "$PKGS/$SVC/web/index.html"
 test_ip=$(printf '%s.%s.%s.%s' 10 23 45 67)
 echo "const ip='$test_ip';" >> "$PKGS/$SVC/service/main.mjs"
 tf "hard-coded device IP fails doctor" $SDK doctor $SVC

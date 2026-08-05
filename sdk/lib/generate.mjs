@@ -150,6 +150,11 @@ function manifestJson(v) {
 }
 
 function agentsMd(v) {
+  const credentialRule = v.TYPE === 'adapter'
+    ? `- The WebUI may collect an external provider credential only in a blank password input
+  marked \`data-provider-credential\`. Submit it through \`window.TermuxOS.api\`, persist it only
+  in private backend configuration, mask read responses, and never use browser storage.`
+    : `- The WebUI never asks for a token or stores a credential in the browser.`;
   return `# Package instructions — ${v.ID}
 
 ## Responsibility
@@ -173,8 +178,9 @@ Create persistent files only when missing and never overwrite user configuration
 - Supervised processes use \`TERMUX_OS_SYSTEM_KEY\` and
   \`TERMUX_OS_FRAMEWORK_URL\`. In-process code uses \`context.auth\` and
   \`context.ports\`. Never read Framework's internal auth config.
-- WebUI uses \`/admin/session.js\` and \`window.TermuxOS.api\`; never add a token
-  input or browser-stored credential.
+- WebUI uses \`/admin/session.js\` and \`window.TermuxOS.api\`; it never asks for
+  the Framework System Key or implements a custom login.
+${credentialRule}
 - Keep the Package page portrait-phone-first and register only its owned
   \`/packages/${v.ID}/\` route in the Manifest menu.
 
@@ -211,7 +217,15 @@ function webIndex(v) {
 <body>
 <main>
   <h1>${v.NAME} <a class="back" href="/admin">Back to administration</a></h1>
-  <section class="card">
+${v.TYPE === 'adapter' ? `  <section class="card">
+    <h2>External provider</h2>
+    <label>Endpoint <input id="endpoint" type="url" autocomplete="url"></label>
+    <label for="token">Provider credential</label>
+    <input id="token" type="password" data-provider-credential autocomplete="new-password">
+    <button id="save" type="button">Save and test</button>
+    <p class="note">The credential is sent once to this Adapter backend. It is not stored in the browser or returned by read APIs.</p>
+  </section>
+` : ''}  <section class="card">
     <h2>Status</h2>
     <pre id="status">-</pre>
     <p id="note" class="note"></p>
@@ -237,7 +251,9 @@ function webApp(v) {
  * [POS]: A generated Extension Package source file.
  * [PROTOCOL]: Keep this English header synchronized with Package behavior.
  */
-const PKG = '/api/packages/${v.ID}';
+const pathPackageId = decodeURIComponent(location.pathname.split('/')[2] ?? '');
+const ACTIVE_PACKAGE_ID = /^[\\w.@-]+$/.test(pathPackageId) ? pathPackageId : '${v.ID}';
+const PKG = '/api/packages/' + ACTIVE_PACKAGE_ID;
 const $ = (id) => document.getElementById(id);
 const api = (path, opts = {}) => window.TermuxOS.api(path, opts);
 
@@ -247,10 +263,25 @@ async function loadStatus() {
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail ?? result.error ?? \`HTTP \${response.status}\`);
     $('status').textContent = JSON.stringify(result, null, 2);
+${v.TYPE === 'adapter' ? `    if (!$('endpoint').value) $('endpoint').value = result.config?.endpoint ?? '';
+` : ''}
     $('note').textContent = '';
   } catch (e) { $('note').textContent = String(e); }
 }
+${v.TYPE === 'adapter' ? `
+async function saveProvider() {
+  const body = { endpoint: $('endpoint').value.trim() };
+  if ($('token').value) body.credential = $('token').value;
+  const response = await api(PKG + '/config', { method: 'POST', body: JSON.stringify(body) });
+  const result = await response.json();
+  $('token').value = '';
+  if (!response.ok) throw new Error(result.detail ?? result.error ?? \`HTTP \${response.status}\`);
+  await loadStatus();
+}
+` : ''}
 window.TermuxOS.ready.then(() => {
+${v.TYPE === 'adapter' ? `  $('save').addEventListener('click', () => saveProvider().catch((e) => { $('note').textContent = String(e); }));
+` : ''}
   loadStatus();
   setInterval(loadStatus, 2000);
 });
@@ -270,6 +301,9 @@ main { width: min(720px, 100%); margin: 0 auto; }
 h1 { font-size: 1.1rem; color: #8ab4f8; margin: .5rem 0; display: flex; justify-content: space-between; gap: .7rem; flex-wrap: wrap; }
 h2 { font-size: 1rem; color: #8ab4f8; margin-bottom: .6rem; }
 .card { background: #16181c; border: 1px solid #2a2f36; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+label { display: block; margin: .55rem 0 .25rem; color: #bdc1c6; }
+input { width: 100%; min-height: 42px; margin-bottom: .6rem; padding: .55rem .65rem; color: #e8eaed;
+  background: #111418; border: 1px solid #3c4043; border-radius: 6px; }
 button { padding: 8px 14px; border: 0; border-radius: 6px; background: #2f6fed; color: #fff; cursor: pointer; }
 pre { font-family: ui-monospace, monospace; font-size: .8rem; background: #111418; border: 1px solid #2a2f36;
   border-radius: 6px; padding: .5rem; white-space: pre-wrap; max-height: 20rem; overflow-y: auto; }
@@ -348,8 +382,9 @@ const DEFAULTS = {
 export function loadConfig(file) {
   if (!fs.existsSync(file)) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(DEFAULTS, null, 2) + '\\n');
+    fs.writeFileSync(file, JSON.stringify(DEFAULTS, null, 2) + '\\n', { mode: 0o600 });
   }
+  try { fs.chmodSync(file, 0o600); } catch { /* Best effort on filesystems without modes. */ }
   return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(file, 'utf8')) };
 }
 `;
@@ -780,8 +815,9 @@ const EDITABLE = ['endpoint', 'credential'];
 export function loadConfig(file) {
   if (!fs.existsSync(file)) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(DEFAULTS, null, 2) + '\\n');
+    fs.writeFileSync(file, JSON.stringify(DEFAULTS, null, 2) + '\\n', { mode: 0o600 });
   }
+  try { fs.chmodSync(file, 0o600); } catch { /* Best effort on filesystems without modes. */ }
   return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(file, 'utf8')) };
 }
 
@@ -791,7 +827,11 @@ export function saveConfig(file, body) {
   for (const k of EDITABLE) {
     if (typeof body[k] === 'string') { cfg[k] = body[k]; applied.push(k); }
   }
-  if (applied.length) fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + '\\n');
+  if (applied.length) {
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\\n', { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  }
   return applied;
 }
 `,

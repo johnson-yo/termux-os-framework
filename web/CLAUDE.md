@@ -9,6 +9,12 @@ in step with the sources and fails the suite when they fall behind; a string tha
 across lines or assembled in a template cannot be a catalog key, so write it as one literal and wrap
 any unit separately. Protocol nouns stay as they are — Framework, Package, Adapter, System Key, SHA-256, GitHub, Registry — so what the panel says still matches the documentation and the logs. Engine output and status values are evidence, not prose: map a known status to a word when displaying it, and pass anything unknown through unchanged rather than hiding it behind a guess.
 
+Package HTML compatibility hides only legacy Framework token fields. An Adapter may mark a
+password input with `data-provider-credential` when it must collect a credential belonging to an
+external provider. The browser may submit that value once through the shared Browser Session, but
+must never persist it; the Adapter backend stores it in private Package configuration and masks it
+from read responses.
+
 The Packages group exposes `Package Setting` as its operational control page.
 Its writes use the authenticated Admin API: port edits are persisted before a
 separate Package restart applies them, and disable/enable changes unload or

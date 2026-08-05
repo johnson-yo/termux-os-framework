@@ -15,8 +15,9 @@ const EDITABLE = ['endpoint', 'credential'];
 export function loadConfig(file) {
   if (!fs.existsSync(file)) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(DEFAULTS, null, 2) + '\n');
+    fs.writeFileSync(file, JSON.stringify(DEFAULTS, null, 2) + '\n', { mode: 0o600 });
   }
+  try { fs.chmodSync(file, 0o600); } catch { /* Best effort on filesystems without modes. */ }
   return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(file, 'utf8')) };
 }
 
@@ -26,6 +27,10 @@ export function saveConfig(file, body) {
   for (const k of EDITABLE) {
     if (typeof body[k] === 'string') { cfg[k] = body[k]; applied.push(k); }
   }
-  if (applied.length) fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + '\n');
+  if (applied.length) {
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  }
   return applied;
 }

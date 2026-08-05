@@ -12,6 +12,9 @@ main { width: min(720px, 100%); margin: 0 auto; }
 h1 { font-size: 1.1rem; color: #8ab4f8; margin: .5rem 0; display: flex; justify-content: space-between; gap: .7rem; flex-wrap: wrap; }
 h2 { font-size: 1rem; color: #8ab4f8; margin-bottom: .6rem; }
 .card { background: #16181c; border: 1px solid #2a2f36; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+label { display: block; margin: .55rem 0 .25rem; color: #bdc1c6; }
+input { width: 100%; min-height: 42px; margin-bottom: .6rem; padding: .55rem .65rem; color: #e8eaed;
+  background: #111418; border: 1px solid #3c4043; border-radius: 6px; }
 button { padding: 8px 14px; border: 0; border-radius: 6px; background: #2f6fed; color: #fff; cursor: pointer; }
 pre { font-family: ui-monospace, monospace; font-size: .8rem; background: #111418; border: 1px solid #2a2f36;
   border-radius: 6px; padding: .5rem; white-space: pre-wrap; max-height: 20rem; overflow-y: auto; }

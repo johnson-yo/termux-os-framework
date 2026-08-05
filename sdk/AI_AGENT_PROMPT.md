@@ -54,8 +54,12 @@ user for the feature request before editing.]
   Core group. Adapters belong under Adapters; use Applications, Services, or
   Packages when those groups match the Package's role.
 - Package WebUI uses the Framework Browser Session through
-  `/admin/session.js` and `window.TermuxOS.api`. Do not add a token input,
-  browser storage credential, or custom login.
+  `/admin/session.js` and `window.TermuxOS.api`. Do not ask for the Framework
+  System Key or add a custom login. If an Adapter must collect an external
+  provider credential, use a password input marked `data-provider-credential`,
+  submit it once to the Adapter backend, keep it out of browser storage and
+  browser-built Bearer headers, store it in private Package configuration, and
+  mask it from read responses.
 - Design the WebUI for a portrait phone first. It must remain usable without
   horizontal scrolling, with readable density, shared card spacing, natural
   button wrapping, and accessible touch targets.

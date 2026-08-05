@@ -8,6 +8,9 @@ The SDK creates and operates independent Extension Package workspaces. It must n
 - Return non-zero on failure and include a stable error code plus a concrete next step.
 - Keep templates, generated documentation, headers, and CLI help in English.
 - Never generate a credential, device address, workstation path, provider identity, or engine dependency into a Package.
+- Generated Adapter guidance may expose a blank `data-provider-credential` password field for an
+  external provider. It must never contain a default value, use browser storage, or expose the
+  saved value through a read API.
 - Automated verification must report only the evidence produced by its declared checks.
 - Keep `AI_AGENT_PROMPT.md`, generated manifests, and generated WebUI aligned with the current Core contracts.
 - Keep `PUBLISHING.md` aligned with the public GitHub, Registry, and phone-market contracts.
