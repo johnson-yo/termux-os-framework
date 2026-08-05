@@ -68,10 +68,27 @@ export function declaredDependencies(manifest) {
       required: item?.required !== false,
     });
   }
-  for (const item of manifest?.integrations?.requires ?? []) {
+  /**
+   * ⚠ 兩個宣告處都讀，而且**先讀包實際在用的那個**。
+   *
+   * 本檔開頭那句「不另建平行 schema」說對了道理，卻只讀了 `integrations.requires`——
+   * 而真機上九個包寫的是 `capabilities.requires[].id`，只有一個寫 `integrations`。
+   * 於是每一個包宣告的 Capability 依賴都**從未被這個階梯看見過**：宣告讀得出、
+   * 校驗也放行（那裡只查它是不是陣列），只是沒有任何人拿它做過判斷。
+   *
+   * 真正的代價在別處才顯形：npu-top 宣告了它需要 App API，卻照樣裝得上、
+   * 照樣在沒有提供方的設備上跑，直到使用者發現那個功能是死的。
+   */
+  const capabilityRequires = [
+    ...(manifest?.capabilities?.requires ?? []).map((item) => ({ ...item, capability: item?.id })),
+    ...(manifest?.integrations?.requires ?? []),
+  ];
+  for (const item of capabilityRequires) {
+    const id = str(item?.capability);
+    if (!id || nodes.some((node) => node.kind === DEP_KIND.CAPABILITY && node.id === id)) continue;
     nodes.push({
       kind: DEP_KIND.CAPABILITY,
-      id: str(item?.capability),
+      id,
       version: item?.version ?? null,
       required: item?.required !== false,
       degraded_behavior: item?.degraded_behavior ?? null,
@@ -375,6 +392,26 @@ if (process.argv.includes('--self-test')
     t('a missing optional dependency never blocks an install',
       optional.installable === true && optional.missing_from_catalog.length === 0);
   }
+
+  /**
+   * ⭐ 這一條鎖的是「宣告被誰讀」。
+   *
+   * 真機上九個包把 Capability 依賴寫在 `capabilities.requires[].id`，而這裡原本只讀
+   * `integrations.requires[].capability`——於是每一個宣告都從未被看見過。校驗放行
+   * （那裡只查是不是陣列），宣告讀得出，只是沒有任何人拿它做過判斷。
+   */
+  t('a capability dependency is seen where packages actually declare it',
+    declaredDependencies({ capabilities: { requires: [{ id: 'termux-os.app.api', required: false }] } })
+      .some((node) => node.kind === DEP_KIND.CAPABILITY && node.id === 'termux-os.app.api'
+        && node.required === false));
+  t('the legacy declaration site still works',
+    declaredDependencies({ integrations: { requires: [{ capability: 'legacy.api' }] } })
+      .some((node) => node.kind === DEP_KIND.CAPABILITY && node.id === 'legacy.api' && node.required));
+  t('the same capability declared in both places is one dependency, not two',
+    declaredDependencies({
+      capabilities: { requires: [{ id: 'both.api' }] },
+      integrations: { requires: [{ capability: 'both.api' }] },
+    }).filter((node) => node.kind === DEP_KIND.CAPABILITY && node.id === 'both.api').length === 1);
 
   t('lowestState reports the rung the whole set is stuck on',
     lowestState([DEP_STATE.READY, DEP_STATE.CONFIGURED, DEP_STATE.HEALTHY]) === DEP_STATE.CONFIGURED

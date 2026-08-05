@@ -151,8 +151,11 @@ export async function dependencyTree(rootManifest, manifestFor = () => null) {
  * ⚠ Capability 在預檢時**刻意不探**：安裝前提供方多半還沒起來，探它只會得到一個
  * 誠實但無用的 missing。它歸啟動門禁管，那時候答案才有意義。
  */
-export function resolveDeclaredDependencies(declared, { catalog = () => null } = {}) {
-  return installPlan(declared, {
+export function resolveDeclaredDependencies(declared, {
+  catalog = () => null,
+  providers = () => [],
+} = {}) {
+  const plan = installPlan(declared, {
     catalog,
     probes: {
       [DEP_KIND.PACKAGE]: (id) => packageFacts(id),
@@ -160,6 +163,40 @@ export function resolveDeclaredDependencies(declared, { catalog = () => null } =
       [DEP_KIND.CAPABILITY]: () => null,
     },
   });
+
+  /**
+   * ⭐ 把「缺一個能力」翻成「裝這個包就行」。
+   *
+   * 一個 Capability 依賴聲明的是一種**能力**，不是一個包——這是刻意的，消費方
+   * 不該寫死誰提供它。代價是解析到此為止：`no provider registered` 是誠實的，
+   * 但它不可行動，因為沒有任何地方記得誰供應這個能力。Registry 索引補上了那一步。
+   *
+   * ⚠ 有多個提供方時**不替使用者選**。把候選都列出來，讓確認表去問——
+   * 隨手挑第一個會讓「裝上了但不是我要的那個」變成一種安靜的失敗。
+   */
+  const supply = [];
+  for (const node of plan.nodes ?? []) {
+    if (node.kind !== DEP_KIND.CAPABILITY || node.state !== DEP_STATE.MISSING) continue;
+    const candidates = providers(node.id, DEP_KIND.CAPABILITY);
+    if (!candidates.length) continue;
+    node.providers = candidates;
+    if (candidates.length === 1) supply.push(candidates[0]);
+    else node.needs_choice = true;
+  }
+
+  const already = new Set(plan.install_order ?? []);
+  const additions = supply.filter((item) => item.package_id && !already.has(item.package_id));
+  if (!additions.length) return plan;
+  return {
+    ...plan,
+    // 缺的能力現在補得上，所以它不再是「裝不了」的理由。
+    installable: plan.installable
+      && !(plan.missing_from_catalog ?? []).some((node) => node.kind === DEP_KIND.PACKAGE),
+    download_bytes: (plan.download_bytes ?? 0)
+      + additions.reduce((sum, item) => sum + (item.size ?? 0), 0),
+    install_order: [...(plan.install_order ?? []), ...additions.map((item) => item.package_id)],
+    supply: additions,
+  };
 }
 
 /**

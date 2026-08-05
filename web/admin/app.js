@@ -19,7 +19,6 @@ const PAGE_RENDERERS = {
   applications: renderApplications,
   services: renderServices,
   logs: renderLogs,
-  runtime: renderRuntime,
   system: renderSystem,
   states: renderStates,
   administration: renderAdministration,

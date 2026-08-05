@@ -176,6 +176,21 @@ function normalizePackages(value) {
           upstream_ref: upstreamRef,
           published_at: typeof version.published_at === 'string' ? version.published_at : null,
           details: version.details && typeof version.details === 'object' ? version.details : null,
+          /**
+           * 依賴索引：一個歸檔一條，記它 provides／depends 什麼。
+           *
+           * ⚠ 這個正規化器是**白名單**——沒列出的欄位一律丟掉。加了索引卻忘了這一行，
+           * 表現不是報錯而是「設備上永遠查不到任何提供方」：Registry 答得好好的，
+           * 快照裡卻什麼都沒有，而兩邊看起來都很正常。實測就是這樣卡了一次。
+           */
+          packages: Array.isArray(version.packages)
+            ? version.packages.filter((entry) => entry && typeof entry === 'object').map((entry) => ({
+              file: typeof entry.file === 'string' ? entry.file : null,
+              package_id: typeof entry.package_id === 'string' ? entry.package_id : null,
+              provides: Array.isArray(entry.provides) ? entry.provides : [],
+              depends: Array.isArray(entry.depends) ? entry.depends : [],
+            }))
+            : [],
           files: version.files.map(normalizeFile),
         };
       }),
@@ -455,17 +470,17 @@ export function packageRegistryContainsSha256(sha256) {
  *
  * @returns `{ package_id, repository, source, version, size, sha256, kind, file }` 或 `null`
  */
-export function packageRegistryFindByPackageId(packageId) {
-  const wanted = String(packageId ?? '').trim();
-  if (!wanted) return null;
-  const project = state.packages.find((item) => item.package_id === wanted);
-  if (!project) return null;
-  const version = project.versions.find((item) => item.version === project.latest_version)
-    ?? project.versions.at(-1);
-  const file = version?.files.find((item) => item.kind === 'source_tar' && item.name.endsWith('.tar.gz'));
-  if (!version || !file) return null;
+/** 一個候選歸檔 → 下載坐標。`archiveName` 缺席時退回該版本唯一的 source_tar。 */
+function downloadCoordinates(project, version, archiveName, packageId) {
+  const files = version.files.filter((item) => item.kind === 'source_tar' && item.name.endsWith('.tar.gz'));
+  // ⚠ 一個版本可以有多個歸檔（SenseVoice 1.0.0 下同時有可移植圖與兩個機型檔 ctx）。
+  //    按名字挑；挑不中時只有在**唯一**一個候選時才敢用它，否則寧可說不知道——
+  //    猜錯的後果是裝上一個看起來對、其實是別的機型檔的包。
+  const file = (archiveName && files.find((item) => item.name === archiveName))
+    ?? (files.length === 1 ? files[0] : null);
+  if (!file) return null;
   return {
-    package_id: wanted,
+    package_id: packageId,
     source: project.source,
     repository: project.repository,
     version: version.version,
@@ -474,6 +489,48 @@ export function packageRegistryFindByPackageId(packageId) {
     size: file.size ?? null,
     sha256: file.sha256 ?? null,
   };
+}
+
+const latestVersionOf = (project) => project.versions.find((item) => item.version === project.latest_version)
+  ?? project.versions.at(-1);
+
+export function packageRegistryFindByPackageId(packageId) {
+  const wanted = String(packageId ?? '').trim();
+  if (!wanted) return null;
+  const project = state.packages.find((item) => item.package_id === wanted);
+  if (!project) return null;
+  const version = latestVersionOf(project);
+  if (!version) return null;
+  // 索引記得哪個歸檔是這個 package_id 的；沒有索引時退回唯一候選。
+  const indexed = (version.packages ?? []).find((entry) => entry.package_id === wanted);
+  return downloadCoordinates(project, version, indexed?.file, wanted);
+}
+
+/**
+ * 誰提供這個 Capability／Asset。
+ *
+ * ⭐ 這是「缺一個能力」與「裝這個包就行」之間唯一缺的一步。在此之前，一個
+ * Capability 依賴只說得出一種能力的名字，而沒有任何地方記得哪個包供應它——
+ * 於是解析停在 `no provider registered`，而那句話對使用者不可行動。
+ *
+ * ⚠ 有多個提供方時**不猜**。返回全部候選，由調用方決定要不要問人。隨手挑第一個
+ * 會讓「裝上了但不是我要的那個」變成一種安靜的失敗。
+ */
+export function packageRegistryFindProviders(capabilityId, kind = null) {
+  const wanted = String(capabilityId ?? '').trim();
+  if (!wanted) return [];
+  const found = [];
+  for (const project of state.packages) {
+    const version = latestVersionOf(project);
+    for (const entry of version?.packages ?? []) {
+      const hit = (entry.provides ?? []).some((item) => item.id === wanted
+        && (kind === null || item.kind === kind));
+      if (!hit) continue;
+      const coordinates = downloadCoordinates(project, version, entry.file, entry.package_id ?? null);
+      if (coordinates) found.push(coordinates);
+    }
+  }
+  return found;
 }
 
 async function downloadSelectedFromRegistry(selectionInput, requiredType = null) {

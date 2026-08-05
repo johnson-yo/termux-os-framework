@@ -127,10 +127,20 @@ CODE="$(curl -s -o "$WORK/password-short.json" -w '%{http_code}' -b "$COOKIE" -H
   -H 'Content-Type: application/json' --data '{"new_password":"short","confirm_password":"short"}' \
   "$BASE/api/admin/credentials/login-password")"
 if [ "$CODE" = 400 ] && grep -q login_password_too_short "$WORK/password-short.json"; then ok "password rules still apply locally"; else bad "password rules still apply locally HTTP $CODE"; fi
-CODE="$(curl -s -o "$WORK/password-mismatch.json" -w '%{http_code}' -b "$COOKIE" -H "X-CSRF-Token: $(node -e 'process.stdout.write(require(process.argv[1]).csrf_token)' "$WORK/login.json")" \
-  -H 'Content-Type: application/json' --data '{"new_password":"a-long-new-password","confirm_password":"a-different-password"}' \
-  "$BASE/api/admin/credentials/login-password")"
-if [ "$CODE" = 400 ] && grep -q login_password_mismatch "$WORK/password-mismatch.json"; then ok "password confirmation still required locally"; else bad "password confirmation locally HTTP $CODE"; fi
+# ⚠ 不再有确认栏。再输一次是**遮蔽输入**的补丁——看不见自己打了什么才需要打两遍；
+# 这个字段现在是明文的，确认保护不了任何东西，只多一种把自己关在门外的方式。
+# 这里只断言页面上不再要求它；真去改一次会作废本 smoke 的会话，让后面全部误红。
+if ! grep -q 'confirm_password' "$ROOT/src/server.mjs" \
+  && ! grep -q 'confirmPassword' "$ROOT/web/admin/app-core.js"; then
+  ok "password change takes one visible field, with no confirmation to mistype"
+else
+  bad "password confirmation field still present"
+fi
+if grep -q "newPassword.type = 'text'" "$ROOT/web/admin/app-core.js"; then
+  ok "the new password is shown, not masked"
+else
+  bad "new password is still masked"
+fi
 
 # 本機免密碼是因為機主就在那台機器前面。從別的位址改密碼仍然要先證明知道舊的，
 # 否則只要連得到這個埠就能把管理員鎖在門外。
@@ -276,19 +286,27 @@ else
 fi
 
 echo "--- 5. unified pages ---"
-curl -sf -b "$COOKIE" "$BASE/admin/status/runtime" >"$WORK/runtime-shell.html"
-if grep -q 'id="navigation"' "$WORK/runtime-shell.html" \
-  && grep -q '/admin/app.js' "$WORK/runtime-shell.html"; then
-  ok "Runtime page is rendered inside the unified Shell"
+# ⚠ 运行时不再有自己的分页：那一页上一个可做的操作都没有，却把「先看状态、再看原因」
+# 拆成了两次导航。它的两张卡现在接在概览底下。
+curl -sf -b "$COOKIE" "$BASE/admin/status/overview" >"$WORK/overview-shell.html"
+if grep -q 'id="navigation"' "$WORK/overview-shell.html" \
+  && grep -q '/admin/app.js' "$WORK/overview-shell.html"; then
+  ok "Overview is rendered inside the unified Shell"
 else
-  bad "Runtime page is rendered inside the unified Shell"
+  bad "Overview is rendered inside the unified Shell"
+fi
+if ! grep -q "/admin/status/runtime" "$ROOT/src/system/admin-pages.mjs" \
+  && grep -q 'runtimeCards' "$ROOT/web/admin/app-core.js"; then
+  ok "Runtime detail folded into Overview, with no page of its own"
+else
+  bad "Runtime page still registered"
 fi
 if grep -q 'CORE_ADMIN_PAGES' "$ROOT/src/system/admin-pages.mjs" \
   && grep -q 'PAGE_RENDERERS' "$ROOT/web/admin/app.js" \
   && grep -q 'renderApplications' "$ROOT/web/admin/app-core.js" \
   && grep -q 'renderServices' "$ROOT/web/admin/app-core.js" \
   && grep -q 'renderLogs' "$ROOT/web/admin/app-core.js" \
-  && grep -q 'renderRuntime' "$ROOT/web/admin/app-core.js" \
+  && grep -q 'runtimeCards' "$ROOT/web/admin/app-core.js" \
   && grep -q 'renderWorkspace' "$ROOT/web/admin/app-core.js" \
   && grep -q 'loadAdapters' "$ROOT/web/admin/app.js" \
   && grep -q 'renderFrameworkUpdate' "$ROOT/web/admin/admin-controls.js" \

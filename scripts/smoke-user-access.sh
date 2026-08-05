@@ -121,9 +121,11 @@ else
 fi
 curl -s -c "$WORK/cookie" -H 'Content-Type: application/json' -d '{"password":"smoketoken"}' \
   "http://127.0.0.1:$PORT/api/auth/login" >/dev/null
-curl -s -m 3 -b "$WORK/cookie" "http://127.0.0.1:$PORT/admin/status/runtime" >"$WORK/runtime-shell.html"
-grep -q 'id="navigation"' "$WORK/runtime-shell.html" \
-  && grep -q '/admin/app.js' "$WORK/runtime-shell.html" \
+# ⚠ 用一个**注册表里真实存在**的页面。这里原本钉在 /admin/status/runtime，
+# 而那一页已并入概览——断言的是「登录后拿到统一 Shell」，不是某一页还在不在。
+curl -s -m 3 -b "$WORK/cookie" "http://127.0.0.1:$PORT/admin/status/overview" >"$WORK/shell.html"
+grep -q 'id="navigation"' "$WORK/shell.html" \
+  && grep -q '/admin/app.js' "$WORK/shell.html" \
   && ok "登录后进入统一 Admin Shell" || bad "统一 Admin Shell 内容正确"
 
 echo "--- 4. Observation API（027 §3：Start Observation / 只看新日誌 / 歷史不刪）---"

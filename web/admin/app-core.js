@@ -329,6 +329,12 @@ function renderOverview(data) {
   // 而不是「装了哪些应用」。应用、服务、Package、Adapter 属于其后的细分。
   grid.append(sys.card, app.card, svc.card, pkg.card, adapter.card);
   replacePage(hero, grid);
+  // 运行时细节接在概览底下。⚠ 它是异步的，而概览是同步渲染的，所以只在这一页
+  // 仍然停留时才追加——否则使用者切走之后，两张属于上一页的卡会落到新页面上。
+  const renderedFor = location.pathname;
+  runtimeCards(data).then((cards) => {
+    if (location.pathname === renderedFor) document.getElementById('page')?.append(...cards);
+  }).catch(() => { /* 概览本身已经渲染完；细节取不到就不显示，不打断主内容 */ });
 }
 
 function overviewState(data) {
@@ -686,24 +692,41 @@ async function renderAdministration() {
     ? '这个密码只在别的设备通过局域网访问时才需要；本机进入不用密码。改完后其他设备上的登录会失效。'
     : '设置新密码前先输入当前密码。更改成功后，已有的浏览器会话都会退出登录。',
   'description'));
+
+  /**
+   * ⭐ 一个失效的按钮必须说明它为什么失效。
+   *
+   * 这里原本只是把两个前置条件与起来传给 `disabled`，于是「凭证由外部管理」和
+   * 「这个会话只读」在屏幕上长得一模一样——都是一个按不动的按钮，而两者要做的事
+   * 完全不同。使用者唯一能得到的信息是「坏了」。
+   */
+  const blocked = !credentials.editable
+    ? '凭证由 Framework 之外管理（环境变量或配置文件），面板改不了它——改动那个来源再重启。'
+    : !canWrite() ? '当前浏览器会话是只读的。' : null;
+  if (blocked) password.body.append(text('p', blocked, 'alert bad'));
+
+  const minimumLength = credentials.login_password?.minimum_length ?? 16;
   const passwordForm = document.createElement('form'); passwordForm.className = 'credential-form';
-  const currentPassword = document.createElement('input'); currentPassword.type = 'password'; currentPassword.placeholder = '当前密码'; currentPassword.required = !credentials.local; currentPassword.autocomplete = 'current-password';
-  currentPassword.hidden = Boolean(credentials.local);
-  const newPassword = document.createElement('input'); newPassword.type = 'password'; newPassword.placeholder = '新密码'; newPassword.minLength = credentials.login_password?.minimum_length ?? 16; newPassword.autocomplete = 'new-password';
-  const confirmPassword = document.createElement('input'); confirmPassword.type = 'password'; confirmPassword.placeholder = '再输一次新密码'; confirmPassword.minLength = newPassword.minLength; confirmPassword.autocomplete = 'new-password';
-  const savePassword = actionButton('更改登录密码', 'primary', () => {}, !canWrite() || !credentials.editable);
-  savePassword.type = 'submit';
+  // ⚠ 明文，不遮蔽。遮蔽换来的是打错字看不见，而这里打错的后果是把自己关在面板外面。
+  // 也因此不再要第二个确认栏：确认是遮蔽输入的补丁，值看得见时它只多一种失败方式。
+  const currentPassword = document.createElement('input');
+  currentPassword.type = 'text'; currentPassword.placeholder = '当前密码';
+  currentPassword.required = !credentials.local; currentPassword.autocomplete = 'off';
+  const newPassword = document.createElement('input');
+  newPassword.type = 'text'; newPassword.placeholder = `新密码（至少 ${minimumLength} 个字符）`;
+  newPassword.minLength = minimumLength; newPassword.required = true; newPassword.autocomplete = 'off';
+  const savePassword = actionButton('更改登录密码', 'primary', null, Boolean(blocked), 'submit');
   if (!credentials.local) passwordForm.append(currentPassword);
-  passwordForm.append(newPassword, confirmPassword, savePassword);
+  passwordForm.append(newPassword, savePassword);
   passwordForm.addEventListener('submit', async (event) => {
     event.preventDefault(); savePassword.disabled = true;
     try {
-      await apiData('/api/admin/credentials/login-password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword.value, new_password: newPassword.value, confirm_password: confirmPassword.value }) });
+      await apiData('/api/admin/credentials/login-password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword.value, new_password: newPassword.value }) });
       // 回 /admin 而不是登入頁：本機會就地重新取得 Session，別的設備才會看到登入框。
       location.replace('/admin');
     } catch (error) { administrationNotice = { kind: 'bad', text: `Login password: ${error.message ?? error}` }; renderAdministration(); }
   });
-  password.body.append(passwordForm, valueRow('最短长度', `${credentials.login_password?.minimum_length ?? 16} ${tr('个字符')}`));
+  password.body.append(passwordForm, valueRow('最短长度', `${minimumLength} ${tr('个字符')}`));
 
   // 语言放在这一页的最前面：它决定了下面所有内容用什么语言显示。
   const language = section('语言');
@@ -891,9 +914,17 @@ async function renderStates() {
   replacePage(...cards);
 }
 
-async function renderRuntime() {
+/**
+ * 运行时的两张卡。
+ *
+ * ⭐ 它们不再有自己的分页。那一页上没有任何可做的操作——全是只读数字——所以它把
+ * 「先看状态，再看原因」拆成了两次导航，而第二次导航之后能做的事仍然是零。
+ * 概览已经在回答「现在怎么样」，这两张卡是同一个问题的下一层，放在它底下即可。
+ */
+async function runtimeCards(overviewData = null) {
   const [overview, integrity, dev] = await Promise.all([
-    apiData('/api/admin/overview'), apiData('/api/admin/integrity'), apiData('/api/dev/packages'),
+    overviewData ? Promise.resolve(overviewData) : apiData('/api/admin/overview'),
+    apiData('/api/admin/integrity'), apiData('/api/dev/packages'),
   ]);
   const framework = section('Framework 运行时');
   const report = overview.components?.framework?.value;
@@ -912,7 +943,7 @@ async function renderRuntime() {
     valueRow('加载失败', packageCheck?.failed?.length ? packageCheck.failed.join(', ') : 'none'),
     valueRow('开发挂载', dev.mounts?.length ?? 0),
   );
-  replacePage(framework.card, packages.card);
+  return [framework.card, packages.card];
 }
 
 function createObservationPanel(title = '日志观察') {

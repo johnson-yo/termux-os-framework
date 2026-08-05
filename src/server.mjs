@@ -49,7 +49,7 @@ import {
   DEFAULT_PACKAGE_REGISTRY_URL, configurePackageRegistry, downloadPackageFromRegistry,
   downloadFrameworkFromRegistry, frameworkRegistryInfo, packageRegistryContainsSha256,
   packageRegistryFindByPackageId,
-  packageRegistryDetails, packageRegistrySnapshot, refreshPackageRegistry,
+  packageRegistryDetails, packageRegistrySnapshot, refreshPackageRegistry, packageRegistryFindProviders,
 } from './system/package-registry.mjs';
 import {
   configureFrameworkUpdateControl, discardFrameworkUpdateUpload, frameworkUpdateSnapshot, getFrameworkUpdateJob,
@@ -1042,7 +1042,6 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const currentPassword = body?.current_password ?? body?.old_password;
     const password = body?.new_password ?? body?.password;
-    const confirmation = body?.confirm_password ?? body?.confirm;
     // 本機不問舊密碼。舊密碼是用來證明「發請求的人就是知道密碼的那個人」，而在這台手機上
     // 進入面板本來就不需要密碼——再問一次只會攔住唯一有權改它的人。別的來源照舊要驗。
     const local = isLoopbackAddress(req.socket?.remoteAddress);
@@ -1057,7 +1056,13 @@ const server = http.createServer(async (req, res) => {
     if (typeof password !== 'string' || password.length < AUTH_PASSWORD_MIN_LENGTH) {
       return json(res, 400, { ok: false, error: 'login_password_too_short', detail: `Login password must be at least ${AUTH_PASSWORD_MIN_LENGTH} characters.` });
     }
-    if (password !== confirmation) return json(res, 400, { ok: false, error: 'login_password_mismatch' });
+    /**
+     * ⚠ 不再要求確認欄位。
+     *
+     * 再輸一次是**遮蔽輸入**的補丁：看不見自己打了什麼，才需要打兩遍來抓錯字。
+     * 這個欄位現在是明文的，所以確認保護不了任何東西，只多出一種失敗方式——
+     * 而失敗的後果是使用者被關在自己的面板外面。
+     */
     try {
       const next = writeAuthFile(AUTH_FILE, { admin_password: password });
       CFG.auth.admin_password = next.admin_password;
@@ -1337,7 +1342,7 @@ const server = http.createServer(async (req, res) => {
           dependencies: upload.preflight?.dependencies?.requires?.length
             ? resolveDeclaredDependencies(
               upload.preflight.dependencies.requires,
-              { catalog: packageRegistryFindByPackageId },
+              { catalog: packageRegistryFindByPackageId, providers: packageRegistryFindProviders },
             )
             : null,
         })),
@@ -1394,7 +1399,8 @@ const server = http.createServer(async (req, res) => {
            */
           const declared = upload.preflight?.dependencies?.requires ?? [];
           if (declared.length) {
-            const plan = resolveDeclaredDependencies(declared, { catalog: packageRegistryFindByPackageId });
+            const plan = resolveDeclaredDependencies(declared,
+              { catalog: packageRegistryFindByPackageId, providers: packageRegistryFindProviders });
             if (!plan.installable) {
               throw Object.assign(
                 new Error(`missing from the Registry catalog: ${plan.missing_from_catalog.map((n) => n.id).join(', ')}`),

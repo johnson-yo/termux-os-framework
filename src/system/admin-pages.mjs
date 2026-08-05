@@ -12,8 +12,6 @@ export const CORE_ADMIN_PAGES = [
     description: '先看当前的控制状态，再看背后的原因和可做的操作。', renderer: 'overview' },
   { path: '/admin/status/logs', parent: '/admin/status', title: '日志', order: 20,
     description: '从某个时间点开始跟随新输出，已存的日志不会被改动。这里也是操作进度与更新历史的去处。', renderer: 'logs' },
-  { path: '/admin/status/runtime', parent: '/admin/status', title: '运行时', order: 30,
-    description: '对照期望状态、进程状态、健康状况与已加载的来源。', renderer: 'runtime' },
   { path: '/admin/applications', title: '应用', order: 20,
     description: '打开已安装的应用，启动前可以先看它是否就绪。', renderer: 'applications' },
   { path: '/admin/services', title: '服务', order: 30, default_child: '/admin/services/overview' },
