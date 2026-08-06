@@ -61,7 +61,7 @@ import { services as stageServices } from './stage/catalog.mjs';
 import {
   listLogComponents, readLogSlice, startObservation, setObservationRoot, setObservationServices,
 } from './system/observation.mjs';
-import { listAssets, describeAsset } from './assets/runtime.mjs';
+import { listAssets, describeAsset, getAssetProvider } from './assets/runtime.mjs';
 import { readRegistry as readAssetRegistry, deactivateAsset } from './assets/registry.mjs';
 import {
   AUTH_PASSWORD_MIN_LENGTH, AUTH_TOKEN_MIN_LENGTH, defaultAuthFile, ensureAuthFile,
@@ -1807,6 +1807,55 @@ const server = http.createServer(async (req, res) => {
      * ⚠ 删的是这一份载荷，不是这个包。共享 store 里同版本同 target 的目录只有一个
      * 拥有者，所以先摘登记再删字节：反过来会留下一条指向空目录的登记。
      */
+    /**
+     * 装上提供这个资产的那个包。
+     *
+     * ⭐ **调用方只说得出一个 asset id。** 哪个包提供它、从哪取、多大，全部由目录回答——
+     * 让消费方页面写死一个包名，等于把「谁供应这个模型」这件事复制到一个它无法维护的地方。
+     *
+     * ⚠ 有多个提供方时不替人选（与 Capability 那条同源）。
+     * ⚠ 资产包不声明服务，装它不会停掉任何东西，所以不需要单独的确认步骤——
+     *    这与依赖阶梯把 `supply` 里的包直接装上是同一个判断。
+     */
+    const installProvider = url.match(/^\/api\/assets\/(.+)\/provider$/);
+    if (installProvider && req.method === 'POST') {
+      if (!authed(req, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });
+      const assetId = decodeURIComponent(installProvider[1]);
+      if (getAssetProvider(assetId)) {
+        return json(res, 409, { ok: false, error: 'already_declared', detail: `${assetId} already has an installed provider` });
+      }
+      const candidates = packageRegistryFindProviders(assetId, 'asset');
+      if (!candidates.length) {
+        return json(res, 404, { ok: false, error: 'no_provider_in_catalog', detail: `no catalog package declares ${assetId}` });
+      }
+      if (candidates.length > 1) {
+        return json(res, 409, {
+          ok: false, error: 'needs_choice',
+          candidates: candidates.map((c) => c.package_id),
+        });
+      }
+      let upload = null;
+      try {
+        if (packageManagerSnapshot(listPackages()).active_job) {
+          throw Object.assign(new Error('another Package operation is already running'), { code: 'package_job_active' });
+        }
+        const remote = await downloadPackageFromRegistry(candidates[0]);
+        upload = await storePackageRemoteDownload(remote.response, remote.filename, {
+          expectedSize: remote.expected_size,
+          expectedSha256: remote.expected_sha256,
+          origin: remote.origin,
+        });
+        const job = startPackageJob('install', { upload_id: upload.id });
+        updatePackageUpload(upload.id, { job_id: job.id });
+        return json(res, 202, { ok: true, asset: assetId, package_id: candidates[0].package_id, job });
+      } catch (error) {
+        if (upload?.id) {
+          try { discardPackageUpload(upload.id); } catch { /* keep the original failure */ }
+        }
+        return json(res, 502, { ok: false, error: 'provider_install_failed', detail: String(error?.message ?? error) });
+      }
+    }
+
     const dropAsset = url.match(/^\/api\/assets\/(.+)\/payload$/);
     if (dropAsset && req.method === 'DELETE') {
       if (!authed(req, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });

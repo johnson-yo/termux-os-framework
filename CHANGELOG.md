@@ -2,6 +2,13 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.28
+
+- **`POST /api/assets/<id>/provider` installs the Package that supplies a model.** A consumer's
+  page can now complete its own setup: it names the asset it wants, and the catalog answers which
+  Package provides it. A page that had to name the Package instead would be copying "who supplies
+  this model" somewhere it cannot keep correct. Several providers are not guessed between.
+
 ## 0.2.27
 
 - **Asset Packages no longer appear under Packages or Package settings.** A model asset belongs to
