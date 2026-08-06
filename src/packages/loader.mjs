@@ -34,6 +34,8 @@ import { nodeExecutable } from '../system/node-runtime.mjs';
 // Registry（模塊級單例；self-test 用獨立掃描根避免污染正式登記）
 // ============================================================
 const packages = new Map();        // id → record
+// 載入時記下的 Catalog 地址：按需取資產要用它，而那條路徑不經過 loadPackages 的參數。
+let loadedRegistryBase = '';
 const registeredApps = new Map();  // appId → { ...app, package }
 const providers = new Map();       // `${capabilityId}:${providerId}` → { ...provider, package }
 const routes = new Map();          // packageId → [{ method, path, handler }]
@@ -130,7 +132,13 @@ export const getPackageWebRoot = (id) => {
  * 引用它的 context binary——同名不同機的那一份會被照常打開，然後在加載期報
  * `Error code: 5000`。目錄隔離是這裡唯一的防線，所以它由框架給，不靠宣告的人自覺。
  */
-export async function fetchAssetOnDemand(assetId, { onProgress = () => {}, ...rest } = {}) {
+export async function fetchAssetOnDemand(assetId, {
+  onProgress = () => {},
+  // 沒給就用載入時記下的那一個；⛔ 不預設一個公網地址——Catalog 地址是部署決定，
+  // 在這裡編一個出來會讓「它到底去哪裡取」變成一個要讀源碼才知道的問題。
+  registryBase = loadedRegistryBase,
+  ...rest
+} = {}) {
   const provider = getAssetProvider(assetId);
   if (!provider) {
     return { ok: false, error: 'unknown_asset', detail: `no installed package declares ${assetId}` };
@@ -145,6 +153,7 @@ export async function fetchAssetOnDemand(assetId, { onProgress = () => {}, ...re
     ...rest,
     packageManifest: manifest,
     onProgress,
+    registryBase,
     storeDirFor: (declared) => path.join(
       assetVersionDir(manifest.id, manifest.version, declared.target?.id ?? packageTarget),
       path.basename(declared.payload),
@@ -626,7 +635,8 @@ const scanRawRoot = (root, source) => {
   return dirs.map((dirname) => ({ dir: path.join(root, dirname), expectId: dirname, source, install: null }));
 };
 
-export async function loadPackages({ roots, frameworkVersion, config = {}, configPath = null, saveConfig = null, log = console.log } = {}) {
+export async function loadPackages({ roots, frameworkVersion, config = {}, configPath = null, saveConfig = null, registryBase = '', log = console.log } = {}) {
+  loadedRegistryBase = registryBase || config?.integrations?.package_registry?.base_url || '';
   const opts = { frameworkVersion, config, configPath, saveConfig, log };
   const candidates = [];
 

@@ -489,7 +489,7 @@ initDevRuntime({ frameworkRoot: ROOT, frameworkVersion: FRAMEWORK_VERSION, confi
  * 這裡是唯一知道兩邊都已就緒的地方。
  */
 stage.setServiceStartGate((def) => serviceDependencyGate(def, { log: console.log }));
-await loadPackages({ frameworkVersion: FRAMEWORK_VERSION, config: CFG, configPath: CONFIG_PATH, saveConfig: persistConfiguration });
+await loadPackages({ frameworkVersion: FRAMEWORK_VERSION, config: CFG, configPath: CONFIG_PATH, saveConfig: persistConfiguration, registryBase: PACKAGE_REGISTRY_URL });
 
 // 025 §8：Session 只操作 Stage 管的 framework 自有 Service（§8.4 邊界：不碰 Android/Termux/APK/Core）
 const sessionDeps = {

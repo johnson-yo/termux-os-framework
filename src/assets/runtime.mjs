@@ -91,6 +91,16 @@ export async function fetchOptionalAsset(id, {
   }
   const files = declared.source?.files ?? [];
   if (!files.length) return { ok: false, error: 'no_remote_source', detail: `${id} has no source.files to fetch` };
+  /**
+   * ⚠ 走 Catalog 卻沒有 Catalog 地址時**必須當場失敗**。
+   *
+   * `assetFileUrl` 是字串拼接，空的 base 會拼出相對路徑 `/download?...`，
+   * 而這只在真的要下載時才炸——已經就位的檔案因為 sha 相符被直接複用，一次 URL 都不構造。
+   * 也就是說：唯一會發現這個問題的路徑，正是最不容易被測到的那條。
+   */
+  if (via === 'registry' && !registryBase) {
+    return { ok: false, error: 'no_registry_base', detail: 'fetching through the catalog needs its base URL' };
+  }
 
   const destDir = storeDirFor(declared);
   const need = pendingBytes(files, destDir);
@@ -177,6 +187,7 @@ if (process.argv.includes('--self-test')
     profile: v73,
     storeDirFor: (d) => path.join(store, d.target.id, d.payload),
     activate: (d, dir) => { activated = { target: d.target.id, dir }; return activated; },
+    via: 'direct',
     fetchImpl: async () => served(manifest.assets.provides[1].source.files[0]),
   });
   t('the device gets its own hardware variant, not the first one declared',
@@ -202,6 +213,19 @@ if (process.argv.includes('--self-test')
   });
   t('"no variant for this device" and "no such asset" stay different answers',
     notDeclared.error === 'unknown_asset');
+
+  /**
+   * ⭐ 這一條抓的是一個真的漏出去過的缺陷：走 Catalog 卻沒有 base，
+   * `assetFileUrl` 會拼出相對路徑 `/download?...`。它只在**真的要下載**時才炸，
+   * 而已就位的檔案因 sha 相符被直接複用、一次 URL 都不構造——
+   * 於是第一次驗收（字節已預置）全綠，下載路徑一次都沒走過。
+   */
+  const noBase = await fetchOptionalAsset('model.ctx', {
+    packageManifest: manifest, profile: v73, storeDirFor: () => path.join(tmp, 'nobase'),
+    activate: () => null, via: 'registry', registryBase: '',
+  });
+  t('fetching through the catalog without its address fails now, not mid-download',
+    noBase.ok === false && noBase.error === 'no_registry_base');
 
   const required = await fetchOptionalAsset('model.req', {
     packageManifest: { assets: { provides: [{ id: 'model.req', kind: 'model', payload: 'r', files: {} }] } },
