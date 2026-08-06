@@ -9,13 +9,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { MANIFEST_FILENAME, validateManifest } from './manifest.mjs';
+import {
+  MANIFEST_FILENAME, validateManifest, manifestTargets, selectAssetDeclaration, TARGET_GENERIC,
+} from './manifest.mjs';
 import { resolveInstalledPackages } from './installed-root.mjs';
-import { preflight } from './runtime-contract.mjs';
+import { preflight, deviceProfile } from './runtime-contract.mjs';
+import { activateAsset, assetVersionDir } from '../assets/registry.mjs';
 import { registerAction, getAction, unregisterAction } from '../theatre/runtime.mjs';
 import { getState, listStates, registerState, setState, unregisterPackageStates } from '../state/registry.mjs';
 import {
-  registerAssetProvider, listAssets, unregisterAssetProvider,
+  registerAssetProvider, listAssets, unregisterAssetProvider, getAssetProvider, fetchOptionalAsset,
   resolveAsset as resolveAssetById, describeAsset as describeAssetById,
 } from '../assets/runtime.mjs';
 // 循環 import（resolver 反向 import 本檔的 listCapabilityProviders/getPackage）——只在 context 方法
@@ -112,6 +115,69 @@ export const getPackageWebRoot = (id) => {
   const r = packages.get(id);
   return r && r.status === 'loaded' ? r.webRoot : null;
 };
+
+/**
+ * 按需取一個可選資產。
+ *
+ * ⭐ **消費方只說得出一個 asset id。** 坐標、硬件檔位、落盤位置全部來自宣告它的那個包——
+ * 讓消費方傳 URL 或路徑，就等於讓「這台機器上的這個資產到底是什麼」有兩個來源，
+ * 而那個問題必須只有一個答案。所以 speech 想要 SenseVoice 的 ctx 時，它問的是
+ * `model.sensevoice.ctx`，至於那是 V73 還是 V79 的那一份、從哪個 revision 取，
+ * 它既不知道也不需要知道。
+ *
+ * ⭐ **落盤目錄用資產自己的 target，不是包的。** 包可以是 generic 而載荷是 V73 專屬的；
+ * 兩個硬件版本若落進同一個目錄就會互相覆蓋，而 EPContext 的 wrapper 以 `./model.bin`
+ * 引用它的 context binary——同名不同機的那一份會被照常打開，然後在加載期報
+ * `Error code: 5000`。目錄隔離是這裡唯一的防線，所以它由框架給，不靠宣告的人自覺。
+ */
+export async function fetchAssetOnDemand(assetId, { onProgress = () => {}, ...rest } = {}) {
+  const provider = getAssetProvider(assetId);
+  if (!provider) {
+    return { ok: false, error: 'unknown_asset', detail: `no installed package declares ${assetId}` };
+  }
+  const owner = packages.get(provider.package);
+  const manifest = owner?.manifest;
+  if (!manifest) {
+    return { ok: false, error: 'provider_not_loaded', detail: `${provider.package} declares ${assetId} but is not loaded` };
+  }
+  const packageTarget = manifestTargets(manifest)[0]?.id ?? TARGET_GENERIC;
+  return fetchOptionalAsset(assetId, {
+    ...rest,
+    packageManifest: manifest,
+    onProgress,
+    storeDirFor: (declared) => path.join(
+      assetVersionDir(manifest.id, manifest.version, declared.target?.id ?? packageTarget),
+      path.basename(declared.payload),
+    ),
+    activate: (declared, dir, checksums) => activateAsset(assetId, {
+      package_id: manifest.id,
+      version: manifest.version,
+      target: declared.target?.id ?? packageTarget,
+      target_spec: declared.target ?? null,
+      path: dir,
+      files: declared.files ?? {},
+      checksums,
+      sha256: Object.values(checksums)[0] ?? null,
+      fetched_on_demand: true,
+    }),
+  });
+}
+
+/** 這台機器該用哪一份載荷宣告——狀態頁與 CLI 用來說明「有幾檔、你是哪一檔」。 */
+export function describeAssetVariants(assetId, profile = deviceProfile()) {
+  const provider = getAssetProvider(assetId);
+  const manifest = provider ? packages.get(provider.package)?.manifest : null;
+  if (!manifest) return null;
+  const picked = selectAssetDeclaration(manifest, assetId, profile);
+  return {
+    asset: assetId,
+    package: manifest.id,
+    candidates: picked.candidates,
+    selected: picked.ok ? (picked.declaration.target?.id ?? TARGET_GENERIC) : null,
+    reason: picked.ok ? null : picked.error,
+    detail: picked.ok ? null : picked.detail,
+  };
+}
 
 export function dispatchPackageRoute(id, method, subpath) {
   const list = routes.get(id);
@@ -283,6 +349,7 @@ function makeContext(record, config, configPath, overrides = null, saveConfig = 
       resolve: (assetId, opts) => resolveAssetById(assetId, opts),
       describe: (assetId, opts) => describeAssetById(assetId, opts),
       list: (opts) => listAssets(opts),
+      fetch: (assetId, opts) => fetchAssetOnDemand(assetId, opts),
     },
     // 狀態總線（第三種機制）。Capability 回答「誰能提供這個能力」，可多家競標由綁定裁決；
     // state 回答「這件事此刻的事實是什麼」，只能有一個知情者，所以沒有綁定也不許重名。

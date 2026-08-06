@@ -11,7 +11,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { MANIFEST_FILENAME, validateManifest, manifestTargets, TARGET_GENERIC } from '../src/packages/manifest.mjs';
+import { MANIFEST_FILENAME, validateManifest, manifestTargets, matchTarget, TARGET_GENERIC } from '../src/packages/manifest.mjs';
 import { declaredDependencies } from '../src/packages/dependencies.mjs';
 import { checkFreeSpace, fetchAssetFiles, pendingBytes } from '../src/assets/fetch.mjs';
 import {
@@ -378,8 +378,20 @@ function writeActive(id, active) {
  *
  * ⚠ 版本目錄不可變：同版本已有內容且 sha 相符就復用，不相符就拒絕覆蓋。
  */
+/**
+ * 載荷的落盤 target：資產自己宣告了就用它，否則跟包走。
+ *
+ * ⚠ 一個 generic 的包可以帶著 V73 與 V79 兩份 ctx——若都按包的 target 落盤，
+ * 它們會進同一個目錄互相覆蓋，而 EPContext 的 wrapper 以 `./model.bin` 引用它的
+ * context binary，換機那一份會被照常打開再在加載期報 `Error code: 5000`。
+ */
+const payloadTarget = (asset, packageTargetId) => asset.target?.id ?? packageTargetId;
+
 async function installRemoteAssetPayload(asset, manifest, targetId, options) {
-  const finalDir = path.join(assetVersionDir(manifest.id, manifest.version, targetId), path.basename(asset.payload));
+  const finalDir = path.join(
+    assetVersionDir(manifest.id, manifest.version, payloadTarget(asset, targetId)),
+    path.basename(asset.payload),
+  );
   const files = asset.source.files;
   const need = pendingBytes(files, finalDir);
   const space = checkFreeSpace(path.dirname(finalDir), need);
@@ -405,6 +417,7 @@ async function installAssetPayloads(stagedPkg, manifest, targetId, options = {})
   const store = sharedStore();
   const staging = path.join(store, '.staging', `${manifest.id}-${Date.now()}`);
   const installed = [];
+  const profile = deviceProfile();
   try {
     for (const a of provides) {
       /**
@@ -415,6 +428,15 @@ async function installAssetPayloads(stagedPkg, manifest, targetId, options = {})
        */
       if (a.optional === true) {
         console.log(`asset ${a.id}: optional, not fetched at install`);
+        continue;
+      }
+      /**
+       * ⛔ 別台機器的硬件版本不裝。一個包可以同時備好 V73 與 V79，但這台機器上
+       * 只有一份能用；把另一份也拖下來既浪費幾百 MB，也讓「裝好了」變成一句
+       * 不知道指哪一份的話。
+       */
+      if (a.target && !matchTarget(a.target, profile).ok) {
+        console.log(`asset ${a.id}: variant ${a.target.id} is not for this device, skipped`);
         continue;
       }
       // 遠程宣告的 payload 不在歸檔裡——它按坐標去取，不必也不該被打進包。
@@ -444,7 +466,7 @@ async function installAssetPayloads(stagedPkg, manifest, targetId, options = {})
         if (!fs.existsSync(path.join(srcDir, f))) throw new Error(`asset ${a.id}: ${role} file missing: ${f}`);
       }
 
-      const finalDir = path.join(assetVersionDir(manifest.id, manifest.version, targetId), path.basename(a.payload));
+      const finalDir = path.join(assetVersionDir(manifest.id, manifest.version, payloadTarget(a, targetId)), path.basename(a.payload));
       if (fs.existsSync(finalDir)) {
         // 已存在：sha 全同=複用（冪等）；有一個不同=拒（不覆蓋，也不假裝成功）
         const diff = Object.entries(checksums).filter(([rel, want]) => {

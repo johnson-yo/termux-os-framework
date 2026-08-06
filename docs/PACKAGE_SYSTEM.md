@@ -66,7 +66,45 @@ the Package again and creates a fresh runtime state.
 
 ## Models and caches
 
-Model assets remain under `/sdcard/termux-os/models/<package>/<version-or-target>/`. Shared caches remain under `/sdcard/termux-os/caches/`. A Package installer checks compatibility and downloads or provisions an asset only when it is missing or incompatible. Framework version updates do not redownload models.
+Model assets remain under `/sdcard/termux-os/models/<package>/<version>/<target>/`. Shared caches remain under `/sdcard/termux-os/caches/`. A Package installer checks compatibility and downloads or provisions an asset only when it is missing or incompatible. Framework version updates do not redownload models.
+
+### A payload's target is not the Package's target
+
+`targets[]` says where this *code* can run, and a Release is identified by
+id + version + target, so it carries exactly one. A precompiled accelerator
+context is bound to a DSP architecture and a runtime version instead: it is
+useless on any other device, and it fails at load time rather than at install
+time. Expressing that with the Package target alone forces one Package per
+hardware generation, which is a claim the Package cannot honour — nothing in it
+is device-specific, because a remote payload ships only coordinates.
+
+An entry in `assets.provides[]` may therefore declare its own `target`, using
+the same fields as `targets[]`. The same asset id may appear several times as
+long as every one of those entries declares a distinct target; a repeated id
+with no target is rejected, because "works anywhere" and "works only on V73"
+under one name has no resolution order that means anything.
+
+The store path uses the payload's own target, so two hardware variants can never
+land in one directory. That is a Framework guarantee rather than a convention:
+an EPContext wrapper references its context binary by relative name, so a
+mismatched pair opens successfully and only then fails inside the runtime.
+
+### Fetching an optional asset after installation
+
+Required assets are provisioned at install; that is what "installed" means.
+Assets marked `optional: true` are declared but not fetched, so a Package can
+publish several alternatives — a tier the user has not chosen yet, a context for
+a device this one is not — without every installation paying for all of them.
+
+`POST /api/assets/<id>/fetch`, or `context.assets.fetch(id)` in-process, obtains
+one on demand. The caller supplies only an asset id: the Framework finds the
+Package that declares it, selects the variant matching this device, and resolves
+the source coordinates from that declaration. A caller that could pass a URL or
+a path would make "what is this asset on this machine" a question with two
+answers.
+
+A device with no matching variant gets `target_mismatch` listing the variants
+that do exist, never a different variant that happens to be present.
 
 ## Licensing
 

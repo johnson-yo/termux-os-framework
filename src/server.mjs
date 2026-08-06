@@ -23,6 +23,7 @@ import {
 import {
   loadPackages, loadSinglePackage, unregisterPackage, _getRecord,
   listPackages, getPackage, getPackageWebRoot, dispatchPackageRoute, dispatchPackageWebSocket, listArtifactContracts,
+  fetchAssetOnDemand, describeAssetVariants,
 } from './packages/loader.mjs';
 import { resolveInstalledPackages } from './packages/installed-root.mjs';
 import { deviceProfile } from './packages/runtime-contract.mjs';
@@ -1755,10 +1756,37 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // Asset 狀態只讀接口（024 §7.1）——只回已驗證的路徑與狀態，**不回模型內容**；
-  // 寫入（安裝/激活/卸載）只歸 Installer CLI，Framework 不開這道口
+  /**
+   * Asset 狀態只讀接口（024 §7.1）——只回已驗證的路徑與狀態，**不回模型內容**。
+   * 安裝／激活／卸載仍然只歸 Installer CLI。
+   *
+   * 唯一的例外是 `POST /api/assets/<id>/fetch`：**可選**資產的按需取得。
+   * 它不是「另一種安裝」——安裝時就該到位的東西不走這裡（`not_optional` 直接拒），
+   * 它服務的是「裝完之後才做的選擇」：使用者到了要開始聽寫的那一刻才知道自己要哪一檔
+   * ASR，而把三檔都在安裝時下載是 1.8 GB，其中一半永遠用不到。
+   */
   if (url === '/api/assets' || url.startsWith('/api/assets/')) {
     if (!authed(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
+    const fetchAsset = url.match(/^\/api\/assets\/(.+)\/fetch$/);
+    if (fetchAsset && req.method === 'POST') {
+      const assetId = decodeURIComponent(fetchAsset[1]);
+      const r = await fetchAssetOnDemand(assetId).catch((error) => ({
+        ok: false, error: 'fetch_failed', detail: String(error?.message ?? error),
+      }));
+      // 取不到的兩種形狀要用不同狀態碼分開：這台機器沒有對應版本(409，去編一份)、
+      // 根本沒這個 id(404，裝錯包)、空間不足(507)——它們的下一步動作完全不同。
+      const status = r.ok ? 200
+        : r.error === 'unknown_asset' || r.error === 'provider_not_loaded' ? 404
+          : r.error === 'insufficient_space' ? 507
+            : String(r.error).startsWith('target_mismatch') || r.error === 'not_optional' ? 409 : 502;
+      return json(res, status, r);
+    }
+    const variants = url.match(/^\/api\/assets\/(.+)\/variants$/);
+    if (variants && req.method === 'GET') {
+      const d = describeAssetVariants(decodeURIComponent(variants[1]));
+      if (!d) return json(res, 404, { ok: false, error: 'unknown_asset' });
+      return json(res, 200, { ok: true, ...d });
+    }
     if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'method not allowed' });
     if (url === '/api/assets') return json(res, 200, { ok: true, assets: listAssets() });
     const assetId = decodeURIComponent(url.slice('/api/assets/'.length));

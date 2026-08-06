@@ -148,21 +148,23 @@ function validateRuntime(e, runtime) {
   }
 }
 
+/** 一個 target 規格的欄位檢查，`targets[]` 與 `assets.provides[].target` 共用同一把尺。 */
+function validateTargetSpec(e, where, t) {
+  if (!t || typeof t !== 'object' || Array.isArray(t)) { e(`${where} must be an object`); return; }
+  if (typeof t.id !== 'string' || !TARGET_ID_RE.test(t.id)) e(`${where}.id must be lowercase [a-z0-9-]`);
+  if (t.id === TARGET_GENERIC) { // generic 是「不聲明」的保留語義，不許顯式冒名
+    e(`${where}.id "${TARGET_GENERIC}" is reserved for packages that declare no target`);
+  }
+  if (typeof t.os !== 'string' || !t.os.trim()) e(`${where}.os is required`);
+  if (typeof t.arch !== 'string' || !t.arch.trim()) e(`${where}.arch is required`);
+  if (t.htp !== undefined && !HTP_RE.test(String(t.htp))) e(`${where}.htp must look like "v73"`);
+  if (t.qnn !== undefined && !QNN_RE.test(String(t.qnn))) e(`${where}.qnn must look like "2.47"`);
+}
+
 function validateTargets(e, targets) {
   if (targets === undefined) return;
   if (!Array.isArray(targets) || targets.length === 0) { e('targets must be a non-empty array when declared'); return; }
-  targets.forEach((t, i) => {
-    const where = `targets[${i}]`;
-    if (!t || typeof t !== 'object') { e(`${where} must be an object`); return; }
-    if (typeof t.id !== 'string' || !TARGET_ID_RE.test(t.id)) e(`${where}.id must be lowercase [a-z0-9-]`);
-    if (t.id === TARGET_GENERIC) { // generic 是「不聲明」的保留語義，不許顯式冒名
-      e(`${where}.id "${TARGET_GENERIC}" is reserved for packages that declare no target`);
-    }
-    if (typeof t.os !== 'string' || !t.os.trim()) e(`${where}.os is required`);
-    if (typeof t.arch !== 'string' || !t.arch.trim()) e(`${where}.arch is required`);
-    if (t.htp !== undefined && !HTP_RE.test(String(t.htp))) e(`${where}.htp must look like "v73"`);
-    if (t.qnn !== undefined && !QNN_RE.test(String(t.qnn))) e(`${where}.qnn must look like "2.47"`);
-  });
+  targets.forEach((t, i) => validateTargetSpec(e, `targets[${i}]`, t));
   const ids = targets.map((t) => t?.id).filter(Boolean);
   if (new Set(ids).size !== ids.length) e('targets[].id must be unique');
 }
@@ -256,10 +258,43 @@ function validateAssets(e, assets) {
       if (a.optional !== undefined && typeof a.optional !== 'boolean') {
         e(`${where}.optional must be boolean`);
       }
+      /**
+       * ⭐ **載荷的 target，與包的 target 是兩根獨立的軸。**
+       *
+       * `targets[]` 說的是「這份**程式碼**能在哪跑」，而一個 Release 按 id+version+target
+       * 標識，所以它只能有一個。但一份預編譯的 HTP ctx 綁的是 DSP 架構 + QNN 版本，
+       * 換台機器就是廢的——在只有包級 target 的世界裡，「這份 ctx 是給 V73 的」只能
+       * 說成「這個包是給 V73 的」，於是每多一種硬件就多一個包、多一條依賴、多一次上架。
+       *
+       * 而那句話本來就是錯的：包裡沒有一個字節是 V73 專屬的（遠程載荷只留坐標），
+       * 硬件專屬的是它指向的那些字節。宣告在載荷這一層，一個包就能同時備好 V73 與 V79，
+       * 由裝置在取的時候挑。
+       *
+       * ⚠ 同一個 id 可以出現多次，但**每一次都必須帶 target**。少一個就是
+       * 「有一份載荷聲稱自己在哪都行」，而它與某個硬件專屬版本同名——那時候該給誰
+       * 沒有答案，只有先後順序，而先後順序不是答案。
+       */
+      if (a.target !== undefined) validateTargetSpec(e, `${where}.target`, a.target);
       validateAssetSource(e, where, a);
     });
-    const ids = provides.map((a) => a?.id).filter(Boolean);
-    if (new Set(ids).size !== ids.length) e('assets.provides[].id must be unique');
+    const byId = new Map();
+    for (const a of provides) {
+      if (!a?.id) continue;
+      if (!byId.has(a.id)) byId.set(a.id, []);
+      byId.get(a.id).push(a);
+    }
+    for (const [id, variants] of byId) {
+      if (variants.length === 1) continue;
+      if (variants.some((v) => v.target === undefined)) {
+        e(`assets.provides[].id "${id}" is declared ${variants.length} times; `
+          + 'every one of them must declare its own target, or they are indistinguishable');
+        continue;
+      }
+      const tids = variants.map((v) => v.target?.id).filter(Boolean);
+      if (new Set(tids).size !== tids.length) {
+        e(`assets.provides[].id "${id}" declares two variants for the same target`);
+      }
+    }
   }
 
   const requires = assets.requires;
@@ -450,6 +485,32 @@ export function manifestTargets(m) {
  * generic → 永遠可裝；欄位 unknown → needs_force（不猜）；欄位不合 → mismatch。
  * @returns { ok, verdict: 'match'|'generic'|'mismatch'|'needs_force', reasons[] }
  */
+/**
+ * 從一個 Manifest 裡挑出**這台裝置該用的那一份**載荷宣告。
+ *
+ * 沒有 target 的宣告到哪都適用；有 target 的只在相符時才算數。⛔ 沒有回落：
+ * 一份 V73 的 ctx 在 V79 上不是「次好的選擇」，它只是廢的，而它會一路裝到加載期
+ * 才以 `Error code: 5000` 出現——那是最貴的失敗形態。挑不出來就明說挑不出來，
+ * 並且把裝置那一側一起講清楚，否則使用者只看得見 mismatch 看不見自己是什麼。
+ *
+ * @returns {{ ok: true, declaration }|{ ok: false, error, detail, candidates }}
+ */
+export function selectAssetDeclaration(manifest, id, profile) {
+  const variants = (manifest?.assets?.provides ?? []).filter((a) => a?.id === id);
+  if (!variants.length) {
+    return { ok: false, error: 'unknown_asset', detail: `${id} is not declared by this package`, candidates: [] };
+  }
+  const candidates = variants.map((v) => v.target?.id ?? TARGET_GENERIC);
+  const hit = variants.find((v) => matchTarget(v.target ?? null, profile).ok);
+  if (!hit) {
+    const why = variants
+      .map((v) => `${v.target?.id}: ${matchTarget(v.target, profile).reasons.join('; ')}`)
+      .join(' | ');
+    return { ok: false, error: `target_mismatch:${id}`, detail: why, candidates };
+  }
+  return { ok: true, declaration: hit, candidates };
+}
+
 export function matchTarget(target, profile) {
   if (!target || target.id === TARGET_GENERIC) return { ok: true, verdict: 'generic', reasons: [] };
   const reasons = [];
@@ -654,6 +715,40 @@ if (process.argv.includes('--self-test')
       assets: { provides: [assetProvide.assets.provides[0], { ...assetProvide.assets.provides[0] }] } }).ok);
   t('assets.requires bad target rejected',
     !validateManifest({ ...base, assets: { requires: [{ id: 'x', target: 'v73' }] } }).ok);
+
+  // --- 載荷的 target：包不是硬件專屬的，它指向的字節才是 ---
+  const ctxVariant = (htp) => ({
+    ...assetProvide.assets.provides[0],
+    optional: true,
+    payload: `payload/ctx-${htp}`,
+    target: { id: `android-arm64-${htp}-qnn247`, os: 'android', arch: 'arm64', htp, qnn: '2.47' },
+  });
+  const twoVariants = {
+    ...base, ...assetProvide,
+    components: { ...base.components, assets: ['model.sensevoice'] },
+    assets: { provides: [ctxVariant('v73'), ctxVariant('v79')] },
+  };
+  t('one asset id may hold several hardware variants', validateManifest(twoVariants).ok);
+  t('a repeated asset id without a target is indistinguishable, so it is rejected',
+    !validateManifest({ ...twoVariants,
+      assets: { provides: [ctxVariant('v73'), assetProvide.assets.provides[0]] } }).ok);
+  t('two variants claiming the same target are rejected',
+    !validateManifest({ ...twoVariants,
+      assets: { provides: [ctxVariant('v73'), { ...ctxVariant('v73'), payload: 'payload/other' }] } }).ok);
+  t('a payload target is held to the same shape as a package target',
+    !validateManifest({ ...twoVariants,
+      assets: { provides: [{ ...ctxVariant('v73'), target: { id: 'v73', os: 'android', arch: 'arm64', htp: 'nope' } }] } }).ok);
+
+  const devV73 = { os: 'android', arch: 'arm64', htp: 'v73', qnn: '2.47' };
+  t('the declaration picked is the one built for this device',
+    selectAssetDeclaration(twoVariants, 'model.sensevoice', devV73).declaration.target.id
+      === 'android-arm64-v73-qnn247');
+  t('an untargeted declaration serves any device',
+    selectAssetDeclaration({ ...assetProvide }, 'model.sensevoice', devV73).ok === true);
+  const noBuild = selectAssetDeclaration(twoVariants, 'model.sensevoice', { ...devV73, htp: 'v75' });
+  t('no variant for this device is a mismatch that lists what does exist',
+    noBuild.ok === false && noBuild.error === 'target_mismatch:model.sensevoice'
+    && noBuild.candidates.length === 2);
   t('legacy manifest without assets still ok', validateManifest(base).ok);
 
   // --- 025 session ---

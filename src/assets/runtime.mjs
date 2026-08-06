@@ -6,10 +6,25 @@
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { describeAsset, resolveAsset as resolveFromRegistry, listResolvedAssets } from './resolver.mjs';
 import { checkFreeSpace, fetchAssetFiles, pendingBytes } from './fetch.mjs';
+import { selectAssetDeclaration } from '../packages/manifest.mjs';
+import { deviceProfile } from '../packages/runtime-contract.mjs';
 
 const providers = new Map(); // assetId → { id, kind, package, payload, files }
+
+/** 往上走到第一個存在的祖先目錄；到根還是沒有就回根。 */
+function nearestExisting(dir) {
+  let d = path.resolve(dir);
+  for (;;) {
+    if (fs.existsSync(d)) return d;
+    const up = path.dirname(d);
+    if (up === d) return d;
+    d = up;
+  }
+}
 
 export function registerAssetProvider(asset) {
   if (!asset?.id) throw new Error('asset provider requires id');
@@ -57,12 +72,20 @@ export async function fetchOptionalAsset(id, {
   packageManifest,
   storeDirFor,
   activate,
+  profile = null,
   via = 'registry',
   registryBase = '',
   onProgress = () => {},
+  fetchImpl = fetch,
 } = {}) {
-  const declared = (packageManifest?.assets?.provides ?? []).find((a) => a.id === id);
-  if (!declared) return { ok: false, error: 'unknown_asset', detail: `${id} is not declared by this package` };
+  /**
+   * ⭐ 先挑硬件檔位，再談取不取。同一個 id 可以有 V73/V79 兩份宣告，而這台機器只有一份能用。
+   * 挑不出來時回的是 `target_mismatch` 而不是 `unknown_asset`——「沒有給你這台機器的版本」
+   * 與「根本沒這個資產」要分開，前者的下一步是去編一份，後者是裝錯了包。
+   */
+  const picked = selectAssetDeclaration(packageManifest, id, profile ?? deviceProfile());
+  if (!picked.ok) return { ok: false, error: picked.error, detail: picked.detail, candidates: picked.candidates };
+  const declared = picked.declaration;
   if (declared.optional !== true) {
     return { ok: false, error: 'not_optional', detail: `${id} is installed with its package, not fetched on demand` };
   }
@@ -71,11 +94,16 @@ export async function fetchOptionalAsset(id, {
 
   const destDir = storeDirFor(declared);
   const need = pendingBytes(files, destDir);
-  const space = checkFreeSpace(destDir, need);
+  /**
+   * ⚠ 對**還不存在**的目錄問剩餘空間，`statfs` 會失敗，而失敗被當成「不知道，放行」。
+   * 首次下載的目錄本來就不存在——也就是說最需要這道檢查的那一次，它剛好不生效。
+   * 故往上走到第一個真的存在的祖先再問；同一個檔案系統，答案一樣。
+   */
+  const space = checkFreeSpace(nearestExisting(destDir), need);
   if (!space.ok) {
     return { ok: false, error: 'insufficient_space', need_bytes: need, free_bytes: space.free_bytes };
   }
-  await fetchAssetFiles(files, destDir, { via, registryBase, onProgress });
+  await fetchAssetFiles(files, destDir, { via, registryBase, onProgress, fetchImpl });
   const entry = activate(declared, destDir, Object.fromEntries(files.map((f) => [f.path, f.sha256])));
   return { ok: true, id, path: destDir, bytes: need, entry };
 }
@@ -85,12 +113,9 @@ export { describeAsset };
 // 自檢：node src/assets/runtime.mjs --self-test
 // ============================================================
 const { fileURLToPath } = await import('node:url');
-const { resolve } = await import('node:path');
 if (process.argv.includes('--self-test')
-  && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const fs = await import('node:fs');
+  && process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const os = await import('node:os');
-  const path = await import('node:path');
   let fails = 0;
   const t = (name, cond) => { console.log(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
 
@@ -112,6 +137,78 @@ if (process.argv.includes('--self-test')
 
   clearAssetProviders();
   t('clear empties providers', listAssets().length === 0);
+
+  // --- 同一個 id 的多個硬件檔位：挑對那一份，挑不出來要說得出為什麼 ---
+  const crypto = await import('node:crypto');
+  const v73 = { os: 'android', arch: 'arm64', htp: 'v73', qnn: '2.47' };
+  const store = path.join(tmp, 'store');
+  const variant = (htp) => {
+    const body = Buffer.from(`ctx for ${htp}`);
+    return {
+      id: 'model.ctx',
+      kind: 'model',
+      optional: true,
+      payload: `ctx-${htp}`,
+      files: { context: 'm.bin' },
+      target: { id: `android-arm64-${htp}-qnn247`, os: 'android', arch: 'arm64', htp, qnn: '2.47' },
+      source: {
+        files: [{
+          path: 'm.bin',
+          repo: 'o/r',
+          revision: 'b'.repeat(40),
+          size: body.length,
+          sha256: crypto.createHash('sha256').update(body).digest('hex'),
+          body, // 只給自檢的假 fetch 用
+        }],
+      },
+    };
+  };
+  // v79 故意排在前面：挑錯的實現會拿到第一個，而它在這台機器上是廢的。
+  const manifest = { assets: { provides: [variant('v79'), variant('v73')] } };
+  const served = (file) => ({
+    ok: true,
+    status: 200,
+    body: (async function* one() { yield file.body; }()),
+  });
+
+  let activated = null;
+  const fetched = await fetchOptionalAsset('model.ctx', {
+    packageManifest: manifest,
+    profile: v73,
+    storeDirFor: (d) => path.join(store, d.target.id, d.payload),
+    activate: (d, dir) => { activated = { target: d.target.id, dir }; return activated; },
+    fetchImpl: async () => served(manifest.assets.provides[1].source.files[0]),
+  });
+  t('the device gets its own hardware variant, not the first one declared',
+    fetched.ok === true && activated.target === 'android-arm64-v73-qnn247');
+  t('two variants land in separate directories — a wrapper cannot name its own hardware',
+    fs.existsSync(path.join(store, 'android-arm64-v73-qnn247/ctx-v73/m.bin'))
+    && !fs.existsSync(path.join(store, 'android-arm64-v79-qnn247')));
+
+  const noMatch = await fetchOptionalAsset('model.ctx', {
+    packageManifest: manifest,
+    profile: { os: 'android', arch: 'arm64', htp: 'v75', qnn: '2.47' },
+    storeDirFor: () => store,
+    activate: () => null,
+  });
+  t('an unbuilt hardware variant is a target_mismatch, never a silent wrong download',
+    noMatch.ok === false && noMatch.error === 'target_mismatch:model.ctx'
+    && noMatch.candidates.join(',') === 'android-arm64-v79-qnn247,android-arm64-v73-qnn247');
+  t('the mismatch says what the device is, so the next step is knowable',
+    /htp: target wants "v73", device has "v75"/.test(noMatch.detail));
+
+  const notDeclared = await fetchOptionalAsset('model.ghost', {
+    packageManifest: manifest, profile: v73, storeDirFor: () => store, activate: () => null,
+  });
+  t('"no variant for this device" and "no such asset" stay different answers',
+    notDeclared.error === 'unknown_asset');
+
+  const required = await fetchOptionalAsset('model.req', {
+    packageManifest: { assets: { provides: [{ id: 'model.req', kind: 'model', payload: 'r', files: {} }] } },
+    profile: v73, storeDirFor: () => store, activate: () => null,
+  });
+  t('a required asset is still refused on demand — installed means installed',
+    required.error === 'not_optional');
 
   fs.rmSync(tmp, { recursive: true, force: true });
   process.exit(fails ? 1 : 0);
