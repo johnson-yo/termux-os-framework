@@ -2,6 +2,22 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.22
+
+- **A Package can carry every hardware version of a model, and the device picks its own.**
+  A precompiled accelerator context is bound to one DSP architecture, and until now the only
+  way to say so was to publish a separate Package per generation — a claim that was never
+  true, since nothing inside such a Package is device-specific. An asset declaration now
+  carries its own target, independent of where the Package's code runs. The store path uses
+  it, so two variants can never land in one directory and be opened as a mismatched pair.
+- **An optional asset can be fetched after installation**, through
+  `POST /api/assets/<id>/fetch` or `context.assets.fetch(id)`. A model chosen after
+  installation should be downloaded then, not at install time alongside every alternative
+  the user did not choose. The caller names only an asset id: the Framework finds the
+  Package that declares it and reads the coordinates from there.
+- A device with no matching variant is told which variants do exist and what the device
+  reports itself to be, instead of being given a substitute that would fail at load time.
+
 ## 0.2.21
 
 - The login password is changed by a command you paste into Termux, not by the panel.
