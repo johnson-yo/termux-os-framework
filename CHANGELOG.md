@@ -6,7 +6,8 @@ All notable public changes will be recorded here after the first tagged release.
 
 - **An installed Package can be updated again.** The Install button was disabled whenever that
   package id was installed at all, so a device on 0.18.0 saw a card reading "latest verified
-  0.19.0" above a greyed-out "已安装 0.18.0" — every word on the card true, and no way to upgrade.
+  0.19.0" above a greyed-out "installed 0.18.0" button — every word on the card true, and no way
+  to upgrade.
   It now compares versions: the same version has nothing to do, a newer one offers an update, an
   older one offers a downgrade.
 - **A Package's declared dependencies are shown.** The panel read only `public_metadata`, so a
