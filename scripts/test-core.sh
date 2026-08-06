@@ -23,6 +23,7 @@ for file in \
   src/packages/loader.mjs \
   src/assets/fetch.mjs \
   src/assets/registry.mjs \
+  src/assets/runtime.mjs \
   src/assets/resolver.mjs \
   src/capabilities/resolver.mjs \
   src/apps/session.mjs \

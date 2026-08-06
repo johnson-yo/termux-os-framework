@@ -353,9 +353,15 @@ if grep -q "panel.head?.append(actionButton('更新列表'" "$ROOT/web/admin/adm
 else
   bad "list refresh placement"
 fi
-# Framework 不是可安裝的 Package，不得混進 Available
-grep -q "item.types?.includes('framework')" "$ROOT/web/admin/admin-controls.js" \
-  && ok "framework is filtered out of the installable list" || bad "framework leaks into Available"
+# Framework 不是可安裝的 Package，不得混進 Available。
+# ⚠ 這裡斷言的是**允許誰**，不是**排除誰**：先前寫成排除 framework 一項，於是每多一種
+# 不該出現的類型就要多加一條排除，而漏掉一條沒有任何症狀——它只是靜靜地出現在列表裡。
+if grep -q "BROWSABLE_TYPES = new Set(\['adapter', 'app', 'service'\])" "$ROOT/web/admin/admin-controls.js" \
+  && ! grep -q "'framework'" <<<"$(grep 'BROWSABLE_TYPES = new Set' "$ROOT/web/admin/admin-controls.js")"; then
+  ok "the installable list is an allowlist, so framework and assets cannot leak into Available"
+else
+  bad "framework or assets can leak into Available"
+fi
 # Installed 與 Available 必須用同一套官方身份映射
 grep -q "officialRepositories.has(key)" "$ROOT/web/admin/admin-controls.js" \
   && ok "Official maintainers map into Installed titles too" || bad "Official mapping is tab-local"
@@ -452,6 +458,42 @@ if node -e 'const d=require(process.argv[1]); process.exit(d.ok && d.schema==="t
   ok "Framework Update WebUI reads the single engine snapshot and has a real renderer"
 else
   bad "Framework Update WebUI reads the single engine snapshot and has a real renderer"
+fi
+
+echo "--- 5b. Package manager framing ---"
+# 這一頁回答「我要裝什麼」，所以只列使用者會自己去裝的三種。asset 由需要它的包帶進來，
+# 而目錄裡有幾個 asset 條目連 source_tar 都沒有——它們是給下載代理認坐標用的，從來裝不了。
+if grep -q "BROWSABLE_TYPES = new Set(\['adapter', 'app', 'service'\])" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "item.types?.some((type) => BROWSABLE_TYPES.has(type))" "$ROOT/web/admin/admin-controls.js"; then
+  ok "The installable list is framed by what a person installs, not by everything in the catalog"
+else
+  bad "The installable list is framed by what a person installs, not by everything in the catalog"
+fi
+# 已裝的包按鈕要說出它已經裝了：一個可點的按鈕是一句承諾，而按下去只會把同一版重裝一遍。
+if grep -q "installedVersions = new Map" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q 'actionButton(`已安装 ${installedVersion}`' "$ROOT/web/admin/admin-controls.js"; then
+  ok "An installed package offers no enabled Install button"
+else
+  bad "An installed package offers no enabled Install button"
+fi
+# 關閉這件事由一個從不摘掉的綁定負責。先前每個階段只改 textContent，而確認階段結束時
+# 會摘掉自己的監聽器，於是改名成「完成」的按鈕一個處理器都沒有——點了毫無反應。
+if grep -q "installDialogBindDismiss" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "installDismissBound = true" "$ROOT/web/admin/admin-controls.js"; then
+  ok "The install dialog can always be dismissed, whatever the button is currently called"
+else
+  bad "The install dialog can always be dismissed, whatever the button is currently called"
+fi
+# 憑證被釘住時連命令都不該給——一個自己都不相信會成功的操作，不該長得像可用的操作。
+curl -sf -b "$COOKIE" "$BASE/api/admin/credentials" >"$WORK/credentials.json" 2>/dev/null || \
+  curl -sf -b "$COOKIE" "$BASE/api/admin/settings" >"$WORK/credentials.json" 2>/dev/null || true
+if node -e 'const t=require("node:fs").readFileSync(process.argv[1],"utf8");
+  process.exit(t.includes("locked_by") ? 0 : 1)' "$WORK/credentials.json" 2>/dev/null \
+  && grep -q "credentials.editable === false" "$ROOT/web/admin/app-core.js" \
+  && grep -q "locked.keys" "$ROOT/web/admin/app-core.js"; then
+  ok "Pinned credentials say which keys pin them instead of handing over a doomed command"
+else
+  bad "Pinned credentials say which keys pin them instead of handing over a doomed command"
 fi
 
 echo "--- 6. Logout ---"

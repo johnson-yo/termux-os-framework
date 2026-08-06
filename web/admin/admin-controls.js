@@ -33,7 +33,27 @@ const installFlow = {
   cancel: null,
 };
 
+/**
+ * ⭐ 关闭按钮的**行为绑一次，之后只换字**。
+ *
+ * 它一路上要当「取消」「关闭」「完成」，而先前每一步都只改 `textContent`——
+ * 偏偏确认那一步结束时会把自己的监听器摘掉（它离开了确认这个角色，摘是对的），
+ * 于是走到结尾改名成「完成」的那个按钮**一个处理器都没有**，点了毫无反应，
+ * 只能刷新整页。
+ *
+ * ⚠ 形状：**一个控件被重新赋予角色，却没有被重新赋予行为**。不报错，看起来完全正常。
+ * 所以这里反过来：关掉对话框这件事从头到尾都由同一个绑定负责，谁都不许摘；
+ * 换角色的人只换标签，以及**额外**监听它。
+ */
+let installDismissBound = false;
+function installDialogBindDismiss() {
+  if (installDismissBound) return;
+  $('install-cancel').addEventListener('click', () => $('install-dialog').close());
+  installDismissBound = true;
+}
+
 function installDialogReset(title, steps) {
+  installDialogBindDismiss();
   const dialog = $('install-dialog');
   $('install-title').textContent = tr(title);
   const list = $('install-steps');
@@ -97,7 +117,8 @@ function installAwaitConsent({ rows, warning = null, acknowledgement = null, lab
       resolve(value);
     };
     const onConfirm = () => { confirm.hidden = true; $('install-warning').hidden = true; done(true); };
-    const onCancel = () => { $('install-dialog').close(); done(false); };
+    // ⚠ 只负责「使用者不同意」这件事；关闭对话框由那个从不摘掉的绑定做。
+    const onCancel = () => done(false);
     confirm.addEventListener('click', onConfirm);
     $('install-cancel').addEventListener('click', onCancel);
   });
@@ -1187,13 +1208,30 @@ function renderRegistry(data) {
     return wrap;
   }
   const grid = document.createElement('div'); grid.className = 'package-grid registry-grid';
-  // Framework 不是可安裝的 Package——它有自己的更新流程（System → Framework Update）。
-  // 混在包列表裡只會讓人誤以為可以像裝包一樣裝它。
-  const installable = registry.packages.filter((item) => !item.types?.includes('framework'));
+  /**
+   * ⭐ 这一页回答的是「**我要装点什么**」，所以只列使用者会自己去装的三种。
+   *
+   * Framework 有它自己的更新流程（System → Framework Update），混在这里只会让人
+   * 以为可以像装包一样装它。
+   *
+   * asset 则是另一回事：模型资产由**需要它的那个包**作为依赖带进来，没有人会先想
+   * 「我今天想装个 SenseVoice 权重」。而目录里那几个 asset 条目里，有一半连
+   * `source_tar` 都没有——它们存在的唯一理由是让下载代理认得上游那几个文件的坐标，
+   * 从来就不是可安装的东西。把它们排在这里，一半是装不了的假入口，另一半是
+   * 「装了也没用，除非你已经装了要用它的那个包」。
+   *
+   * ⚠ 这只是**这一页的取景**，不是能力上的限制：依赖解析走的是服务端的
+   * `packageRegistryFindByPackageId`，asset 照样会被自动装上。
+   */
+  const BROWSABLE_TYPES = new Set(['adapter', 'app', 'service']);
+  const installable = registry.packages.filter(
+    (item) => item.types?.some((type) => BROWSABLE_TYPES.has(type)));
   if (!installable.length) {
     wrap.append(text('p', 'Registry 没有返回可安装的 Package。', 'empty'));
     return wrap;
   }
+  // 已安装的那些：卡片上的按钮该说「已安装」，而不是给一个按下去只会重来一遍的「安装」。
+  const installedVersions = new Map((data.packages ?? []).map((p) => [p.id, p.version]));
   for (const item of installable) {
     const card = document.createElement('article'); card.className = 'panel package-card registry-card';
     const version = item.versions?.find((entry) => entry.version === (item.latest_verified_version ?? item.latest_version)) ?? item.versions?.[0];
@@ -1208,9 +1246,20 @@ function renderRegistry(data) {
       const detailBox = document.createElement('div'); detailBox.className = 'registry-details'; detailBox.hidden = true;
       const selection = { source: item.source, repository: item.repository, version: version.version, kind: file.kind, file: file.name };
       let publicDetailsLoaded = false;
-      const download = actionButton('安装', 'primary',
-        () => runGuidedPackageInstall({ selection, name: item.display_name ?? item.repository, version: version.version }),
-        !canWrite() || Boolean(data.active_job));
+      /**
+       * ⚠ 已装的包按钮要**说出它已经装了**，而不是保持「安装」可点。
+       *
+       * 一个可点的按钮是一句承诺：按下去会发生一件你想要的事。而在这里按下去只会把
+       * 同一个版本再走一遍安装流程——什么也没变，但过程中包会被停掉重载。
+       * 版本一并写出来：使用者真正想知道的下一个问题是「装的是不是这一版」。
+       */
+      const installedVersion = item.package_id ? installedVersions.get(item.package_id) : undefined;
+      const isInstalled = installedVersion !== undefined;
+      const download = isInstalled
+        ? actionButton(`已安装 ${installedVersion}`, 'ghost', () => {}, true)
+        : actionButton('安装', 'primary',
+          () => runGuidedPackageInstall({ selection, name: item.display_name ?? item.repository, version: version.version }),
+          !canWrite() || Boolean(data.active_job));
       // 安全資訊的價值在**可查**，不在**強制**。先前 Download 被 Details 門禁擋住，
       // 效果只是多一次點擊，沒有人因此真的讀了權限。改為預設收起、隨時可展開。
       const disclosure = document.createElement('details');

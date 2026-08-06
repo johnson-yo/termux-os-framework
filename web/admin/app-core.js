@@ -725,6 +725,27 @@ async function renderAdministration() {
    * `HISTCONTROL=ignoreboth`，空格开头的命令不进 shell 历史。
    */
   const minimumLength = credentials.login_password?.minimum_length ?? 16;
+  /**
+   * ⚠ **凭证被钉住时，连命令都不该给。**
+   *
+   * 把这里改成「复制命令」的时候，我删掉了原来那段可编辑性检查——于是面板会递给你
+   * 一条它明知会被 `framework.sh` 拒绝的命令，而拒绝发生在你粘贴之后。
+   * 一个自己都不相信会成功的操作，不该长得像一个可用的操作。
+   *
+   * 说清楚该做什么：删掉哪两个键，以及删掉之后控制权会回到哪里。
+   */
+  const passwordLocked = credentials.editable === false;
+  if (passwordLocked) {
+    const locked = credentials.locked_by ?? {};
+    const keys = (locked.keys ?? []).join(' 和 ');
+    password.body.append(
+      text('p', locked.kind === 'environment'
+        ? `密码由进程环境变量 ${keys} 决定，改密码要改启动 Framework 的那份环境，不在这里。`
+        : `密码被钉在 ${locked.path ?? '配置文件'} 里。删掉其中的 ${keys} 两个键并重启 Framework，`
+          + '控制权就会回到已经存在的私有凭证文件，这一栏也会重新可用——现有的登录不受影响。',
+      'alert warning'),
+      valueRow('凭证来源', credentials.source));
+  }
   const passwordForm = document.createElement('form'); passwordForm.className = 'credential-form';
   // 明文，不遮蔽：遮蔽换来的是打错字看不见，而这条路上打错的后果是把自己关在门外。
   const newPassword = document.createElement('input');
@@ -752,8 +773,10 @@ async function renderAdministration() {
       : '复制没成功，请手动选中上面那行。开头那个空格要一起带上，它让这条命令不进 shell 历史。';
     hint.className = 'meta';
   });
-  password.body.append(passwordForm, commandBox, hint,
-    valueRow('最短长度', `${minimumLength} ${tr('个字符')}`));
+  if (!passwordLocked) {
+    password.body.append(passwordForm, commandBox, hint,
+      valueRow('最短长度', `${minimumLength} ${tr('个字符')}`));
+  }
 
   // 语言放在这一页的最前面：它决定了下面所有内容用什么语言显示。
   const language = section('语言');

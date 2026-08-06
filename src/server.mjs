@@ -256,6 +256,20 @@ const credentialSnapshot = () => ({
   schema: 'termux-os.framework-credentials.v1',
   source: credentialSource,
   editable: credentialsEditable,
+  /**
+   * 凭证被钉在哪里，以及要动它得改哪两个键。
+   *
+   * ⚠ 只回答「不能改」是把使用者留在原地：这道守卫对「运维刻意把凭证写进配置」是对的，
+   * 对「设备从更早的安装继承来的」就是个没有出口的陷阱——而两者长得一模一样。
+   * 一条不说该做什么的拒绝，是披着解释外衣的死路。
+   */
+  locked_by: credentialsEditable ? null : {
+    kind: credentialSource, // 'config'（配置文件里有 auth 段）或 'environment'（进程环境变量）
+    path: credentialSource === 'config' ? CONFIG_PATH : null,
+    keys: credentialSource === 'config'
+      ? ['auth.admin_token', 'auth.admin_password']
+      : ['FRAMEWORK_ADMIN_TOKEN', 'FRAMEWORK_ADMIN_PASSWORD'],
+  },
   system_key_masked: secretMask(CFG.auth.admin_token),
   system_key_preview: secretMask(CFG.auth.admin_token),
   system_key_length: CFG.auth.admin_token.length,
