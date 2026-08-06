@@ -2,6 +2,7 @@
   "\nDEV WORKSPACE — 載入失敗（Framework 本體正常）": "\nDEV WORKSPACE — 載入失敗（Framework 本體正常）",
   " · 已回滚": " · 已回滾",
   "　由谁写入": "",
+  "（可选）": "",
   "（在 workspace root 之外）": "（在 workspace root 之外）",
   "「仅本机」只用 loopback。「局域网」会把 Package API 暴露在 0.0.0.0 上。重启会断开正在进行的 Package 会话，但该 Package 的持久配置与数据都会保留。": "「僅本機」只用 loopback。「區域網」會把 Package API 暴露在 0.0.0.0 上。重啟會斷開正在進行的 Package 會話，但該 Package 的持久配置與資料都會保留。",
   "「开始观察」只跟随新产生的日志。「清空视图」只清这个浏览器窗口，不会动已经存下来的日志。": "「開始觀察」只跟隨新產生的日誌。「清空檢視」只清這個瀏覽器視窗，不會動已經存下來的日誌。",

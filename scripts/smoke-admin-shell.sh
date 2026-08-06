@@ -469,12 +469,23 @@ if grep -q "BROWSABLE_TYPES = new Set(\['adapter', 'app', 'service'\])" "$ROOT/w
 else
   bad "The installable list is framed by what a person installs, not by everything in the catalog"
 fi
-# 已裝的包按鈕要說出它已經裝了：一個可點的按鈕是一句承諾，而按下去只會把同一版重裝一遍。
+# ⚠ 按鈕要按**版本**說話。先前只看「這個 id 裝過沒有」，於是裝了舊版之後新版的卡片
+# 寫著「最新已驗證 0.19.0」而按鈕是灰的「已安裝 0.18.0」——升級這條路整個消失了。
 if grep -q "installedVersions = new Map" "$ROOT/web/admin/admin-controls.js" \
-  && grep -q 'actionButton(`已安装 ${installedVersion}`' "$ROOT/web/admin/admin-controls.js"; then
-  ok "An installed package offers no enabled Install button"
+  && grep -q "function compareVersionStrings" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "relation === 'same'" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q '更新到 ${version.version}' "$ROOT/web/admin/admin-controls.js"; then
+  ok "Only the same version disables Install; newer and older stay actionable"
 else
-  bad "An installed package offers no enabled Install button"
+  bad "Only the same version disables Install; newer and older stay actionable"
+fi
+# 索引裡已經有 provides/depends，面板必須看它——否則一個宣告了十一條依賴的包
+# 會被寫成「未申報任何公開資訊」，而那句話讀起來像上游偷懶。
+if grep -q "details.packages ?? \[\]" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "Requires packages" "$ROOT/web/admin/admin-controls.js"; then
+  ok "Declared dependencies are shown from the index, not only from public_metadata"
+else
+  bad "Declared dependencies are shown from the index, not only from public_metadata"
 fi
 # 關閉這件事由一個從不摘掉的綁定負責。先前每個階段只改 textContent，而確認階段結束時
 # 會摘掉自己的監聽器，於是改名成「完成」的按鈕一個處理器都沒有——點了毫無反應。

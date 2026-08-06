@@ -1047,6 +1047,22 @@ async function loadAdapters() {
  * 那個 Package 自己的頁面上下載與刪除。列在這裡只會讓人以為它是一個可以獨立
  * 管理的東西，然後面對一堆自己既沒選過也不知道能不能刪的條目。
  */
+/**
+ * 目录里的版本相对已装版本是什么关系。⚠ 按段比较数字，不是字符串——
+ * `0.2.7` 的字符串序排在 `0.2.10` 前面，而那正是这套目录踩过的坑。
+ */
+function compareVersionStrings(offered, installed) {
+  const parts = (value) => String(value).split('.').map((n) => Number(n) || 0);
+  const [a, b] = [parts(offered), parts(installed)];
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const left = a[i] ?? 0;
+    const right = b[i] ?? 0;
+    if (left > right) return 'newer';
+    if (left < right) return 'older';
+  }
+  return 'same';
+}
+
 const isAssetPackage = (item) => (item.types ?? []).includes('asset')
   || String(item.id ?? '').includes('.asset.');
 
@@ -1189,6 +1205,23 @@ function renderRegistryDetails(container, details) {
   appendSection('Ports', details.ports);
   appendSection('License', details.license);
   appendSection('AI disclosure', details.ai_disclosure);
+  /**
+   * ⭐ 索引里**已经**有 provides/depends，先前这里一条都不看。
+   *
+   * 于是一个声明了 5 项能力、11 条依赖的包被写成「未申報任何公開資訊」——那句话
+   * 读起来像上游偷懒，实际是我们拿着答案没打开。⚠ 两处 schema 不同不是不显示的理由：
+   * `public_metadata` 是包自己写的散文，索引是从**归档本身**抽出来的事实，后者更该信。
+   */
+  const indexed = (details.packages ?? []).flatMap((entry) => entry.provides ?? []);
+  const needs = (details.packages ?? []).flatMap((entry) => entry.depends ?? []);
+  const byKind = (list, kind) => list.filter((n) => n.kind === kind).map((n) => n.id);
+  appendSection('Provides capabilities', byKind(indexed, 'capability'));
+  appendSection('Provides assets', byKind(indexed, 'asset'));
+  appendSection('Requires packages', needs.filter((n) => n.kind === 'package')
+    .map((n) => `${n.id}${n.version ? ` ${n.version}` : ''}${n.required === false ? '（可选）' : ''}`));
+  appendSection('Requires capabilities', byKind(needs, 'capability'));
+  appendSection('Requires assets', needs.filter((n) => n.kind === 'asset')
+    .map((n) => `${n.id}${n.required === false ? '（可选）' : ''}`));
   if (details.official?.length) appendSection('Official maintainers', details.official);
   // 這些欄位大多來自上游 Registry，未填就是空。只剩一個 Official 時要說清楚
   // 「是上游沒申報」，而不是讓人以為介面漏顯示了。
@@ -1258,17 +1291,23 @@ function renderRegistry(data) {
       const selection = { source: item.source, repository: item.repository, version: version.version, kind: file.kind, file: file.name };
       let publicDetailsLoaded = false;
       /**
-       * ⚠ 已装的包按钮要**说出它已经装了**，而不是保持「安装」可点。
+       * ⚠ 按钮要按**版本**说话，不是按「这个 id 装过没有」。
        *
-       * 一个可点的按钮是一句承诺：按下去会发生一件你想要的事。而在这里按下去只会把
-       * 同一个版本再走一遍安装流程——什么也没变，但过程中包会被停掉重载。
-       * 版本一并写出来：使用者真正想知道的下一个问题是「装的是不是这一版」。
+       * 先前它只看装没装：于是装了 0.18.0 之后，0.19.0 的卡片上写着「最新已验证 0.19.0」，
+       * 按钮却是灰的「已安装 0.18.0」——**升级这条路整个消失了**，而卡片上每一个字都是对的。
+       * 一个只回答「装过吗」的控件，答不了「该不该按」。
+       *
+       * 三种关系三句话，与 Framework 更新页同一套词：同版本没事可做，新版本是更新，
+       * 旧版本是降级（明说方向，因为它可能读不懂当前配置）。
        */
       const installedVersion = item.package_id ? installedVersions.get(item.package_id) : undefined;
-      const isInstalled = installedVersion !== undefined;
-      const download = isInstalled
+      const relation = installedVersion === undefined ? 'new'
+        : compareVersionStrings(version.version, installedVersion);
+      const label = { new: '安装', newer: `更新到 ${version.version}`, older: `降级到 ${version.version}` }[relation]
+        ?? `已安装 ${installedVersion}`;
+      const download = relation === 'same'
         ? actionButton(`已安装 ${installedVersion}`, 'ghost', () => {}, true)
-        : actionButton('安装', 'primary',
+        : actionButton(label, 'primary',
           () => runGuidedPackageInstall({ selection, name: item.display_name ?? item.repository, version: version.version }),
           !canWrite() || Boolean(data.active_job));
       // 安全資訊的價值在**可查**，不在**強制**。先前 Download 被 Details 門禁擋住，
