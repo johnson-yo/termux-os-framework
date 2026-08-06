@@ -491,8 +491,33 @@ function downloadCoordinates(project, version, archiveName, packageId) {
   };
 }
 
-const latestVersionOf = (project) => project.versions.find((item) => item.version === project.latest_version)
-  ?? project.versions.at(-1);
+/** A version is installable only if it actually carries a package archive. */
+const hasArchive = (version) => (version.files ?? [])
+  .some((item) => item.kind === 'source_tar' && String(item.name ?? '').endsWith('.tar.gz'));
+
+/**
+ * The newest version of this project that can actually be installed.
+ *
+ * ⚠ `latest_version` is not that question. One repository can host both package
+ * archives and the model files those packages point at, and a remote model file is
+ * registered under its immutable commit sha — so a project's newest "version" is
+ * routinely a 40-character sha whose entry contains no archive at all. Resolving a
+ * dependency to it reports the package as missing from the catalog while every
+ * installable version sits right there in the list.
+ *
+ * So: prefer the declared latest when it is installable, otherwise take the newest
+ * version that is. Falling back to the last entry regardless of contents is what
+ * turned a data-shape quirk into "this package does not exist".
+ */
+const latestVersionOf = (project) => {
+  const declared = project.versions.find((item) => item.version === project.latest_version);
+  if (declared && hasArchive(declared)) return declared;
+  const installable = project.versions.filter(hasArchive);
+  if (installable.length) {
+    return installable.slice().sort((a, b) => compareVersions(a.version, b.version)).at(-1);
+  }
+  return declared ?? project.versions.at(-1);
+};
 
 export function packageRegistryFindByPackageId(packageId) {
   const wanted = String(packageId ?? '').trim();
@@ -736,6 +761,40 @@ if (process.argv.includes('--self-test')
   const fallbackResult = await downloadPackageFromRegistry(selected);
   test('Registry is the second-stage fallback', fallbackResult.origin.path === 'termux_os_registry'
     && fallbackResult.origin.fallback_from === 'github_direct');
+
+  /**
+   * ⭐ 一个仓库同时托管包归档与模型文件时，模型文件按 40 位 commit sha 登记，
+   * 于是项目的 `latest_version` 常常是一个**没有归档**的 sha。照它解析依赖，
+   * 会把一个每个可安装版本都在列表里的包报成「不在目录里」——真机上就是这样炸的。
+   */
+  {
+    const withModelRevisions = {
+      source: 'huggingface',
+      repository: 'owner/assets',
+      package_id: 'github.example.asset.thing',
+      display_name: 'Thing',
+      types: ['asset'],
+      versions: [
+        { version: '1.0.0', files: [{ kind: 'source_tar', name: 'thing-1.0.0.tar.gz', size: 10, sha256: 'a'.repeat(64) }] },
+        { version: '3.1.0', files: [{ kind: 'source_tar', name: 'thing-3.1.0.tar.gz', size: 10, sha256: 'b'.repeat(64) }] },
+        { version: 'e'.repeat(40), files: [{ kind: 'model_file', name: 'ctx/model.bin', size: 10, sha256: 'c'.repeat(64) }] },
+      ],
+      latest_version: 'e'.repeat(40),
+    };
+    state = { ...emptySnapshot(), status: 'ready', packages: [withModelRevisions] };
+    const found = packageRegistryFindByPackageId('github.example.asset.thing');
+    test('a model-file revision is never resolved as the installable version',
+      found !== null && found.version === '3.1.0' && found.file === 'thing-3.1.0.tar.gz');
+
+    state = { ...emptySnapshot(), status: 'ready', packages: [{ ...withModelRevisions, latest_version: '1.0.0' }] };
+    test('a declared latest that does carry an archive is still honoured',
+      packageRegistryFindByPackageId('github.example.asset.thing')?.version === '1.0.0');
+
+    state = { ...emptySnapshot(), status: 'ready', packages: [{ ...withModelRevisions,
+      versions: [withModelRevisions.versions[2]] }] };
+    test('a project with no archive at all resolves to nothing, not to a model file',
+      packageRegistryFindByPackageId('github.example.asset.thing') === null);
+  }
 
   configurePackageRegistry({
     baseUrl: 'https://registry.example.test',

@@ -2,6 +2,15 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.24
+
+- **A dependency no longer resolves to a version that has nothing to install.** One repository can
+  host both package archives and the model files those packages point at, and a remote model file
+  is registered under its immutable commit sha — so a project's newest "version" is routinely a
+  40-character sha carrying no archive. Resolving a dependency to it reported the package as
+  missing from the catalog while every installable version sat in the same list. Resolution now
+  takes the newest version that actually carries an archive.
+
 ## 0.2.23
 
 - **The installable list shows what a person installs.** It used to show everything in the
