@@ -2,6 +2,17 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.27
+
+- **Asset Packages no longer appear under Packages or Package settings.** A model asset belongs to
+  whichever Package needs it and is managed from that Package's own page. Listing them here
+  presented a set of entries nobody chose and nobody can judge whether it is safe to remove.
+- **`DELETE /api/assets/<id>/payload`** removes a payload that was fetched on demand, so the
+  Package that needs a model can also give the space back. An asset that arrived with its Package
+  is refused: removing it would make "installed" untrue.
+- Fetching an asset now requires write permission. It writes hundreds of megabytes; it was
+  reachable with read.
+
 ## 0.2.26
 
 - **A missing required package dependency is now actually installed with its target.** The plan

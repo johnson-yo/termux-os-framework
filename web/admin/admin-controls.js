@@ -1040,11 +1040,22 @@ async function loadAdapters() {
   }
 }
 
+/**
+ * ⭐ 資產不在這兩頁裡。
+ *
+ * 一個 asset 是別的 Package 的模型權重——它由需要它的那個 Package 帶進來，也該在
+ * 那個 Package 自己的頁面上下載與刪除。列在這裡只會讓人以為它是一個可以獨立
+ * 管理的東西，然後面對一堆自己既沒選過也不知道能不能刪的條目。
+ */
+const isAssetPackage = (item) => (item.types ?? []).includes('asset')
+  || String(item.id ?? '').includes('.asset.');
+
 function renderInstalledPackages(data) {
   const wrap = document.createElement('div');
   if (data.broken?.length) wrap.append(text('div', `${data.broken.length} Installed Root record(s) need review. See Recent operations for the exact failure.`, 'alert error'));
-  const packages = (data.packages ?? []).filter(packageMatches);
-  if (!data.packages?.length) wrap.append(text('p', '还没有安装任何 Package，可以从下面的文件安装。', 'empty'));
+  const visible = (data.packages ?? []).filter((item) => !isAssetPackage(item));
+  const packages = visible.filter(packageMatches);
+  if (!visible.length) wrap.append(text('p', '还没有安装任何 Package，可以从下面的文件安装。', 'empty'));
   else if (!packages.length) wrap.append(text('p', '没有符合当前搜索或筛选的 Package。', 'empty'));
   else {
     const grid = document.createElement('div'); grid.className = 'package-grid';
@@ -1604,10 +1615,11 @@ function renderPackageSettings(data) {
   panel.body.append(valueRow('Package 端口范围', `${data.policy.range.start}–${data.policy.range.end}`),
     valueRow('核心保留端口', data.policy.reserved.join(', ')),
     text('p', '「仅本机」只用 loopback。「局域网」会把 Package API 暴露在 0.0.0.0 上。重启会断开正在进行的 Package 会话，但该 Package 的持久配置与数据都会保留。', 'muted'));
-  if (!data.packages?.length) panel.body.append(text('p', '没有可配置的已安装 Package。', 'empty'));
+  const configurable = (data.packages ?? []).filter((item) => !isAssetPackage(item));
+  if (!configurable.length) panel.body.append(text('p', '没有可配置的已安装 Package。', 'empty'));
   else {
     const grid = document.createElement('div'); grid.className = 'package-setting-grid';
-    grid.append(...data.packages.map((item) => renderPackageSettingCard(item, data.policy)));
+    grid.append(...configurable.map((item) => renderPackageSettingCard(item, data.policy)));
     panel.body.append(grid);
   }
   replacePage(panel.card);

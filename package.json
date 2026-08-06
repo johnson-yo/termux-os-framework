@@ -1,6 +1,6 @@
 {
   "name": "termux-os-framework",
-  "version": "0.2.26",
+  "version": "0.2.27",
   "description": "A local-first package and service framework for Android and Termux",
   "type": "module",
   "license": "Apache-2.0",

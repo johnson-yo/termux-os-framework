@@ -62,6 +62,7 @@ import {
   listLogComponents, readLogSlice, startObservation, setObservationRoot, setObservationServices,
 } from './system/observation.mjs';
 import { listAssets, describeAsset } from './assets/runtime.mjs';
+import { readRegistry as readAssetRegistry, deactivateAsset } from './assets/registry.mjs';
 import {
   AUTH_PASSWORD_MIN_LENGTH, AUTH_TOKEN_MIN_LENGTH, defaultAuthFile, ensureAuthFile,
   generateAuthToken, writeAuthFile,
@@ -1783,6 +1784,8 @@ const server = http.createServer(async (req, res) => {
     if (!authed(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
     const fetchAsset = url.match(/^\/api\/assets\/(.+)\/fetch$/);
     if (fetchAsset && req.method === 'POST') {
+      // ⚠ 取一个资产会写几百 MB 到共享 store，那不是读操作。
+      if (!authed(req, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });
       const assetId = decodeURIComponent(fetchAsset[1]);
       const r = await fetchAssetOnDemand(assetId).catch((error) => ({
         ok: false, error: 'fetch_failed', detail: String(error?.message ?? error),
@@ -1794,6 +1797,40 @@ const server = http.createServer(async (req, res) => {
           : r.error === 'insufficient_space' ? 507
             : String(r.error).startsWith('target_mismatch') || r.error === 'not_optional' ? 409 : 502;
       return json(res, status, r);
+    }
+    /**
+     * 删除一个**按需取得**的资产载荷。
+     *
+     * ⛔ 只删这条路取来的。安装时就该到位的资产不许从这里删——「装好了」这个状态
+     * 必须还是真的，否则一个包会在自己声称完整的时候缺着必需的东西。
+     *
+     * ⚠ 删的是这一份载荷，不是这个包。共享 store 里同版本同 target 的目录只有一个
+     * 拥有者，所以先摘登记再删字节：反过来会留下一条指向空目录的登记。
+     */
+    const dropAsset = url.match(/^\/api\/assets\/(.+)\/payload$/);
+    if (dropAsset && req.method === 'DELETE') {
+      if (!authed(req, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });
+      const assetId = decodeURIComponent(dropAsset[1]);
+      const entry = readAssetRegistry().assets?.[assetId];
+      if (!entry) return json(res, 404, { ok: false, error: 'unknown_asset' });
+      if (entry.fetched_on_demand !== true) {
+        return json(res, 409, {
+          ok: false,
+          error: 'not_on_demand',
+          detail: `${assetId} arrived with its package; removing it would make "installed" untrue`,
+        });
+      }
+      deactivateAsset(assetId);
+      let removed = 0;
+      try {
+        if (entry.path && fs.existsSync(entry.path)) {
+          removed = fs.readdirSync(entry.path).length;
+          fs.rmSync(entry.path, { recursive: true, force: true });
+        }
+      } catch (error) {
+        return json(res, 500, { ok: false, error: 'payload_delete_failed', detail: String(error?.message ?? error) });
+      }
+      return json(res, 200, { ok: true, id: assetId, removed_files: removed, path: entry.path ?? null });
     }
     const variants = url.match(/^\/api\/assets\/(.+)\/variants$/);
     if (variants && req.method === 'GET') {
