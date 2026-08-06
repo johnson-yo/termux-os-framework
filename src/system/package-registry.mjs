@@ -522,7 +522,16 @@ const latestVersionOf = (project) => {
 export function packageRegistryFindByPackageId(packageId) {
   const wanted = String(packageId ?? '').trim();
   if (!wanted) return null;
-  const project = state.packages.find((item) => item.package_id === wanted);
+  /**
+   * ⚠ 两个项目声称同一个 package_id 时**不猜**。
+   *
+   * 取第一个会安静地装上另一个仓库的版本——真机上就这样解析到了一个早已被取代的
+   * 项目里的旧版本，而两边看起来都对。这与下面「有多个提供方时不猜」是同一条线：
+   * 目录里的重复身份是目录的错误，不是调用方该替它做的选择。
+   */
+  const claiming = state.packages.filter((item) => item.package_id === wanted);
+  if (claiming.length > 1) return null;
+  const project = claiming[0];
   if (!project) return null;
   const version = latestVersionOf(project);
   if (!version) return null;
@@ -793,6 +802,11 @@ if (process.argv.includes('--self-test')
     state = { ...emptySnapshot(), status: 'ready', packages: [{ ...withModelRevisions,
       versions: [withModelRevisions.versions[2]] }] };
     test('a project with no archive at all resolves to nothing, not to a model file',
+      packageRegistryFindByPackageId('github.example.asset.thing') === null);
+
+    state = { ...emptySnapshot(), status: 'ready',
+      packages: [withModelRevisions, { ...withModelRevisions, repository: 'owner/other' }] };
+    test('two projects claiming one package id resolve to nothing rather than a guess',
       packageRegistryFindByPackageId('github.example.asset.thing') === null);
   }
 

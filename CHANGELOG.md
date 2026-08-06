@@ -2,6 +2,12 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.25
+
+- **Two catalog projects claiming one package id resolve to nothing rather than to a guess.**
+  Taking the first match silently installed a superseded project's older version while both sides
+  looked correct. A duplicate identity is the catalog's error, not a choice for the caller.
+
 ## 0.2.24
 
 - **A dependency no longer resolves to a version that has nothing to install.** One repository can
