@@ -173,7 +173,13 @@ export function configOverrides(config, defaults) {
 /** True when the migration changed the file's meaning, i.e. it is worth rewriting and reporting. */
 export const migrationChangedConfig = (report) => report.defaulted.length > 0 || report.coerced.length > 0;
 
-if (process.argv.includes('--self-test')) {
+const { fileURLToPath: selfTestUrl } = await import('node:url');
+const { resolve: selfTestPath } = await import('node:path');
+// ⚠ 只在**本檔被直接執行**時跑。少了 argv[1] 這半，任何 transitively import 本檔的
+// 自檢都會被這一塊劫持並提前 process.exit——那個自檢的斷言一條也不會執行，
+// 而輸出看起來完全正常，只是印的是別人的 PASS。
+if (process.argv.includes('--self-test')
+  && process.argv[1] && selfTestPath(process.argv[1]) === selfTestUrl(import.meta.url)) {
   let fails = 0;
   const test = (name, condition) => { console.log(`${condition ? 'PASS' : 'FAIL'} ${name}`); if (!condition) fails++; };
 

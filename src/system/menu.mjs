@@ -44,7 +44,13 @@ export const adminMenuHasPath = (menu, pathname) => {
 };
 
 // node src/system/menu.mjs --self-test
-if (process.argv.includes('--self-test')) {
+const { fileURLToPath: selfTestUrl } = await import('node:url');
+const { resolve: selfTestPath } = await import('node:path');
+// ⚠ 只在**本檔被直接執行**時跑。少了 argv[1] 這半，任何 transitively import 本檔的
+// 自檢都會被這一塊劫持並提前 process.exit——那個自檢的斷言一條也不會執行，
+// 而輸出看起來完全正常，只是印的是別人的 PASS。
+if (process.argv.includes('--self-test')
+  && process.argv[1] && selfTestPath(process.argv[1]) === selfTestUrl(import.meta.url)) {
   let fails = 0;
   const t = (name, cond) => { console.log(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
   const read = buildAdminMenu();

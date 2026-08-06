@@ -176,7 +176,21 @@ export function resolveDeclaredDependencies(declared, {
    */
   const supply = [];
   for (const node of plan.nodes ?? []) {
-    if (node.kind !== DEP_KIND.CAPABILITY || node.state !== DEP_STATE.MISSING) continue;
+    if (node.state !== DEP_STATE.MISSING) continue;
+    /**
+     * ⛔ 一個**必需**的 Package 依賴，坐標已經在節點上了，也要一起裝。
+     *
+     * 先前這個迴圈只認 Capability，於是三個帶著完整下載坐標的 Package 依賴
+     * 被整整跳過：安裝「成功」，裝出來的包卻缺著它宣告過的必需依賴。
+     * 計畫算得出來、卻不照著做，比算不出来更難查——前者每一步看起來都是對的。
+     *
+     * 可選依賴照 opkg 的 `Suggests` 辦：列出來，不預裝。
+     */
+    if (node.kind === DEP_KIND.PACKAGE) {
+      if (node.required !== false && node.download?.package_id) supply.push(node.download);
+      continue;
+    }
+    if (node.kind !== DEP_KIND.CAPABILITY) continue;
     const candidates = providers(node.id, DEP_KIND.CAPABILITY);
     if (!candidates.length) continue;
     node.providers = candidates;
@@ -184,8 +198,23 @@ export function resolveDeclaredDependencies(declared, {
     else node.needs_choice = true;
   }
 
-  const already = new Set(plan.install_order ?? []);
-  const additions = supply.filter((item) => item.package_id && !already.has(item.package_id));
+  /**
+   * ⚠ 去重只在 `supply` **自己內部**做。
+   *
+   * 先前它拿 `install_order` 當「已排定」——而那份清單裡裝的正是每一個缺席的 Package
+   * 依賴，於是它們被當成「已經安排好了」而從 supply 裡剔除乾淨。可是真正去下載的
+   * 只有 supply：`install_order` 從頭到尾沒有任何執行者。一個算得出來、印得出來、
+   * 卻沒人照著做的清單，比沒有這份清單更難發現。
+   *
+   * 這裡要防的是同一個包被排兩次（一個 Capability 的提供方同時也被顯式宣告為
+   * Package 依賴），按 package_id 去重即可。
+   */
+  const seen = new Set();
+  const additions = supply.filter((item) => {
+    if (!item.package_id || seen.has(item.package_id)) return false;
+    seen.add(item.package_id);
+    return true;
+  });
   if (!additions.length) return plan;
   return {
     ...plan,
@@ -249,3 +278,50 @@ export function reverseDependencies(targetId, { kind = DEP_KIND.PACKAGE } = {}) 
 }
 
 export { DEP_STATE, DEP_KIND };
+
+// ============================================================
+// 自檢：node src/packages/dependency-runtime.mjs --self-test
+// ============================================================
+const { fileURLToPath } = await import('node:url');
+const { resolve: resolvePath } = await import('node:path');
+if (process.argv.includes('--self-test')
+  && process.argv[1] && resolvePath(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  let fails = 0;
+  const t = (name, cond) => { console.log(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails += 1; };
+
+  const coords = (id, version) => ({
+    package_id: id, source: 'huggingface', repository: `owner/${id}`,
+    version, kind: 'source_tar', file: `package/${id}-${version}.tar.gz`, size: 100, sha256: 'a'.repeat(64),
+  });
+  const catalog = (id) => (id.startsWith('pkg.') ? coords(id, '1.0.0') : null);
+  const providers = (id) => (id === 'cap.one' ? [coords('pkg.provider', '2.0.0')] : []);
+
+  const declared = [
+    { kind: DEP_KIND.PACKAGE, id: 'pkg.required', version: '>=1.0.0', required: true },
+    { kind: DEP_KIND.PACKAGE, id: 'pkg.optional', version: '>=1.0.0', required: false },
+    { kind: DEP_KIND.CAPABILITY, id: 'cap.one', required: true },
+  ];
+  const plan = resolveDeclaredDependencies(declared, { catalog, providers });
+  const supplied = (plan.supply ?? []).map((item) => item.package_id).sort();
+
+  /**
+   * ⭐ 這條抓的是一個真的漏出去過的缺陷：迴圈只認 Capability，於是帶著完整下載坐標的
+   * Package 依賴被整整跳過——安裝「成功」，裝出來的包缺著它宣告過的必需依賴。
+   */
+  t('a missing required package dependency is installed alongside the target',
+    supplied.includes('pkg.required'));
+  t('a capability is still translated into the package that provides it',
+    supplied.includes('pkg.provider'));
+  t('an optional dependency is listed but never installed for you',
+    !supplied.includes('pkg.optional'));
+
+  const noCoords = resolveDeclaredDependencies(
+    [{ kind: DEP_KIND.PACKAGE, id: 'ghost.pkg', required: true }],
+    { catalog: () => null, providers: () => [] },
+  );
+  t('a required package the catalog cannot supply blocks the install instead of being skipped',
+    noCoords.installable === false
+    && (noCoords.missing_from_catalog ?? []).some((n) => n.id === 'ghost.pkg'));
+
+  process.exit(fails ? 1 : 0);
+}

@@ -19,6 +19,7 @@ for file in \
   src/packages/version.mjs \
   src/packages/manifest.mjs \
   src/packages/dependencies.mjs \
+  src/packages/dependency-runtime.mjs \
   src/packages/runtime-contract.mjs \
   src/packages/loader.mjs \
   src/assets/fetch.mjs \

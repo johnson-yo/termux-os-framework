@@ -2,6 +2,18 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.26
+
+- **A missing required package dependency is now actually installed with its target.** The plan
+  listed each one with a resolved download coordinate, and the install step downloaded only the
+  packages derived from capability dependencies — so a package could install "successfully" while
+  the dependencies it declared were never fetched. The list existed, was printed, and had no
+  executor.
+- **A module self-test no longer hijacks another module's run.** Six guards checked only for the
+  `--self-test` flag, so importing any of them during another module's self-test ran their block
+  and exited the process first. The importing module's assertions never executed, and the output
+  looked entirely normal — it was simply somebody else's.
+
 ## 0.2.25
 
 - **Two catalog projects claiming one package id resolve to nothing rather than to a guess.**
