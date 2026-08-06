@@ -426,17 +426,21 @@ async function installAssetPayloads(stagedPkg, manifest, targetId, options = {})
        * 取它由明確的動作觸發（`POST /api/assets/<id>/fetch`），因為「要哪一檔」
        * 是安裝之後才做的選擇。
        */
-      if (a.optional === true) {
-        console.log(`asset ${a.id}: optional, not fetched at install`);
-        continue;
-      }
       /**
        * ⛔ 別台機器的硬件版本不裝。一個包可以同時備好 V73 與 V79，但這台機器上
        * 只有一份能用；把另一份也拖下來既浪費幾百 MB，也讓「裝好了」變成一句
        * 不知道指哪一份的話。
+       *
+       * ⚠ 這一條排在 optional 之前。反過來的話，一個包宣告的兩份 ctx 會印出兩行
+       * 一模一樣的 "optional, not fetched"——讀起來像同一件事做了兩遍，而真正該說的是
+       * 其中一份根本不是給這台機器的。
        */
       if (a.target && !matchTarget(a.target, profile).ok) {
         console.log(`asset ${a.id}: variant ${a.target.id} is not for this device, skipped`);
+        continue;
+      }
+      if (a.optional === true) {
+        console.log(`asset ${a.id}: optional, not fetched at install`);
         continue;
       }
       // 遠程宣告的 payload 不在歸檔裡——它按坐標去取，不必也不該被打進包。
