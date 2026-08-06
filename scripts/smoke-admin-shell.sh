@@ -479,6 +479,17 @@ if grep -q "installedVersions = new Map" "$ROOT/web/admin/admin-controls.js" \
 else
   bad "Only the same version disables Install; newer and older stay actionable"
 fi
+# ⚠ 已裝卡片的「更新」按鈕與「可安裝」頁的按鈕必須用**同一個查找**，而且按 package id：
+# 先前兩處各按 `release.repository` 這個可選自由文本 join，包沒寫那一段就永遠是灰的，
+# 且沒有任何地方說得出為什麼。
+if grep -q "function registryEntryFor" "$ROOT/web/admin/admin-controls.js" \
+  && grep -q "registryByPackageId.get(item.id)" "$ROOT/web/admin/admin-controls.js" \
+  && ! grep -q "registryByRepository.get(normalizeRepository(item.repository))\s*;" "$ROOT/web/admin/admin-controls.js" \
+  && [ "$(grep -c "const entry = registryEntryFor(item);" "$ROOT/web/admin/admin-controls.js")" = 2 ]; then
+  ok "Both update buttons resolve the catalog entry the same way, by package id"
+else
+  bad "Both update buttons resolve the catalog entry the same way, by package id"
+fi
 # 索引裡已經有 provides/depends，面板必須看它——否則一個宣告了十一條依賴的包
 # 會被寫成「未申報任何公開資訊」，而那句話讀起來像上游偷懶。
 if grep -q "details.packages ?? \[\]" "$ROOT/web/admin/admin-controls.js" \

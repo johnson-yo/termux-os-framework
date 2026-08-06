@@ -2,6 +2,15 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.30
+
+- **An installed Package's Update button works too.** It was disabled for any Package whose
+  manifest omits the optional `release.repository`, because both "is there a newer version" and
+  "which version do I install" joined the catalog on that free-text URL. A Package that never
+  filled it in simply had a permanently greyed button and nothing anywhere said why. Both now
+  resolve the catalog entry through one shared lookup, keyed on the package id — the identity this
+  system uses everywhere else.
+
 ## 0.2.29
 
 - **An installed Package can be updated again.** The Install button was disabled whenever that

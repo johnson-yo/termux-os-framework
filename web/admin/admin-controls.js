@@ -663,8 +663,21 @@ const originPathLabel = (path) => ({
 }[path] ?? '已验证来源');
 
 /** 就地升级：从目录里取到 selection，交给同一条引导流程。 */
+/**
+ * 这个已装的包对应目录里的哪一条。
+ *
+ * ⚠ 先前「有没有新版本」与「去装哪一版」各自写了一遍同样的查找，而且都只按
+ * `release.repository` 这个**可选**的自由文本 join。同一个查找出现两次，就有两次
+ * 各自走偏的机会；用一个可选字段当连接键，则让「能不能更新」取决于有没有人记得填它。
+ */
+function registryEntryFor(item) {
+  return registryByPackageId.get(item.id)
+    ?? (item.repository ? registryByRepository.get(normalizeRepository(item.repository)) : null)
+    ?? null;
+}
+
 async function startPackageUpgrade(item, targetVersion) {
-  const entry = registryByRepository.get(normalizeRepository(item.repository));
+  const entry = registryEntryFor(item);
   const version = entry?.versions?.find((v) => v.version === targetVersion) ?? entry?.versions?.[0];
   const file = version?.files?.find((f) => f.kind === 'source_tar' && f.name.endsWith('.tar.gz'));
   if (!file) {
@@ -1139,6 +1152,8 @@ function packageUploadStatus(upload) {
  * 回傳可升級的目標版本，或 null。比較用數字段而非字串，避免 0.10 < 0.9。
  */
 let registryByRepository = new Map();
+// 目录条目按 package id 的索引：那才是这套系统的身份，仓库地址只是它的一个可选属性。
+let registryByPackageId = new Map();
 
 function compareSemver(a, b) {
   const pa = String(a).split('.').map(Number);
@@ -1151,9 +1166,19 @@ function compareSemver(a, b) {
   return 0;
 }
 
+/**
+ * 这个已装的包在目录里有没有更新的版本。
+ *
+ * ⭐ **先按 package id 找，再退回仓库地址。**
+ *
+ * ⚠ 先前只按 `release.repository` 这个自由文本 join。一个包没写这一段（Manifest 里
+ * `release` 整个是可选的），`item.repository` 就是 null，于是这里立刻返回 null——
+ * 卡片上没有横幅、「更新」按钮永远是灰的，而**没有任何地方说得出为什么**。
+ * package id 才是这套系统到处都在用的身份；拿一个可选的 URL 当连接键，
+ * 等于让「能不能更新」取决于有没有人记得填那一行。
+ */
 function packageUpgrade(item) {
-  if (!item.repository) return null;
-  const entry = registryByRepository.get(normalizeRepository(item.repository));
+  const entry = registryEntryFor(item);
   const latest = entry?.latest_verified_version ?? entry?.latest_version;
   if (!latest || !item.version) return null;
   return compareSemver(latest, item.version) > 0 ? latest : null;
@@ -1169,10 +1194,12 @@ async function ensureRegistryIndex() {
 
 function indexRegistry(data) {
   registryByRepository = new Map();
+  registryByPackageId = new Map();
   officialRepositories = new Set();
   for (const entry of data.registry?.packages ?? []) {
     const key = normalizeRepository(entry.repository);
     registryByRepository.set(key, entry);
+    if (entry.package_id) registryByPackageId.set(entry.package_id, entry);
     if (entry.official?.length) officialRepositories.add(key);
   }
 }
