@@ -2,6 +2,24 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.23
+
+- **The installable list shows what a person installs.** It used to show everything in the
+  catalog except the Framework, and half of that could not be installed at all — several asset
+  entries exist only so the download proxy recognises an upstream file's coordinates and carry no
+  archive, so they appeared as cards saying there was nothing to install. The rest are model
+  assets, which arrive as a dependency of whatever needs them; nobody sets out to install a set of
+  weights. The list is now an allowlist of adapter, app and service.
+- **An installed package no longer offers an enabled Install button.** It reads its installed
+  version instead. Pressing the old button reinstalled the same version and stopped the package on
+  the way, which is not what an enabled button promises.
+- **The install dialog can always be closed.** Its single button is renamed through Cancel, Close
+  and Done, and the consent step removed its own listener when it finished — so the button renamed
+  to Done had no handler and only a page reload escaped it.
+- **A pinned login password says what pins it.** When credentials come from configuration or the
+  environment, the panel names the keys responsible and what removing them restores, instead of
+  handing over a command it knows will be rejected.
+
 ## 0.2.22
 
 - **A Package can carry every hardware version of a model, and the device picks its own.**
