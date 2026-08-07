@@ -67,22 +67,30 @@ jobs:
         id: asset
         run: |
           set -euo pipefail
+          # ⚠ Every file this step produces lands outside the checkout — including the
+          # one that captures the builder's output. A redirection into the repository
+          # creates its file *before* the builder runs, so the command that invokes the
+          # builder is itself what makes the tree it refuses to publish dirty.
           "$RUNNER_TEMP/build-package-asset.sh" \
             --source . \
             --ref "${GITHUB_REF_NAME}" \
             --branch "${{ steps.branch.outputs.name }}" \
-            --out-dir dist | tail -1 > asset-path.txt
-          TAR="$(cat asset-path.txt)"
+            --out-dir "$RUNNER_TEMP/dist" | tail -1 > "$RUNNER_TEMP/asset-path.txt"
+          TAR="$(cat "$RUNNER_TEMP/asset-path.txt")"
           echo "tar=$TAR" >> "$GITHUB_OUTPUT"
           echo "sha256=$(cut -d' ' -f1 "$TAR.sha256")" >> "$GITHUB_OUTPUT"
+          # The tree must still be clean after building: nothing here may leak into it.
+          test -z "$(git status --porcelain)" || {
+            echo "the build step left files in the checkout:" >&2
+            git status --porcelain >&2; exit 1; }
 
       - name: Prove the asset is a usable repository
         run: |
           set -euo pipefail
           # Unpack exactly what a device will unpack, and assert the four properties the
           # Framework depends on. Asserting them here is the only place it is free.
-          mkdir -p /tmp/check && tar -xzf "${{ steps.asset.outputs.tar }}" -C /tmp/check
-          DIR="$(find /tmp/check -mindepth 1 -maxdepth 1 -type d | head -1)"
+          mkdir -p "$RUNNER_TEMP/check" && tar -xzf "${{ steps.asset.outputs.tar }}" -C "$RUNNER_TEMP/check"
+          DIR="$(find "$RUNNER_TEMP/check" -mindepth 1 -maxdepth 1 -type d | head -1)"
           test -f "$DIR/.git/shallow"                              # depth-1, not full history
           test -n "$(git -C "$DIR" branch --show-current)"         # named branch, not detached
           git -C "$DIR" remote get-url origin >/dev/null           # can still be pushed back to

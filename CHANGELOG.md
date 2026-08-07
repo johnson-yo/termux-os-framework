@@ -2,6 +2,13 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.33
+
+- **The release workflow keeps every file it produces outside the checkout.** Capturing the
+  builder's output with a redirection created that file before the builder ran, so the command
+  invoking the builder was itself what made the tree dirty. The step now also asserts the
+  checkout is still clean after building.
+
 ## 0.2.32
 
 - **The standard release workflow no longer dirties the tree it is about to publish.** It fetched
