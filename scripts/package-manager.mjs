@@ -328,8 +328,21 @@ const frameworkRestart = () => {
   try { sh('bash', [fw, 'restart']); return true; } catch { try { sh('bash', [fw, 'start']); return true; } catch { return false; } }
 };
 
-async function waitPackageStatus(id, wantLoaded, timeoutMs = 30000) {
+/**
+ * 等這個包在重啟後的 Framework 裡報出狀態。
+ *
+ * ⚠ 這個窗口必須從**服務回來的那一刻**開始算，而不是從重啟命令發出時算。此前是一個
+ * 固定的 30 秒，於是一台裝了 8 個包、啟動要 40 秒的設備上，每一次安裝都會在服務還沒
+ * 起完時判定失敗、回滾一個其實裝好了的版本——而錯誤訊息說的是「等不到包」，聽起來像
+ * 包壞了。先等服務可達（不計入預算），再開始等包。
+ */
+async function waitPackageStatus(id, wantLoaded, timeoutMs = 90000) {
   const api = frameworkApi();
+  const bootDeadline = Date.now() + timeoutMs;
+  while (Date.now() < bootDeadline) {
+    if (await api.up()) break;
+    await new Promise((k) => { setTimeout(k, 1000); });
+  }
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
     const r = await api.call('GET', `/api/packages/${id}`);

@@ -2,6 +2,14 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.34
+
+- **Installing on a slower device no longer rolls back a Package that installed fine.** The
+  post-install check gave the whole restart 30 seconds, so a device carrying enough Packages to
+  take longer to boot failed every install and restored the previous version — reporting it as
+  "timeout waiting for package status", which reads like the Package is broken. The wait now
+  starts when the service is reachable again.
+
 ## 0.2.33
 
 - **The release workflow keeps every file it produces outside the checkout.** Capturing the
