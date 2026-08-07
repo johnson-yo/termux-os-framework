@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Standard release workflow for a Termux-OS Extension Package.
+#
+# On a version tag it builds one Release asset carrying a depth-1 Git history, so the installed
+# Package is a real repository: `git status`, `git diff` and `git commit` work on the device, and
+# the Framework can tell "released" from "being edited" by reading the work tree instead of a
+# state file that can be cleared while the edit survives.
+#
+# Copy this file to `.github/workflows/release-package-asset.yml` in the Package repository.
+# It calls the Framework's shared builder so CI and `termux-os-sdk release` cannot drift into
+# producing two different kinds of package.
+
+name: Release package asset
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit with its branch
+        uses: actions/checkout@v4
+        with:
+          # The builder needs real history to resolve the branch this tag belongs to.
+          # A shallow checkout here would leave it unable to name one.
+          fetch-depth: 0
+
+      - name: Resolve the release branch
+        id: branch
+        run: |
+          set -euo pipefail
+          BRANCH="$(git branch -r --contains "${GITHUB_SHA}" \
+            | sed 's#^ *origin/##' | grep -v '^HEAD' | head -1)"
+          [ -n "$BRANCH" ] || { echo "tag ${GITHUB_REF_NAME} is not on any branch" >&2; exit 1; }
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to publish from a dirty tree
+        run: |
+          set -euo pipefail
+          # A generated file committed by CI itself would silently ship as a local edit and make
+          # the installed Package read as "dev" on every device.
+          test -z "$(git status --porcelain)" || {
+            echo "work tree is dirty; CI must not publish generated content" >&2
+            git status --porcelain >&2
+            exit 1
+          }
+
+      - name: Fetch the Framework builder
+        run: |
+          set -euo pipefail
+          curl -fsSL -o build-package-asset.sh \
+            "https://raw.githubusercontent.com/johnson-yo/termux-os-framework/main/scripts/build-package-asset.sh"
+          chmod +x build-package-asset.sh
+
+      - name: Build the shallow-Git asset
+        id: asset
+        run: |
+          set -euo pipefail
+          ./build-package-asset.sh \
+            --source . \
+            --ref "${GITHUB_REF_NAME}" \
+            --branch "${{ steps.branch.outputs.name }}" \
+            --out-dir dist | tail -1 > asset-path.txt
+          TAR="$(cat asset-path.txt)"
+          echo "tar=$TAR" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(cut -d' ' -f1 "$TAR.sha256")" >> "$GITHUB_OUTPUT"
+
+      - name: Prove the asset is a usable repository
+        run: |
+          set -euo pipefail
+          # Unpack exactly what a device will unpack, and assert the four properties the
+          # Framework depends on. Asserting them here is the only place it is free.
+          mkdir -p /tmp/check && tar -xzf "${{ steps.asset.outputs.tar }}" -C /tmp/check
+          DIR="$(find /tmp/check -mindepth 1 -maxdepth 1 -type d | head -1)"
+          test -f "$DIR/.git/shallow"                              # depth-1, not full history
+          test -n "$(git -C "$DIR" branch --show-current)"         # named branch, not detached
+          git -C "$DIR" remote get-url origin >/dev/null           # can still be pushed back to
+          test -z "$(git -C "$DIR" status --porcelain)"            # unpacks clean
+
+      - name: Publish the Release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes \
+            || echo "release already exists; uploading to it"
+          gh release upload "${GITHUB_REF_NAME}" \
+            "${{ steps.asset.outputs.tar }}" "${{ steps.asset.outputs.tar }}.sha256" --clobber
+
+      - name: Report the registration coordinates
+        run: |
+          echo "Register this asset with:"
+          echo "  scripts/publish-registry-version.sh --repo ${GITHUB_REPOSITORY} \\"
+          echo "    --version ${GITHUB_REF_NAME} --kind release_asset"
+          echo "sha256: ${{ steps.asset.outputs.sha256 }}"

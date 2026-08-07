@@ -8,7 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { FW_ROOT, defaultWorkspaceRoot, emit, fail } from './util.mjs';
+import { FW_ROOT, defaultWorkspaceRoot, emit, fail, sdkMetaDir } from './util.mjs';
 
 const TYPES = ['service', 'app', 'adapter', 'asset'];
 const MENU_PARENT = {
@@ -45,7 +45,11 @@ export async function cmdNew(flags, pos) {
 
   const files = { ...commonFiles(v), ...extraFiles[type](v) };
   for (const [rel, content] of Object.entries(files)) {
-    const p = path.join(dir, rel);
+    // `.sdk/` 是開發痕跡不是包的內容：它落在工作樹之外，否則 `new` 生成的包
+    // 在第一秒就已經是 dev 了。
+    const p = rel.startsWith('.sdk/')
+      ? path.join(sdkMetaDir(dir), rel.slice('.sdk/'.length))
+      : path.join(dir, rel);
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, content);
   }
@@ -92,6 +96,10 @@ function commonFiles(v) {
     'web/style.css': WEB_STYLE,
     // Each type supplies a self-test for its own smallest behavior.
     'scripts/smoke.sh': smokeSh(v),
+    // 標準發布 workflow 隨包生成：CI 與本地用同一個 builder，兩邊不會產出
+    // 語義不同的兩種包。內容是 Framework 的模板副本，不是另一份實作。
+    '.github/workflows/release-package-asset.yml':
+      fs.readFileSync(path.join(FW_ROOT, 'sdk/templates/workflows/release-package-asset.yml'), 'utf8'),
     '.sdk/project.v1.json': JSON.stringify({
       schema: 'termux-os.sdk-project.v1',
       package_id: v.ID,

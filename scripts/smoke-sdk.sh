@@ -109,7 +109,15 @@ tf "legacy Core admin_token access fails doctor" $SDK doctor $SVC
 sed -i '$d' "$PKGS/$SVC/package.mjs"
 echo "--- 3. test / release / verify ---"
 t "test runs self-test, smoke, and doctor" $SDK test $SVC
-t "release runs doctor, pack, and verify" $SDK release $SVC
+# ⭐ 正式 release 現在產出帶 shallow Git 身份的 package asset，所以來源必須是一個
+#    乾淨的 Git 倉庫。這不是測試腳手架的細節，是新模型對 package repo 的要求。
+git -C "$PKGS/$SVC" init -q -b main
+git -C "$PKGS/$SVC" config user.name Smoke; git -C "$PKGS/$SVC" config user.email s@e
+git -C "$PKGS/$SVC" remote add origin https://github.com/example/sdk-smoke.git
+git -C "$PKGS/$SVC" add -A && git -C "$PKGS/$SVC" commit -qm "release: 0.1.0"
+t "release runs doctor and the shared asset builder" $SDK release $SVC
+tar tzf "dist/releases/$SVC/0.1.0/$SVC-0.1.0.tar.gz" | grep -q "/\.git/" \
+  && ok "release asset carries a real shallow .git" || bad "release asset .git"
 TAR=dist/releases/$SVC/0.1.0/$SVC-0.1.0.tar.gz
 [ -f "$TAR" ] && [ -f "$TAR.sha256" ] && ok "release creates tar and SHA-256 sidecar" || bad "release artifacts"
 node scripts/package-manager.mjs verify "$TAR" >/dev/null 2>&1 && ok "Core Package Manager independently verifies release" || bad "Core release verification"
@@ -119,7 +127,9 @@ echo "--- 4. next / handoff / install negative path ---"
 $SDK next $SVC --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["phase"] and isinstance(d["next"],list)' \
   && ok "next JSON includes phase and commands" || bad "next JSON"
 t "handoff is generated" $SDK handoff $SVC
-grep -q "current facts" "$PKGS/$SVC/.sdk/handoff.md" && ok "HANDOFF template created" || bad "HANDOFF content"
+# handoff 落在工作樹之外（兄弟目錄），否則一次 handoff 就把乾淨的包判成 dev。
+grep -q "current facts" "$PKGS/$SVC.sdk/handoff.md" && ok "HANDOFF template created" || bad "HANDOFF content"
+[ ! -e "$PKGS/$SVC/.sdk" ] && ok "SDK metadata stays out of the package work tree" || bad "SDK metadata leaked into the work tree"
 tf "install rejects a missing release path" $SDK install
 $SDK install --json 2>/dev/null | grep -q missing_args && ok "install error includes code and usage" || bad "install error code"
 
@@ -130,9 +140,17 @@ grep -q 'TERMUX_OS_PORT_<ID>' sdk/AI_AGENT_PROMPT.md \
   && grep -q 'window.TermuxOS.api' sdk/AI_AGENT_PROMPT.md \
   && grep -q 'portrait phone' sdk/AI_AGENT_PROMPT.md \
   && ok "copy-ready Agent prompt covers current contracts" || bad "Agent prompt contract"
+# ⭐ 官方樣本必須走它自己要教的那條流程。
+# 此前這裡只斷言兩個文件「存在」，從不對示例跑 doctor——於是四個示例包同時
+# 過不了官方質量門，而沒有任何測試看得見。被當作參考實現的東西，必須被它教的
+# 那把尺量過。
 for e in service-basic app-feed-consumer adapter-http asset-model; do
   [ -f "sdk/examples/$e/README.md" ] && [ -f "sdk/examples/$e/scripts/verify-device.mjs" ] \
     && ok "example $e includes docs and Device Verify" || bad "example $e"
+  EID=$(python3 -c "import json;print(json.load(open('sdk/examples/$e/termux-os.package.json'))['id'])")
+  ( cd "sdk/examples/$e" && node ../../termux-os-sdk.mjs doctor "$EID" --json ) \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["ok"] and d["counts"]["FAIL"]==0 else 1)' \
+    && ok "example $e has zero doctor FAIL items" || bad "example $e doctor"
 done
 
 echo

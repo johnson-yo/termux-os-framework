@@ -28,7 +28,7 @@ import {
 import { resolveInstalledPackages } from './packages/installed-root.mjs';
 import { deviceProfile } from './packages/runtime-contract.mjs';
 import {
-  initDevRuntime, devMount, devUnmount, devReload, listDevMounts, devSetDependencyOverride, isDevMounted, devEvents,
+  initDevRuntime, devWatchStart, devWatchStop, devReload, devStatus, listDevWatchers, isDevWatched, devEvents,
 } from './packages/dev-runtime.mjs';
 import { listCapabilities, describeCapability, setCapabilityBinding, invokeCapability } from './capabilities/resolver.mjs';
 import { getState, listStates, setState } from './state/registry.mjs';
@@ -615,7 +615,6 @@ async function loadInstalledPackage(id) {
 }
 
 async function restartPackageForSetting(id) {
-  if (isDevMounted(id)) throw Object.assign(new Error('Package is shadowed by Dev Runtime'), { code: 'package_dev_mounted' });
   if (!isPackageEnabled(id)) throw Object.assign(new Error('Package is disabled'), { code: 'package_disabled' });
   const current = _getRecord(id);
   if (!current || current.status !== 'loaded') {
@@ -638,7 +637,6 @@ async function restartPackageForSetting(id) {
 }
 
 async function disablePackageForSetting(id) {
-  if (isDevMounted(id)) throw Object.assign(new Error('Package is shadowed by Dev Runtime'), { code: 'package_dev_mounted' });
   if (!installedPackageEntry(id)) throw Object.assign(new Error('unknown_package'), { code: 'unknown_package' });
   const current = _getRecord(id);
   const stopped = current ? await stopPackageServicesForSetting(id, { preserveDesired: false }) : { services: [], restart_services: [] };
@@ -651,7 +649,6 @@ async function disablePackageForSetting(id) {
 }
 
 async function enablePackageForSetting(id) {
-  if (isDevMounted(id)) throw Object.assign(new Error('Package is shadowed by Dev Runtime'), { code: 'package_dev_mounted' });
   const entry = installedPackageEntry(id);
   if (!entry) throw Object.assign(new Error('unknown_package'), { code: 'unknown_package' });
   let manifest;
@@ -815,9 +812,10 @@ async function overviewReport() {
       detail: `${s.process?.state ?? 'unknown'} / ${s.health?.state ?? 'unknown'}`, href: '/admin/services/overview' });
   }
   try {
-    const mounts = listDevMounts();
-    for (const m of mounts) attention.push({ kind: 'dev', severity: 'warning',
-      title: `Dev Runtime active: ${m.package_id}`, detail: m.workspace, href: '/admin/system/developer' });
+    for (const w of listDevWatchers()) attention.push({ kind: 'dev', severity: 'info',
+      title: `Watching for changes: ${w.package_id}`,
+      detail: `${w.watch_mode} — auto-reload is on; this does not change the Package's released/edited state`,
+      href: '/admin/system/developer' });
   } catch { /* 独立组件失败不拖垮 Overview */ }
   const free = components.resources?.value?.storage?.sdcard?.free_gb;
   if (Number.isFinite(free) && free < 1) attention.push({ kind: 'storage', severity: 'error',
@@ -1538,8 +1536,8 @@ const server = http.createServer(async (req, res) => {
       }),
       // 掛載中的 Dev Runtime 會擋下更新。頁面要能就地把它們停掉，
       // 否則使用者只會看到一句「先去停止挂载」卻沒有可點的地方。
-      dev_mounts: listDevMounts().map((m) => ({
-        package_id: m.package_id, instance_id: m.instance_id, workspace: m.workspace,
+      dev_watchers: listDevWatchers().map((w) => ({
+        package_id: w.package_id, version_dir: w.version_dir,
       })),
     });
   }
@@ -1793,7 +1791,8 @@ const server = http.createServer(async (req, res) => {
       // 取不到的兩種形狀要用不同狀態碼分開：這台機器沒有對應版本(409，去編一份)、
       // 根本沒這個 id(404，裝錯包)、空間不足(507)——它們的下一步動作完全不同。
       const status = r.ok ? 200
-        : r.error === 'unknown_asset' || r.error === 'provider_not_loaded' ? 404
+        : r.error === 'already_fetching' ? 409
+          : r.error === 'unknown_asset' || r.error === 'provider_not_loaded' ? 404
           : r.error === 'insufficient_space' ? 507
             : String(r.error).startsWith('target_mismatch') || r.error === 'not_optional' ? 409 : 502;
       return json(res, status, r);
@@ -1945,31 +1944,36 @@ const server = http.createServer(async (req, res) => {
   if (url === '/api/dev/packages' || /^\/api\/dev\/packages\//.test(url)) {
     if (!authed(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
     if (url === '/api/dev/packages' && req.method === 'GET') {
-      return json(res, 200, { ok: true, mounts: listDevMounts() });
+      return json(res, 200, { ok: true, watchers: listDevWatchers() });
     }
+    /**
+     * POST /api/dev/packages —— 開始監看一個**已安裝**的 package。
+     *
+     * ⚠ 不再接受 workspace / slug / data_mode。它們屬於舊的雙實體模型：那時 dev 是
+     * 另一個 package，現在 dev 只是這一個 package 的 Git 狀態。靜默忽略這些欄位比
+     * 報錯更糟——使用者會以為隔離資料區還在生效，而寫的其實是正式資料。
+     */
     if (url === '/api/dev/packages' && req.method === 'POST') {
       const b = await readBody(req);
-      if (!b?.package_id || !b?.workspace) {
-        return json(res, 400, { ok: false, error: 'package_id and workspace required' });
+      if (!b?.package_id) return json(res, 400, { ok: false, error: 'package_id required' });
+      for (const gone of ['workspace', 'slug', 'data_mode']) {
+        if (b[gone] !== undefined) {
+          return json(res, 400, { ok: false, error: `${gone} is no longer supported`,
+            detail: 'dev now watches the installed Package; there is no separate workspace or data mode.' });
+        }
       }
-      const r = await devMount(b.package_id, {
-        workspace: b.workspace,
-        dataMode: b.data_mode === 'live' ? 'live' : 'isolated',
-        slug: b.slug ?? null,
-      });
+      const r = await devWatchStart(b.package_id);
       return json(res, r.ok ? 200 : 400, r);
     }
-    const m = url.match(/^\/api\/dev\/packages\/([\w.@-]+)\/(stop|reload)$/);
-    if (m && req.method === 'POST') {
-      const r = m[2] === 'stop' ? await devUnmount(m[1]) : await devReload(m[1]);
-      return json(res, r.error === 'not_mounted' ? 404 : r.ok ? 200 : 400, r);
+    const st = url.match(/^\/api\/dev\/packages\/([\w.-]+)\/status$/);
+    if (st && req.method === 'GET') {
+      const r = devStatus(st[1]);
+      return json(res, r.ok ? 200 : 404, r);
     }
-    // 依賴豁免：只在 Dev Mount 上存在，開關都寫日誌，狀態裡看得見（`dependency_override`）。
-    const ov = url.match(/^\/api\/dev\/packages\/([\w.@-]+)\/dependency-override$/);
-    if (ov && req.method === 'POST') {
-      const b = await readBody(req);
-      const r = devSetDependencyOverride(ov[1], b?.enabled === true);
-      return json(res, r.error === 'not_mounted' ? 404 : 200, r);
+    const m = url.match(/^\/api\/dev\/packages\/([\w.-]+)\/(stop|reload)$/);
+    if (m && req.method === 'POST') {
+      const r = m[2] === 'stop' ? devWatchStop(m[1]) : await devReload(m[1]);
+      return json(res, r.error === 'not_watching' || r.error === 'not_installed' ? 404 : r.ok ? 200 : 400, r);
     }
     return json(res, 404, { ok: false, error: 'not found' });
   }
@@ -2139,7 +2143,7 @@ const server = http.createServer(async (req, res) => {
     if (!m) return json(res, 404, { ok: false, error: 'unknown_package' });
     const [, pkgId, subPath] = m;
     const rel = !subPath || subPath === '/' ? 'index.html' : subPath.slice(1);
-    if (isDevMounted(pkgId)) {
+    if (isDevWatched(pkgId)) {
       const ev = devEvents(pkgId);
       if (ev.status !== 'loaded' && rel.endsWith('.html')) return serveDevErrorPage(res, pkgId, ev);
       const webRoot = getPackageWebRoot(pkgId);

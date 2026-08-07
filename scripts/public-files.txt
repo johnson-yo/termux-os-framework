@@ -1,12 +1,12 @@
-# Public Framework source allowlist
-#
-# One repository-relative file per line. Local development files may remain
-# outside this list, but the export and publication checks must never copy them.
-# Keep this list explicit: adding a file to the Framework public surface is a
-# deliberate review decision.
 
-.github/workflows/ci.yml
+#
+# Keep this list explicit: adding a file to the Framework public surface is a
+# One repository-relative file per line. Local development files may remain
+# Public Framework source allowlist
+# deliberate review decision.
+# outside this list, but the export and publication checks must never copy them.
 .deployignore
+.github/workflows/ci.yml
 .gitignore
 AGENTS.md
 CHANGELOG.md
@@ -24,14 +24,15 @@ config/defaults/framework.v1.json
 docs/ARCHITECTURE.md
 docs/CLAUDE.md
 docs/CONFIGURATION.md
-docs/FRAMEWORK_INSTALLATION.md
 docs/DEVELOPMENT.md
+docs/FRAMEWORK_INSTALLATION.md
 docs/HISTORY.md
 docs/PACKAGE_PORTS.md
 docs/PACKAGE_SYSTEM.md
 docs/SECURITY_MODEL.md
 package.json
 scripts/CLAUDE.md
+scripts/build-package-asset.sh
 scripts/check-publication.mjs
 scripts/conf-fingerprint.mjs
 scripts/export-public-tree.mjs
@@ -155,6 +156,7 @@ sdk/templates/adapter/README.md
 sdk/templates/app/README.md
 sdk/templates/asset/README.md
 sdk/templates/service/README.md
+sdk/templates/workflows/release-package-asset.yml
 sdk/termux-os-sdk
 sdk/termux-os-sdk.mjs
 src/CLAUDE.md
@@ -201,6 +203,7 @@ src/packages/fixtures/github.termux-os.fixture.valid/AGENTS.md
 src/packages/fixtures/github.termux-os.fixture.valid/package.mjs
 src/packages/fixtures/github.termux-os.fixture.valid/termux-os.package.json
 src/packages/fixtures/github.termux-os.fixture.valid/web/index.html
+src/packages/git-state.mjs
 src/packages/installed-root.mjs
 src/packages/loader.mjs
 src/packages/manifest.mjs
@@ -208,12 +211,12 @@ src/packages/runtime-contract.mjs
 src/packages/version.mjs
 src/packages/workspace-hash.mjs
 src/server.mjs
-src/state/CLAUDE.md
-src/state/registry.mjs
 src/stage/CLAUDE.md
 src/stage/catalog.mjs
 src/stage/fixture.mjs
 src/stage/manager.mjs
+src/state/CLAUDE.md
+src/state/registry.mjs
 src/system/CLAUDE.md
 src/system/access.mjs
 src/system/admin-pages.mjs

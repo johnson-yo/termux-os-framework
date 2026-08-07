@@ -152,20 +152,28 @@ if run_control rollback >/dev/null; then ok "manual rollback"; else bad "manual 
 need test "$(curl -sf "$BASE_URL/api/dev/version" | node -pe 'JSON.parse(require("fs").readFileSync(0)).deploy_id')" = old-build
 if run_control update "$GOOD" "$GOOD.sha256" >/dev/null; then ok "second update"; else bad "second update"; fi
 
-echo "--- 4. active Dev Mount 拒絕且不動 live ---"
-DEV_ID=github.termux-os.fixture.valid
-DEV_WS="$ROOT/src/packages/fixtures/$DEV_ID"
-if curl -sf -m 8 -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  --data "{\"package_id\":\"$DEV_ID\",\"workspace\":\"$DEV_WS\"}" "$BASE_URL/api/dev/packages" \
-  | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.exit(JSON.parse(s).ok?0:1))'; then
-  ok "Dev Mount active"
+echo "--- 4. active watcher 拒絕更新且不動 live ---"
+# 監看的是**已安裝**的那個 package；不再有「掛載一個目錄」這回事。
+DEV_ID=$PKG
+# 舊入口必須明確消失，而不是被靜默忽略。
+if curl -s -m 8 -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data "{\"package_id\":\"$DEV_ID\",\"workspace\":\"/tmp\"}" "$BASE_URL/api/dev/packages" \
+  | grep -q "no longer supported"; then
+  ok "workspace 參數被明確拒絕"
 else
-  bad "Dev Mount active"
+  bad "workspace 參數未被拒絕"
 fi
-if run_control update "$GOOD" "$GOOD.sha256" >/dev/null 2>&1; then bad "active Dev update refused"; else ok "active Dev update refused"; fi
+if curl -sf -m 8 -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data "{\"package_id\":\"$DEV_ID\"}" "$BASE_URL/api/dev/packages" \
+  | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.exit(JSON.parse(s).ok?0:1))'; then
+  ok "watcher active"
+else
+  bad "watcher active"
+fi
+if run_control update "$GOOD" "$GOOD.sha256" >/dev/null 2>&1; then bad "active watcher update refused"; else ok "active watcher update refused"; fi
 need test "$(curl -sf "$BASE_URL/api/dev/version" | node -pe 'JSON.parse(require("fs").readFileSync(0)).deploy_id')" = good-build
 curl -sf -m 8 -X POST -H "Authorization: Bearer $TOKEN" \
-  "$BASE_URL/api/dev/packages/$DEV_ID/stop" >/dev/null || bad "Dev Mount stop"
+  "$BASE_URL/api/dev/packages/$DEV_ID/stop" >/dev/null || bad "watcher stop"
 
 echo "--- 5. SIGKILL 中斷由下一次調用收口 ---"
 FRAMEWORK_RUNTIME="$RUNTIME" FRAMEWORK_PERSIST="$PERSIST" \

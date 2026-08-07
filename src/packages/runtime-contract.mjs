@@ -257,6 +257,20 @@ export function checkExternal(manifest, ctx = {}) {
 // 禁止路徑掃描（023 §5.3）
 // ============================================================
 
+/**
+ * 打包時一律剝掉的名字（開發痕跡，不是包的內容）。
+ *
+ * ⭐ 這裡是唯一真相源。此前 pack 剝它們、doctor 卻因它們存在而 FAIL，於是
+ * **四個官方示例包全都過不了官方質量門**——而 pack 根本不會讓它們進歸檔。
+ * 一個名叫「不許發布內部文件」的檢查，問的必須是「發布出去的東西裡有沒有」，
+ * 而不是「源碼目錄裡有沒有」。
+ */
+export const RELEASE_EXCLUDED_NAMES = [
+  '.git', 'node_modules', '__pycache__', '.runtime', '.DS_Store', '.sdk',
+  'HANDOFF.md', 'DEVELOPMENT.md', 'CLAUDE.md',
+];
+export const RELEASE_EXCLUDED_SUFFIXES = ['.pyc', '.o', '.log'];
+
 export const FORBIDDEN_PATTERNS = [
   { re: /\/(?:home|Users)\/[^/\s"']+\//, why: 'developer machine path' },
   { re: /[A-Za-z]:\\Users\\/, why: 'developer machine path' },

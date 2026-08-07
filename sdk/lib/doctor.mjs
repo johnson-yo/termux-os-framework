@@ -7,8 +7,10 @@
  */
 
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { FW_ROOT, emit, fail, packageDir, runCapture } from './util.mjs';
+import { FW_ROOT, emit, fail, packageDir, runCapture, sdkMetaDir } from './util.mjs';
+import { RELEASE_EXCLUDED_NAMES, RELEASE_EXCLUDED_SUFFIXES } from '../../src/packages/runtime-contract.mjs';
 
 const CODE_EXT = new Set(['.mjs', '.js', '.py', '.sh']);
 
@@ -61,11 +63,32 @@ export async function collectDoctor(id) {
       ? 'Describe the Package before release.'
       : `Create ${f} using a current SDK-generated Package as the reference.`);
   }
-  if (fs.existsSync(path.join(dir, 'CLAUDE.md')) || fs.existsSync(path.join(dir, 'DEVELOPMENT.md'))) {
-    add('FAIL', 'public_docs_no_internal_files', 'CLAUDE.md/DEVELOPMENT.md must not be part of a Package source release',
-      'Move development notes under .sdk/ or the Framework SDK; publish contributor instructions as AGENTS.md.');
+  /**
+   * 內部筆記不進 Release——而「進不進 Release」由 pack 的剝離清單回答，不由源碼目錄
+   * 裡有沒有這個文件回答。此前這裡直接 FAIL，於是四個官方示例包全都過不了官方質量
+   * 門，而 pack 根本不會讓它們進歸檔。判準與剝離現在共用同一份清單。
+   */
+  /**
+   * ⚠ 判準隨模型改變了：package asset 現在是一個 git clone，所以**剝離文件會讓工作樹
+   * 立刻變髒**——`RELEASE_EXCLUDED_NAMES` 不能再在打包時剝掉它們。於是「會不會發布
+   * 出去」等價於「有沒有被 Git 跟蹤」。非 Git 目錄根本進不了新的 asset，不判 FAIL。
+   */
+  const tracked = (() => {
+    if (!fs.existsSync(path.join(dir, '.git'))) return null;
+    try {
+      return new Set(execFileSync('git', ['-C', dir, 'ls-files'], { encoding: 'utf8' })
+        .split('\n').map((l) => l.trim()).filter(Boolean));
+    } catch { return null; }
+  })();
+  const leaking = tracked
+    ? [...RELEASE_EXCLUDED_NAMES, ...RELEASE_EXCLUDED_SUFFIXES]
+      .filter((f) => f.endsWith('.md') && tracked.has(f))
+    : [];
+  if (leaking.length) {
+    add('FAIL', 'public_docs_no_internal_files', leaking.join(', '),
+      'Move development notes outside the Package, or add the name to the release exclusion list.');
   } else add('PASS', 'public_docs_no_internal_files');
-  if (fs.existsSync(path.join(dir, '.sdk/handoff.md')) || fs.existsSync(path.join(dir, 'HANDOFF.md'))) {
+  if (fs.existsSync(path.join(sdkMetaDir(dir), 'handoff.md')) || fs.existsSync(path.join(dir, 'HANDOFF.md'))) {
     add('PASS', 'doc:handoff');
   } else {
     add('WARNING', 'doc:handoff', 'missing', 'Run termux-os-sdk handoff before transferring work.');
@@ -204,8 +227,8 @@ export async function cmdNext(flags, pos) {
   const completed = results.filter((r) => r.level === 'PASS').map((r) => r.check);
   const missing = results.filter((r) => r.level !== 'PASS').map((r) => `${r.check}${r.detail ? ` (${r.detail})` : ''}`);
   let proj = null;
-  for (const rel of ['.sdk/project.v1.json', 'sdk-project.v1.json']) {
-    try { proj = JSON.parse(fs.readFileSync(path.join(dir, rel), 'utf8')); break; } catch { /* Optional metadata. */ }
+  for (const p of [path.join(sdkMetaDir(dir), 'project.v1.json'), path.join(dir, 'sdk-project.v1.json')]) {
+    try { proj = JSON.parse(fs.readFileSync(p, 'utf8')); break; } catch { /* Optional metadata. */ }
   }
 
   const hasFail = results.some((r) => r.level === 'FAIL');

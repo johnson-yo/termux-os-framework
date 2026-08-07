@@ -421,8 +421,8 @@ grep -q "function normalizeRepository" "$ROOT/web/admin/admin-controls.js" \
 # 更新被 Dev Runtime 擋下時，必須就地能停——不得把使用者推去命令行
 grep -q "停止全部挂载" "$ROOT/web/admin/admin-controls.js" \
   && ok "Framework Update can stop blocking dev mounts in place" || bad "no in-place stop for dev mounts"
-curl -sf -b "$COOKIE" "$BASE/api/admin/framework-update" | grep -q '"dev_mounts"' \
-  && ok "framework update reports blocking dev mounts" || bad "dev_mounts missing from update payload"
+curl -sf -b "$COOKIE" "$BASE/api/admin/framework-update" | grep -q '"dev_watchers"' \
+  && ok "framework update reports active watchers" || bad "dev_watchers missing from update payload"
 # 任何面向使用者的阻擋訊息都不得要求開 Termux
 if grep -q "termux-os-sdk dev stop" "$ROOT/scripts/framework.sh"; then
   bad "update guard still tells the user to run a CLI command"
@@ -435,15 +435,18 @@ JOBCALLS="$(grep -c "renderJobs(" "$ROOT/web/admin/app-core.js" "$ROOT/web/admin
 if [ "$JOBCALLS" = 2 ]; then ok "Recent operations is rendered from exactly one page"; else bad "renderJobs referenced $JOBCALLS times"; fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE" "$BASE/admin/system/sdk")"
 if [ "$CODE" = 404 ]; then ok "retired SDK page is gone, not left as a placeholder"; else bad "retired SDK route HTTP $CODE"; fi
-# A workspace serves pages at an instance-scoped URL nobody can guess, so the view
-# must list them explicitly; assert the renderer really emits per-page open buttons.
-# 工作區的頁面掛在 /packages/<id>@<slug>/，猜不出來——必須逐一列成可點連結
+# 頁面現在都掛在唯一的 /packages/<id>/ 下，但逐頁列連結仍然有價值：manifest 的
+# menu 條目不會出現在包首頁上。斷言渲染器照樣逐一列出。
 if curl -sf -b "$COOKIE" "$BASE/api/admin/workspaces" | grep -q '"projects"' \
   && grep -q "for (const page of pages)" "$ROOT/web/admin/app-core.js"; then
-  ok "Workspace view exposes every page of a mounted project"
+  ok "Workspace view exposes every page of the Package"
 else
   bad "Workspace view page links"
 fi
+# 舊模型會在這裡列出 `<id>@<slug>` 的第二份 package；新模型不允許有第二份。
+curl -sf -b "$COOKIE" "$BASE/api/admin/workspaces" | grep -q '"instance_id"' \
+  && bad "workspace view still reports an instance id" || ok "workspace view has no second instance"
+
 curl -sf -b "$COOKIE" "$BASE/api/stage/services" >"$WORK/stage.json"
 if node -e 'const d=require(process.argv[1]); const s=(d.services||[]).find(x=>x.id==="example-counter");
   process.exit(s && "package" in s && "last_activity_at" in s ? 0 : 1)' "$WORK/stage.json"; then

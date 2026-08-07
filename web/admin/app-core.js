@@ -991,7 +991,7 @@ async function runtimeCards(overviewData = null) {
   packages.body.append(
     valueRow('已加载的 Package', packageCheck ? `${packageCheck.loaded} / ${packageCheck.count}` : 'n/a'),
     valueRow('加载失败', packageCheck?.failed?.length ? packageCheck.failed.join(', ') : 'none'),
-    valueRow('开发挂载', dev.mounts?.length ?? 0),
+    valueRow('监视中', dev.watchers?.length ?? 0),
   );
   return [framework.card, packages.card];
 }
@@ -1116,11 +1116,13 @@ async function renderWorkspace() {
         valueRow('大小', formatBytes(project.size_bytes)),
       );
     }
-    const mount = project.mount;
-    card.body.append(valueRow('状态', mount
-      ? `mounted @${mount.slug} · ${mount.status}${mount.error ? ` — ${mount.error}` : ''}`
-      : 'not mounted'));
-    if (mount) card.body.append(valueRow('监视', `${mount.watch_mode} · ${mount.seq ?? 0} reloads`));
+    // ⚠ 两个独立维度：状态说的是「这份代码跟发布的一不一样」，监视说的是「改了会不会
+    //    自动重载」。旧界面只有一个 mounted，于是「在开发」和「改过了」变成同一件事。
+    const mount = project.watcher;
+    card.body.append(valueRow('状态', project.state_summary ?? project.state ?? 'unknown'));
+    card.body.append(valueRow('监视', mount
+      ? `${mount.watch_mode} · ${mount.seq ?? 0} reloads${mount.error ? ` — ${mount.error}` : ''}`
+      : '未开启'));
     if (project.released) {
       card.body.append(valueRow('随同发布', `${project.released.version} (${project.released.status})`));
     }
@@ -1130,18 +1132,16 @@ async function renderWorkspace() {
 
     const row = document.createElement('div');
     row.className = 'button-row';
-    if (mount) {
-      // 按钮上只写动作。页面名称已经在上面的清单里列过，重复写进按钮只会把它撑得很长，
-      // 而且几个按钮并排时，真正不同的那部分反而被前缀淹没。
-      const pages = mount.pages ?? [];
-      for (const page of pages) {
-        row.append(pageLink(pages.length > 1 ? page.title : '打开', page.url, 'primary'));
-      }
-      if (project.released) row.append(pageLink('打开正式版', project.released.url));
-      row.append(actionButton('停止挂载', '', () => workspaceMount(project, false)));
-    } else {
-      row.append(actionButton('挂载', 'primary', () => workspaceMount(project, true), !project.valid));
+    // 按钮上只写动作。页面名称已经在上面的清单里列过，重复写进按钮只会把它撑得很长，
+    // 而且几个按钮并排时，真正不同的那部分反而被前缀淹没。
+    const pages = mount?.pages ?? [];
+    for (const page of pages) {
+      row.append(pageLink(pages.length > 1 ? page.title : '打开', page.url, 'primary'));
     }
+    if (project.released) row.append(pageLink('打开正式版', project.released.url));
+    row.append(mount
+      ? actionButton('停止监视', '', () => workspaceWatch(project, false))
+      : actionButton('开始监视', 'primary', () => workspaceWatch(project, true), !project.valid));
     row.append(actionButton('打包', '', () => workspacePack(project), !project.valid || project.external));
     row.append(actionButton('删除', 'danger-text', () => workspaceDelete(project), Boolean(mount) || project.external));
     card.body.append(row);
@@ -1151,18 +1151,17 @@ async function renderWorkspace() {
   replacePage(...nodes);
 }
 
-async function workspaceMount(project, mount) {
+async function workspaceWatch(project, on) {
   try {
-    if (mount) {
-      await apiData('/api/dev/packages', { method: 'POST', body: JSON.stringify({
-        package_id: project.package_id, workspace: project.path, slug: project.slug,
-      }) });
+    // ⚠ 只传 package_id。workspace/slug/data_mode 属于旧的双实体模型，后端现在
+    //    会明确拒绝它们——静默忽略比报错更糟。
+    if (on) {
+      await apiData('/api/dev/packages', { method: 'POST', body: JSON.stringify({ package_id: project.package_id }) });
     } else {
-      await apiData(`/api/dev/packages/${encodeURIComponent(project.mount.instance_id)}/stop`, { method: 'POST', body: '{}' });
+      await apiData(`/api/dev/packages/${encodeURIComponent(project.package_id)}/stop`, { method: 'POST', body: '{}' });
     }
-    await refreshAdminNavigation();
   } catch (error) {
-    alert(`${mount ? '挂载' : '停止挂载'}失败：${error.message ?? error}`);
+    alert(`${on ? '开始' : '停止'}监视失败：${error.message ?? error}`);
   }
   return renderWorkspace();
 }

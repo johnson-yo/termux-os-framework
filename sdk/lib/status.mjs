@@ -8,7 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { FW_ROOT, emit, fail, frameworkToken, packageDir, readManifest } from './util.mjs';
+import { FW_ROOT, emit, fail, frameworkToken, packageDir, readManifest, sdkMetaDir } from './util.mjs';
 import { resolveConnection, frameworkFetch } from './connection.mjs';
 import { hashWorkspace } from '../../src/packages/workspace-hash.mjs';
 
@@ -60,16 +60,15 @@ export async function cmdStatus(flags, pos) {
   const dm = await frameworkFetch(conn, '/api/dev/packages', { token: TOKEN });
   if (dm.ok) {
     reachable = true;
-    const m = (dm.data?.mounts ?? []).find((x) => x.package_id === id);
-    if (m) dev = { active: true, source: m.workspace, data: m.data_mode, source_hash: m.source_hash, shadow: m.shadow };
+    // watcher 只說「有沒有在監看」。package 是不是被改過，由 Git 回答，不在這裡。
+    const w = (dm.data?.watchers ?? []).find((x) => x.package_id === id);
+    if (w) dev = { watching: true, version_dir: w.version_dir, watch_mode: w.watch_mode, seq: w.seq };
   }
   const p = await frameworkFetch(conn, `/api/packages/${id}`, { token: TOKEN });
   if (p.ok && p.data?.package) {
     const pk = p.data.package;
-    // A Dev record shadows, but does not mutate, the Installed identity.
-    if (pk.source === 'dev-mount' && pk.dev?.shadow) {
-      installed = { version: pk.dev.shadow.version, sha256: pk.dev.shadow.sha256 ?? null, target: null };
-    } else if (pk.source === 'installed' || pk.install) {
+    // 只有一份 package：沒有影子記錄可以替換身分。
+    if (pk.source === 'installed' || pk.install) {
       installed = { version: pk.install?.version ?? pk.manifest?.version ?? null,
         sha256: pk.install?.archive_sha256 ?? null,
         target: pk.manifest?.targets?.[0]?.id ?? 'generic' };
@@ -84,7 +83,7 @@ export async function cmdStatus(flags, pos) {
   // Device Verify record stored in Workspace development state.
   let verify = null;
   try {
-    const v = JSON.parse(fs.readFileSync(path.join(wsDir, '.sdk/verify.v1.json'), 'utf8'));
+    const v = JSON.parse(fs.readFileSync(path.join(sdkMetaDir(wsDir), 'verify.v1.json'), 'utf8'));
     verify = { result: v.result, at: v.at, release_sha256: v.release_sha256 ?? null, mode: v.mode ?? 'installed' };
   } catch { /* No recorded Device Verify result. */ }
 

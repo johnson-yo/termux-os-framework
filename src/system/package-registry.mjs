@@ -16,6 +16,26 @@ export const DEFAULT_PACKAGE_REGISTRY_URL = 'https://package.termux-os.com';
 export const FRAMEWORK_REGISTRY_TYPE = 'framework';
 
 const SOURCE_RE = /^(?:github|huggingface)$/;
+/**
+ * 可安裝的歸檔種類，按優先順序排列。
+ *
+ * `release_asset` 是我們自己在 CI 上產出的包（帶 shallow Git 身份），內容可控；
+ * `source_tar` 是 GitHub 按 tag 現場生成的源碼歸檔，沒有 `.git`。同一個版本同時
+ * 有兩者時取前者，否則舊包在過渡期就裝不上了。
+ *
+ * ⚠ Registry 服務端早就認得 `release_asset`（types/validation/D1/download 全通），
+ * 只有這個客戶端不認。兩半各自自洽、合起來是死的——HF 的 model_file 踩過同一個坑。
+ */
+export const INSTALLABLE_KINDS = ['release_asset', 'source_tar'];
+const KIND_RE = new RegExp(`^(?:${INSTALLABLE_KINDS.join('|')})$`);
+const kindRank = (kind) => {
+  const at = INSTALLABLE_KINDS.indexOf(kind);
+  return at < 0 ? INSTALLABLE_KINDS.length : at;
+};
+/** 該版本裡最該裝的那一個歸檔：先按種類優先級，同級保持目錄給出的順序。 */
+const pickArchive = (version) => (version?.files ?? [])
+  .filter((item) => KIND_RE.test(String(item.kind ?? '')) && String(item.name ?? '').endsWith('.tar.gz'))
+  .sort((a, b) => kindRank(a.kind) - kindRank(b.kind))[0] ?? null;
 const REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const VERSION_RE = /^(?![vV])[A-Za-z0-9._+@/-]+$/;
 const FILE_RE = /^[A-Za-z0-9._/-]+$/;
@@ -231,7 +251,7 @@ function assertSelection(value) {
   const source = textField(value.source, 'source', SOURCE_RE);
   const repository = textField(value.repository, 'repository', REPOSITORY_RE);
   const version = textField(value.version, 'version', VERSION_RE);
-  const kind = textField(value.kind, 'file kind', /^source_tar$/);
+  const kind = textField(value.kind, 'file kind', KIND_RE);
   const file = textField(value.file, 'file', FILE_RE);
   if (file.startsWith('/') || file.split('/').includes('..') || !file.endsWith('.tar.gz')) {
     throw errorWithCode('Package source archive name is invalid', 'registry_selection_invalid');
@@ -277,7 +297,7 @@ export function frameworkRegistryInfo({ repository, currentVersion } = {}) {
   };
   const latest = project.latest_verified_version || project.latest_version;
   const version = project.versions.find((item) => item.version === latest);
-  const file = version?.files.find((item) => item.kind === 'source_tar' && item.name.endsWith('.tar.gz'));
+  const file = pickArchive(version);
   const updateAvailable = Boolean(latest && currentVersion && compareVersions(latest, currentVersion) > 0);
   return {
     available: Boolean(latest && file),
@@ -290,7 +310,7 @@ export function frameworkRegistryInfo({ repository, currentVersion } = {}) {
     update_available: updateAvailable,
     selection: latest && file ? {
       source: 'github', repository: project.repository, version: latest, upstream_ref: version.upstream_ref,
-      kind: 'source_tar', file: file.name,
+      kind: file.kind, file: file.name,
     } : null,
     file: file ?? null,
     // 全部已驗證版本，而不只是 latest。「已是最新」不等於「無事可做」——
@@ -301,7 +321,7 @@ export function frameworkRegistryInfo({ repository, currentVersion } = {}) {
         // status 缺席代表 Registry 沒表態（舊目錄），沿用 latest 路徑的寬鬆處理；
         // 明確標成非 verified 的版本不列出，免得使用者按下去才被安裝器拒絕。
         if (item.status && item.status !== 'verified') return null;
-        const archive = item.files.find((f) => f.kind === 'source_tar' && f.name.endsWith('.tar.gz'));
+        const archive = pickArchive(item);
         if (!archive) return null;
         return {
           version: item.version,
@@ -315,7 +335,7 @@ export function frameworkRegistryInfo({ repository, currentVersion } = {}) {
             : 'unknown',
           selection: {
             source: 'github', repository: project.repository, version: item.version,
-            upstream_ref: item.upstream_ref, kind: 'source_tar', file: archive.name,
+            upstream_ref: item.upstream_ref, kind: archive.kind, file: archive.name,
           },
         };
       })
@@ -331,6 +351,14 @@ function remoteFilename(selection) {
 
 function githubSourceUrls(selection, version) {
   if (selection.source !== 'github') return null;
+  /**
+   * `release_asset` 沒有 github_direct 這條快捷路。
+   *
+   * Release asset 的直連要走 GitHub API（`/releases/assets/<id>` + Accept 頭 + 一次
+   * 跳去 S3 的重定向），Worker 的 `/download` 已經把這套做完了。在客戶端再實作一份
+   * 只會多出一個會漂移的副本，而它拿不到 `upstream_asset_id`——目錄裡根本沒這欄。
+   */
+  if (selection.kind === 'release_asset') return null;
   const upstreamRef = typeof version.upstream_ref === 'string'
     ? (UPSTREAM_REF_RE.test(version.upstream_ref) ? version.upstream_ref : null)
     : VERSION_RE.test(selection.version) ? selection.version : null;
@@ -470,21 +498,27 @@ export function packageRegistryContainsSha256(sha256) {
  *
  * @returns `{ package_id, repository, source, version, size, sha256, kind, file }` 或 `null`
  */
-/** 一個候選歸檔 → 下載坐標。`archiveName` 缺席時退回該版本唯一的 source_tar。 */
+/** 一個候選歸檔 → 下載坐標。`archiveName` 缺席時退回該版本唯一的可安裝歸檔。 */
 function downloadCoordinates(project, version, archiveName, packageId) {
-  const files = version.files.filter((item) => item.kind === 'source_tar' && item.name.endsWith('.tar.gz'));
+  const files = (version.files ?? []).filter((item) => KIND_RE.test(String(item.kind ?? ''))
+    && String(item.name ?? '').endsWith('.tar.gz'));
   // ⚠ 一個版本可以有多個歸檔（SenseVoice 1.0.0 下同時有可移植圖與兩個機型檔 ctx）。
   //    按名字挑；挑不中時只有在**唯一**一個候選時才敢用它，否則寧可說不知道——
   //    猜錯的後果是裝上一個看起來對、其實是別的機型檔的包。
+  //
+  //    ⭐ 但「兩個種類」不是「兩個變體」：release_asset 與 source_tar 是同一份東西的
+  //    兩種包裝，種類優先級答得了；機型檔之間才是真的無從選擇。所以先按種類收斂到
+  //    一組，再在組內套用「不唯一就不猜」。
+  const best = files.filter((item) => kindRank(item.kind) === Math.min(...files.map((f) => kindRank(f.kind))));
   const file = (archiveName && files.find((item) => item.name === archiveName))
-    ?? (files.length === 1 ? files[0] : null);
+    ?? (best.length === 1 ? best[0] : null);
   if (!file) return null;
   return {
     package_id: packageId,
     source: project.source,
     repository: project.repository,
     version: version.version,
-    kind: 'source_tar',
+    kind: file.kind,
     file: file.name,
     size: file.size ?? null,
     sha256: file.sha256 ?? null,
@@ -492,8 +526,7 @@ function downloadCoordinates(project, version, archiveName, packageId) {
 }
 
 /** A version is installable only if it actually carries a package archive. */
-const hasArchive = (version) => (version.files ?? [])
-  .some((item) => item.kind === 'source_tar' && String(item.name ?? '').endsWith('.tar.gz'));
+const hasArchive = (version) => Boolean(pickArchive(version));
 
 /**
  * The newest version of this project that can actually be installed.
@@ -828,6 +861,84 @@ if (process.argv.includes('--self-test')
   }
   test('manual GitHub Release fallback is structured', manualFallback);
   test('snapshot is private-file mode', (fs.statSync(path.join(tmp, 'snapshot.json')).mode & 0o777) === 0o600);
+
+  // ---- release_asset：優先於 source_tar，且不走 github_direct ----
+  const bothKinds = {
+    registry_version: 9,
+    packages: [{
+      source: 'github', repository: 'example/dual', package_id: 'a.b.c.dual',
+      types: ['service'], status: 'active', latest_verified_version: '2.0.0',
+      versions: [{
+        version: '2.0.0', status: 'verified', upstream_ref: '2.0.0',
+        files: [
+          { kind: 'source_tar', name: 'source.tar.gz', size: 10, sha256: 'a'.repeat(64) },
+          { kind: 'release_asset', name: 'a.b.c.dual-2.0.0.tar.gz', size: 20, sha256: 'b'.repeat(64) },
+        ],
+      }],
+    }],
+  };
+  let askedGithubDirect = false;
+  configurePackageRegistry({
+    baseUrl: 'https://registry.example',
+    snapshotPath: path.join(tmp, 'snapshot.json'),
+    fetchImpl: async (url, init) => {
+      const parsed = new URL(url);
+      if (parsed.hostname === 'github.com') { askedGithubDirect = true; throw new Error('github must not be probed for a release asset'); }
+      if (parsed.pathname === '/list') return new Response(JSON.stringify(bothKinds), { status: 200 });
+      if (parsed.pathname === '/check') {
+        return new Response(JSON.stringify({
+          project: { source: 'github', repository: 'example/dual' },
+          version: { version: '2.0.0' },
+          file: { kind: 'release_asset', name: 'a.b.c.dual-2.0.0.tar.gz', size: 20, sha256: 'b'.repeat(64) },
+        }), { status: 200 });
+      }
+      if (parsed.pathname === '/download') {
+        return new Response('x'.repeat(20), { status: 200, headers: { 'content-length': '20' } });
+      }
+      throw new Error(`unexpected ${url} ${init?.method ?? 'GET'}`);
+    },
+  });
+  await refreshPackageRegistry();
+  const dual = packageRegistryFindByPackageId('a.b.c.dual');
+  /**
+   * ⭐ 同一版本同時登記兩種歸檔時取我們自己產的那一個。
+   * 兩者都能裝，但只有 release_asset 帶得動 Git 身份；選錯不會報錯，只會讓
+   * 「解包即用、Git 即狀態」在那個包上安靜地不成立。
+   */
+  test('release_asset outranks the GitHub source archive',
+    dual?.kind === 'release_asset' && dual?.file === 'a.b.c.dual-2.0.0.tar.gz');
+  const dualDownload = await downloadPackageFromRegistry({
+    source: 'github', repository: 'example/dual', version: '2.0.0',
+    kind: 'release_asset', file: 'a.b.c.dual-2.0.0.tar.gz',
+  });
+  test('a release asset downloads through the Registry, never through github.com',
+    dualDownload.origin.path === 'termux_os_registry' && askedGithubDirect === false);
+
+  // ---- 過渡相容：只有 source_tar 的舊包仍然可裝 ----
+  const legacyOnly = {
+    registry_version: 10,
+    packages: [{
+      source: 'github', repository: 'example/legacy', package_id: 'a.b.c.legacy',
+      types: ['service'], status: 'active', latest_verified_version: '1.0.0',
+      versions: [{
+        version: '1.0.0', status: 'verified', upstream_ref: '1.0.0',
+        files: [{ kind: 'source_tar', name: 'source.tar.gz', size: 10, sha256: 'c'.repeat(64) }],
+      }],
+    }],
+  };
+  configurePackageRegistry({
+    baseUrl: 'https://registry.example',
+    snapshotPath: path.join(tmp, 'snapshot.json'),
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === '/list') return new Response(JSON.stringify(legacyOnly), { status: 200 });
+      throw new Error('no download expected');
+    },
+  });
+  await refreshPackageRegistry();
+  const legacy = packageRegistryFindByPackageId('a.b.c.legacy');
+  test('a source_tar-only Package stays installable during the transition',
+    legacy?.kind === 'source_tar' && legacy?.version === '1.0.0');
   fs.rmSync(tmp, { recursive: true, force: true });
   process.exit(fails ? 1 : 0);
 }

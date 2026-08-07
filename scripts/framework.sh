@@ -554,15 +554,12 @@ active_dev_mounts() {
   if [ -n "$response" ]; then
     mounts="$(node -e '
       let s=""; process.stdin.on("data",c=>s+=c).on("end",()=>{try{
-        const d=JSON.parse(s); process.stdout.write((d.mounts||[]).map(x=>x.package_id).join(","));
+        const d=JSON.parse(s); process.stdout.write((d.watchers||[]).map(x=>x.package_id).join(","));
       }catch{}})' <<<"$response")"
   fi
-  if [ -z "$mounts" ] && [ -f "$RUNTIME/.runtime/dev/packages.v1.json" ]; then
-    mounts="$(node -e '
-      const fs=require("fs"); try { const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-      process.stdout.write((d.mounts||[]).map(x=>x.package_id).join(",")); } catch {}' \
-      "$RUNTIME/.runtime/dev/packages.v1.json")"
-  fi
+  # 舊模型把掛載寫進 `.runtime/dev/packages.v1.json` 並在服務不可達時回退去讀它。
+  # 監看是純進程內狀態、重啟即消失，沒有這樣一份檔案可讀——也不該有：它一旦存在
+  # 就會變成「package 是不是 dev」的第二個真相源。
   printf '%s' "$mounts"
 }
 

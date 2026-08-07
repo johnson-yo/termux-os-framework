@@ -74,6 +74,21 @@ export function readManifest(dir) {
 }
 
 /** Resolve a Package from the current repository or the independent development root. */
+/**
+ * SDK 元資料的落點：**永遠不在包的工作樹裡**。
+ *
+ * handoff、verify 記錄、dev session 都是開發過程的痕跡，不是包的內容。寫進工作樹
+ * 會讓一次 `verify-device` 就把一個乾淨的正式包判成 dev——而使用者什麼都沒改。
+ * 已安裝的包落在 `<packageRoot>/.sdk/`（與 versions/、config/、archive/ 平行），
+ * 源碼樹則落在同層的兄弟目錄。
+ */
+export function sdkMetaDir(dir) {
+  const parent = path.dirname(dir);
+  // 已安裝布局：<packageRoot>/versions/<version>/ → <packageRoot>/.sdk/
+  if (path.basename(parent) === 'versions') return path.join(path.dirname(parent), '.sdk');
+  return path.join(parent, `${path.basename(dir)}.sdk`);
+}
+
 export function packageDir(id) {
   try {
     if (readManifest(process.cwd()).id === id) return process.cwd();

@@ -16,7 +16,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { listDevMounts } from '../packages/dev-runtime.mjs';
+import { listDevWatchers } from '../packages/dev-runtime.mjs';
+import { packageGitState, describeGitState } from '../packages/git-state.mjs';
 import { getPackage } from '../packages/loader.mjs';
 
 const MANIFEST = 'termux-os.package.json';
@@ -60,9 +61,8 @@ function directorySize(dir) {
 function pagesOf(record) {
   if (!record?.manifest) return [];
   const pages = new Map();
-  const scope = (url) => (record.workspaceSlug && typeof url === 'string'
-    ? url.replace(`/packages/${record.packageId}/`, `/packages/${record.id}/`)
-    : url);
+  // 只有一份 package，URL 不再需要按實例改寫。
+  const scope = (url) => url;
   for (const entry of record.manifest.menu ?? []) {
     if (!entry?.path) continue;
     pages.set(scope(entry.path), { title: entry.title ?? entry.path, url: scope(entry.path) });
@@ -72,10 +72,12 @@ function pagesOf(record) {
   return [...pages.values()];
 }
 
-function describe(dir, { slug, external = false, mount = null, services = [] }) {
+function describe(dir, { slug, external = false, watcher = null, services = [] }) {
   const manifest = readManifest(dir);
-  const record = mount ? getPackage(mount.instance_id) : null;
-  const released = manifest?.id ? getPackage(manifest.id) : null;
+  // 一個 package id 只有一條記錄：被監看的和已發布的是同一份。
+  const record = manifest?.id ? getPackage(manifest.id) : null;
+  const released = record;
+  const git = manifest?.id && record?.dir ? packageGitState(record.dir) : null;
   return {
     slug,
     path: dir,
@@ -89,20 +91,26 @@ function describe(dir, { slug, external = false, mount = null, services = [] }) 
     valid: Boolean(manifest?.id),
     invalid_reason: manifest?.id ? null : `${MANIFEST} missing or unreadable`,
     size_bytes: directorySize(dir),
-    mounted: Boolean(mount),
-    mount: mount ? {
-      instance_id: mount.instance_id,
-      slug: mount.workspace_slug,
-      status: record?.status ?? 'failed',
-      error: record?.error ?? mount.last_error ?? null,
-      watch_mode: mount.watch_mode,
-      seq: mount.seq,
+    /**
+     * ⚠ 兩個獨立維度，不可合併顯示。
+     * `watching` = 有沒有在監看並自動重載；`state` = 這份代碼跟發布的一不一樣。
+     * 舊 UI 只有一個「mounted」，於是「在開發」和「改過了」變成同一件事。
+     */
+    watching: Boolean(watcher),
+    watcher: watcher ? {
+      watch_mode: watcher.watch_mode,
+      seq: watcher.seq,
+      last_reload: watcher.last_reload,
+      status: record?.status ?? 'unknown',
+      error: record?.error ?? watcher.last_error ?? null,
       pages: pagesOf(record),
       services: (record?.registered?.services ?? []).map((id) => ({
         id, state: services.find((s) => s.id === id)?.process?.state ?? 'unknown',
       })),
     } : null,
-    released: released && !released.workspaceSlug
+    state: git?.state ?? 'unknown',
+    state_summary: git ? describeGitState(git) : 'unknown',
+    released: released
       ? { version: released.manifest?.version ?? null, status: released.status,
           url: `/packages/${released.id}/` }
       : null,
@@ -111,8 +119,8 @@ function describe(dir, { slug, external = false, mount = null, services = [] }) 
 
 export function workspaceSnapshot({ services = [], config = null } = {}) {
   const root = workspaceRoot(config);
-  const mounts = listDevMounts();
-  const byPath = new Map(mounts.map((m) => [path.resolve(m.workspace), m]));
+  const watchers = listDevWatchers();
+  const byPackage = new Map(watchers.map((w) => [w.package_id, w]));
   const projects = [];
   const seen = new Set();
 
@@ -122,18 +130,13 @@ export function workspaceSnapshot({ services = [], config = null } = {}) {
     const dir = path.join(root, entry.name);
     seen.add(path.resolve(dir));
     projects.push(describe(dir, {
-      slug: toWorkspaceSlug(entry.name), mount: byPath.get(path.resolve(dir)) ?? null, services,
+      slug: toWorkspaceSlug(entry.name), watcher: byPackage.get(readManifest(dir)?.id) ?? null, services,
     }));
   }
 
-  // A workspace mounted from outside the root still exists and must be manageable.
-  for (const mount of mounts) {
-    const dir = path.resolve(mount.workspace);
-    if (seen.has(dir)) continue;
-    projects.push(describe(dir, {
-      slug: toWorkspaceSlug(path.basename(dir)), external: true, mount, services,
-    }));
-  }
+  // 舊模型可以從 root 之外掛載一個工作區，於是這裡要把它補進清單。新模型沒有
+  // 「掛載一個目錄」這回事：watcher 監看的永遠是已安裝的那份 package，所以
+  // root 之外不會再有第三方項目需要補。
 
   return { ok: true, root, root_exists: fs.existsSync(root), projects };
 }
@@ -238,7 +241,7 @@ export function packWorkspace({ slug, config = null }) {
 export function deleteWorkspace({ slug, config = null }) {
   const target = resolveProject(slug, config);
   if (!target || !fs.existsSync(target.dir)) return { ok: false, error: 'unknown_workspace' };
-  if (listDevMounts().some((m) => path.resolve(m.workspace) === path.resolve(target.dir))) {
+  if (listDevWatchers().some((w) => w.package_id === readManifest(target.dir)?.id)) {
     return { ok: false, error: 'mounted', fix: 'Stop the mount before deleting the project.' };
   }
   fs.rmSync(target.dir, { recursive: true, force: true });

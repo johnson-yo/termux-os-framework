@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { FW_ROOT, emit, fail, frameworkToken, run, packageDir, readManifest } from './util.mjs';
+import { FW_ROOT, emit, fail, frameworkToken, packageDir, readManifest, run, sdkMetaDir } from './util.mjs';
 import { collectDoctor } from './doctor.mjs';
 import { resolveConnection, frameworkFetch, transportPut, transportExec } from './connection.mjs';
 import { hashWorkspace } from '../../src/packages/workspace-hash.mjs';
@@ -74,20 +74,32 @@ export async function cmdRelease(flags, pos) {
       return fail(flags, 'self_test_failed', null, `Run node ${path.relative(FW_ROOT, dir)}/test/self-test.mjs to inspect failures.`);
   }
 
-  stage('package-manager pack');
-  const packArgs = ['scripts/package-manager.mjs', 'pack', id];
-  packArgs.push('--source', dir);
-  if (flags.target) packArgs.push('--target', String(flags.target));
-  if (flags['artifact-dir']) packArgs.push('--artifact-dir', String(flags['artifact-dir']));
-  if (run('node', packArgs) !== 0) {
-    return fail(flags, 'pack_failed', null,
-      'Follow the pack error: declared artifacts must exist, and a multi-target Package requires --target.');
-  }
-
+  /**
+   * ⭐ 本地 release 與 GitHub CI 用同一個 builder。
+   *
+   * 此前本地走 `package-manager pack`（確定性歸檔、**不帶 .git**），CI 走 shallow-Git
+   * asset：兩條路產出的東西不是同一種包，於是「解包即用、Git 即狀態」在本地包上
+   * 直接不成立。現在只有一個規格。
+   */
   const m = readManifest(dir);
   const target = flags.target ? String(flags.target) : null;
-  const tarName = `${id}-${m.version}${target ? `-${target}` : ''}.tar.gz`;
-  const tar = path.join(FW_ROOT, 'dist/releases', id, m.version, tarName);
+  const outDir = flags['artifact-dir']
+    ? path.resolve(String(flags['artifact-dir']))
+    : path.join(FW_ROOT, 'dist/releases', id, m.version);
+
+  stage('shallow-Git package asset');
+  const buildArgs = [path.join(FW_ROOT, 'scripts/build-package-asset.sh'), '--source', dir, '--out-dir', outDir];
+  // 正式 release 要求來源乾淨；dirty 產物必須顯式索取，且仍是同一種包——
+  // 裝上去自然判為 dev，而不是變成另一個 package type。
+  if (flags['allow-dirty']) buildArgs.push('--allow-dirty');
+  if (flags.branch) buildArgs.push('--branch', String(flags.branch));
+  if (run('bash', buildArgs) !== 0) {
+    return fail(flags, 'asset_build_failed', null,
+      'Commit the work tree, or pass --allow-dirty for a local development artifact.');
+  }
+
+  const tarName = `${id}-${m.version}.tar.gz`;
+  const tar = path.join(outDir, tarName);
   const sha = fs.existsSync(`${tar}.sha256`) ? fs.readFileSync(`${tar}.sha256`, 'utf8').split(/\s+/)[0] : null;
 
   stage('package-manager verify');
@@ -227,8 +239,8 @@ export async function cmdHandoff(flags, pos) {
   const warns = results.filter((r) => r.level === 'WARNING').map((r) => r.check);
   let proj = null;
   // Development state belongs under .sdk/ and outside Release archives.
-  for (const rel of ['.sdk/project.v1.json', 'sdk-project.v1.json']) {
-    try { proj = JSON.parse(fs.readFileSync(path.join(dir, rel), 'utf8')); break; } catch { /* Optional metadata. */ }
+  for (const p of [path.join(sdkMetaDir(dir), 'project.v1.json'), path.join(dir, 'sdk-project.v1.json')]) {
+    try { proj = JSON.parse(fs.readFileSync(p, 'utf8')); break; } catch { /* Optional metadata. */ }
   }
 
   const content = `# Handoff — ${id}
@@ -245,8 +257,9 @@ This file contains current facts only. A maintainer should be able to start with
 Generated at: ${new Date().toISOString()}
 `;
   // Mutable handoff state stays under .sdk/ and outside the immutable archive.
-  fs.mkdirSync(path.join(dir, '.sdk'), { recursive: true });
-  fs.writeFileSync(path.join(dir, '.sdk/handoff.md'), content);
-  emit({ ok: true, package: id, handoff: path.join(dir, '.sdk/handoff.md') }, flags,
+  const metaDir = sdkMetaDir(dir);
+  fs.mkdirSync(metaDir, { recursive: true });
+  fs.writeFileSync(path.join(metaDir, 'handoff.md'), content);
+  emit({ ok: true, package: id, handoff: path.join(sdkMetaDir(dir), 'handoff.md') }, flags,
     (o) => console.log(`✓ Wrote ${o.handoff}; complete the known-issues section before handoff.`));
 }

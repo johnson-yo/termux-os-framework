@@ -8,9 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import {
-  FW_ROOT, PKGS_DIR, emit, fail, runCapture, listSourcePackages, packageDir, readManifest,
-} from './util.mjs';
+import { FW_ROOT, PKGS_DIR, emit, fail, listSourcePackages, packageDir, readManifest, runCapture, sdkMetaDir } from './util.mjs';
 
 const CORE_CONCEPTS = [
   'Capability', 'Action', 'Feed', 'State', 'Stage Service',
@@ -123,8 +121,8 @@ export function cmdInspect(flags, pos) {
     ports: (m.ports ?? []).map((port) => port.id),
     menu: (m.menu ?? []).map((node) => `${node.parent} → ${node.path}`),
     webui: has(m.entrypoints?.webui ?? 'web/index.html'),
-    files: { readme: has('README.md'), handoff: has('.sdk/handoff.md') || has('HANDOFF.md'), agents: has('AGENTS.md'),
-      self_test: has('test/self-test.mjs'), sdk_project: has('.sdk/project.v1.json') || has('sdk-project.v1.json') },
+    files: { readme: has('README.md'), handoff: fs.existsSync(path.join(sdkMetaDir(dir), 'handoff.md')) || has('HANDOFF.md'), agents: has('AGENTS.md'),
+      self_test: has('test/self-test.mjs'), sdk_project: fs.existsSync(path.join(sdkMetaDir(dir), 'project.v1.json')) || has('sdk-project.v1.json') },
     dir,
   };
   emit(info, flags, (i) => {

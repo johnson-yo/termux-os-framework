@@ -417,17 +417,17 @@ function renderFrameworkUpdate(data) {
     // 掛載中的 Dev Runtime 會擋下更新。把「停止全部挂载」直接放在這裡——
     // 讓使用者為了更新而去別的頁面翻找（或更糟，去開 Termux）是把流程做了一半。
     const controls = document.createElement('div'); controls.className = 'button-row';
-    if (data.dev_mounts?.length) {
-      controls.append(actionButton(`停止全部挂载（${data.dev_mounts.length}）`, '', async () => {
-        for (const mount of data.dev_mounts) {
+    if (data.dev_watchers?.length) {
+      controls.append(actionButton(`停止全部监视（${data.dev_watchers.length}）`, '', async () => {
+        for (const mount of data.dev_watchers) {
           try {
-            await apiData(`/api/dev/packages/${encodeURIComponent(mount.instance_id ?? mount.package_id)}/stop`,
+            await apiData(`/api/dev/packages/${encodeURIComponent(mount.package_id)}/stop`,
               { method: 'POST', body: '{}' });
           } catch (error) {
             frameworkUpdateNotice = { kind: 'bad', text: `停止 ${mount.package_id} 失败：${error.message ?? error}` };
           }
         }
-        frameworkUpdateNotice ??= { kind: 'good', text: '已停止全部挂载；Workspace 的项目都保留着，现在可以更新。' };
+        frameworkUpdateNotice ??= { kind: 'good', text: '已停止全部监视；Package 内容不受影响，现在可以更新。' };
         await loadFrameworkUpdate();
       }, !canWrite()));
     }

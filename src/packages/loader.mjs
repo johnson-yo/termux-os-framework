@@ -105,7 +105,7 @@ export const listPackages = () => [...packages.values()].map((r) => ({
 export const getPackage = (id) => {
   const r = packages.get(id);
   if (!r) return null;
-  return { id: r.id, packageId: r.packageId ?? r.id, workspaceSlug: r.workspaceSlug ?? null,
+  return { id: r.id, packageId: r.packageId ?? r.id,
     dir: r.dir, status: r.status, error: r.error ?? null, manifest: r.manifest ?? null,
     source: r.source ?? 'root', install: r.install ?? null, dev: r.dev ?? null,
     ports: getPackagePorts(id),
@@ -132,6 +132,17 @@ export const getPackageWebRoot = (id) => {
  * 引用它的 context binary——同名不同機的那一份會被照常打開，然後在加載期報
  * `Error code: 5000`。目錄隔離是這裡唯一的防線，所以它由框架給，不靠宣告的人自覺。
  */
+/**
+ * 正在取的资产。
+ *
+ * ⚠ 下载是**服务端**的事，而页面刷新一次就忘了自己点过——于是同一个资产会被第二次
+ * 点下去，两个下载写同一个 `.part`。落盘的字节数看起来一直在涨，校验却必然失败。
+ * 谁在取这件事必须由知道它的一方说出来。
+ */
+const fetchingAssets = new Map(); // assetId → started_at
+
+export const assetFetchInFlight = (assetId) => fetchingAssets.get(assetId) ?? null;
+
 export async function fetchAssetOnDemand(assetId, {
   onProgress = () => {},
   // 沒給就用載入時記下的那一個；⛔ 不預設一個公網地址——Catalog 地址是部署決定，
@@ -148,8 +159,14 @@ export async function fetchAssetOnDemand(assetId, {
   if (!manifest) {
     return { ok: false, error: 'provider_not_loaded', detail: `${provider.package} declares ${assetId} but is not loaded` };
   }
+  if (fetchingAssets.has(assetId)) {
+    return { ok: false, error: 'already_fetching', detail: `${assetId} is already being fetched`,
+      started_at: fetchingAssets.get(assetId) };
+  }
   const packageTarget = manifestTargets(manifest)[0]?.id ?? TARGET_GENERIC;
-  return fetchOptionalAsset(assetId, {
+  fetchingAssets.set(assetId, new Date().toISOString());
+  try {
+    return await fetchOptionalAsset(assetId, {
     ...rest,
     packageManifest: manifest,
     onProgress,
@@ -169,7 +186,10 @@ export async function fetchAssetOnDemand(assetId, {
       sha256: Object.values(checksums)[0] ?? null,
       fetched_on_demand: true,
     }),
-  });
+    });
+  } finally {
+    fetchingAssets.delete(assetId);
+  }
 }
 
 /** 這台機器該用哪一份載荷宣告——狀態頁與 CLI 用來說明「有幾檔、你是哪一檔」。 */
@@ -183,6 +203,8 @@ export function describeAssetVariants(assetId, profile = deviceProfile()) {
     package: manifest.id,
     candidates: picked.candidates,
     selected: picked.ok ? (picked.declaration.target?.id ?? TARGET_GENERIC) : null,
+    // 正在取吗。⚠ 页面刷新后客户端不记得自己点过，只有这一侧说得出。
+    fetching: assetFetchInFlight(assetId),
     reason: picked.ok ? null : picked.error,
     detail: picked.ok ? null : picked.detail,
   };
@@ -245,8 +267,8 @@ export async function unregisterPackage(id) {
 
 /** 單包載入（dev-runtime 用）：cacheBust 給 entry import 加查詢串避開 ESM 模塊快取 */
 export async function loadSinglePackage({ dir, expectId, source, install = null,
-  contextOverrides = null, cacheBust = false, workspaceSlug = null }, opts) {
-  await loadCandidate({ dir, expectId, source, install, contextOverrides, cacheBust, workspaceSlug }, opts);
+  contextOverrides = null, cacheBust = false }, opts) {
+  await loadCandidate({ dir, expectId, source, install, contextOverrides, cacheBust }, opts);
   return packages.get(expectId) ?? null;
 }
 
@@ -260,20 +282,31 @@ export async function loadSinglePackage({ dir, expectId, source, install = null,
  * and writing them into the released Package's settings is what coexistence is meant to prevent.
  */
 function packageConfigRoot(record, overrides) {
+  // overrides.persistRoot 仍然保留給非 dev 的注入場景（測試夾具）；dev 本身不再注入，
+  // 它讀寫的就是正式那一份配置。
   if (overrides?.persistRoot) return path.join(overrides.persistRoot, 'config');
   if (record.packageRoot) return path.join(record.packageRoot, 'config');
-  // 原始目錄掃描（self-test / doctor）沒有安裝根，就落在包目錄旁邊。
-  return path.join(record.dir, 'config');
+  /**
+   * 原始目錄掃描（self-test / doctor）沒有安裝根。
+   *
+   * ⚠ 這裡曾經回退到 `record.dir/config`，也就是**包目錄之內**。新模型下包目錄就是
+   * Git 工作樹，往裡面寫配置會讓一個從未被人碰過的包在第一次運行後就變成 dev。
+   * 落在同層的兄弟目錄，語義不變（配置與代碼分離），但工作樹保持乾淨。
+   */
+  return path.join(path.dirname(record.dir), `${path.basename(record.dir)}.config`);
 }
 
 function makeContext(record, config, configPath, overrides = null, saveConfig = null) {
   const id = record.id;
-  const tag = overrides?.devMode ? `[dev ${id}]` : `[pkg ${id}]`;
-  // A dev instance runs alongside the released package of the same id, so every
-  // globally-keyed name it registers must be suffixed. Without this the two
-  // instances collide on service and app ids and the second one fails to load.
-  const slug = record.workspaceSlug ?? null;
-  const ns = (localId) => (slug ? `${localId}@${slug}` : localId);
+  const tag = `[pkg ${id}]`;
+  /**
+   * 名字不再被命名空間化。
+   *
+   * 舊模型讓工作區以 `<id>@<slug>` 與正式版並排運行，於是每個全局鍵都要加後綴才不
+   * 撞車。新模型只有一份 package：release 與 dev 共用同一個 service id、app id、
+   * port、URL、config 與 data——「同態」的字面意思就是這裡不能有兩套名字。
+   */
+  const ns = (localId) => localId;
   const frameworkRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
   return {
     packageId: id,
@@ -508,7 +541,7 @@ function makeContext(record, config, configPath, overrides = null, saveConfig = 
 //      維持原始目錄掃描語義
 // ============================================================
 async function loadCandidate({ dir, expectId, source, install, contextOverrides = null, cacheBust = false,
-  workspaceSlug = null, packageRoot = null },
+  packageRoot = null },
   { frameworkVersion, config, configPath, saveConfig, log }) {
   const manifestPath = path.join(dir, MANIFEST_FILENAME);
   if (!fs.existsSync(manifestPath)) {
@@ -533,10 +566,8 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
   if (!v.ok) return fail(manifest?.id && !packages.has(manifest.id) ? manifest.id : expectId, manifest, `manifest invalid: ${v.errors.join('; ')}`);
 
   const packageId = manifest.id;
-  // A workspace mount registers under a derived instance key so the released
-  // package of the same id keeps serving. `@` is used because the existing
-  // route patterns already accept it — `#` would be read as a URL fragment.
-  const id = workspaceSlug ? `${packageId}@${workspaceSlug}` : packageId;
+  // 一個 package id 就是一個實體。此前這裡可以派生出 `<id>@<slug>` 的第二身分。
+  const id = packageId;
   if (expectId !== id) {
     return fail(packages.has(id) ? expectId : id, manifest,
       source === 'installed'
@@ -547,7 +578,7 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
   if (existing) return fail(`${id}@${source}`, manifest, `duplicate package id "${id}": already provided by ${existing.dir} (${existing.source}), rejected for ${dir} (${source})`);
 
   const record = {
-    id, packageId, workspaceSlug, dir, packageRoot, manifest, source, install, status: 'loaded', error: null,
+    id, packageId, dir, packageRoot, manifest, source, install, status: 'loaded', error: null,
     webRoot: path.join(dir, path.dirname(manifest.entrypoints.webui)),
     registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], states: [], cleanups: [] },
   };
@@ -590,10 +621,7 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
         ...declaration,
         name: declaration.id,
         package: id,
-        // service 用實例作用域 id：工作區實例與正式版的 liveness 不能互相冒充。
-        service: declaration.service
-          ? (workspaceSlug ? `${declaration.service}@${workspaceSlug}` : declaration.service)
-          : null,
+        service: declaration.service ?? null,
       });
       record.registered.states.push(entry.name);
     }
@@ -601,13 +629,11 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
     // 029 §12：Manifest 宣告的 integration/artifact 契約在載入成功後登記（先到先得，卸載時回收）
     record.registered.integrations = [];
     record.registered.artifactContracts = [];
-    if (!workspaceSlug) {
-      for (const cap of manifest.integrations?.provides ?? []) {
-        if (!integrationProvides.has(cap)) { integrationProvides.set(cap, id); record.registered.integrations.push(cap); }
-      }
-      for (const a of manifest.artifacts?.provides ?? []) {
-        if (!artifactContracts.has(a.id)) { artifactContracts.set(a.id, { ...a, package: id }); record.registered.artifactContracts.push(a.id); }
-      }
+    for (const cap of manifest.integrations?.provides ?? []) {
+      if (!integrationProvides.has(cap)) { integrationProvides.set(cap, id); record.registered.integrations.push(cap); }
+    }
+    for (const a of manifest.artifacts?.provides ?? []) {
+      if (!artifactContracts.has(a.id)) { artifactContracts.set(a.id, { ...a, package: id }); record.registered.artifactContracts.push(a.id); }
     }
     log(`package ${id}: loaded ${manifest.version} (${manifest.types.join(',')}) [${source}]`);
   } catch (e) {

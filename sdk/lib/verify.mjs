@@ -8,7 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { emit, fail, frameworkToken, packageDir, readManifest } from './util.mjs';
+import { emit, fail, frameworkToken, packageDir, readManifest, sdkMetaDir } from './util.mjs';
 import { resolveConnection, frameworkFetch, transportExec } from './connection.mjs';
 
 const TOKEN = frameworkToken();
@@ -120,8 +120,9 @@ function report(flags, { id, mode, hook, binding: b, wsDir }) {
     checks: d.checks ?? [], at: new Date().toISOString(), ...(b ?? {}), ...(hook.note ? { note: hook.note } : {}) };
   // Verification records are mutable Workspace evidence and stay outside Release archives.
   if (fs.existsSync(wsDir)) {
-    fs.mkdirSync(path.join(wsDir, '.sdk'), { recursive: true });
-    fs.writeFileSync(path.join(wsDir, `.sdk/verify${mode === 'dev' ? '-dev' : ''}.v1.json`), JSON.stringify(rec, null, 2));
+    const metaDir = sdkMetaDir(wsDir);
+    fs.mkdirSync(metaDir, { recursive: true });
+    fs.writeFileSync(path.join(metaDir, `verify${mode === 'dev' ? '-dev' : ''}.v1.json`), JSON.stringify(rec, null, 2));
   }
   emit({ ok: d.result !== 'fail', package: id, mode, result: d.result, checks: d.checks ?? [],
     ...(b ? { binding: b } : {}), ...(hook.note ? { note: hook.note } : {}) }, flags, (o) => {

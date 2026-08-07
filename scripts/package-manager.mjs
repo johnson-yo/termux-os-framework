@@ -16,6 +16,7 @@ import { declaredDependencies } from '../src/packages/dependencies.mjs';
 import { checkFreeSpace, fetchAssetFiles, pendingBytes } from '../src/assets/fetch.mjs';
 import {
   checkBundled, checkExternal, deviceProfile, resolveTarget, archiveName, scanForbiddenPaths, preflight,
+  RELEASE_EXCLUDED_NAMES, RELEASE_EXCLUDED_SUFFIXES,
 } from '../src/packages/runtime-contract.mjs';
 // sha256File 用串流版（024）：舊的 readFileSync 版會把 450MB 的 tar 整個吃進記憶體——手機上會 OOM
 import {
@@ -23,10 +24,19 @@ import {
 } from '../src/assets/registry.mjs';
 import { defaultAuthFile, readAuthFile } from '../src/system/auth-file.mjs';
 import { checkPackagePorts, configurePortRegistry } from '../src/system/port-registry.mjs';
+import { packageGitState, packageGitIdentity, describeGitState, GIT_STATE } from '../src/packages/git-state.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FRAMEWORK_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version ?? '0.0.0';
 const RELEASES = path.join(ROOT, 'dist/releases');
+
+// 原始 Release 归档的落点，与 versions/ 和 config/ 平行——都在 Git 工作树之外。
+// 这是「恢复正式态」唯一可信的来源：active.json 的 hashes 记得住身份，记不住内容。
+const ARCHIVE_DIRNAME = 'archive';
+const archiveDir = (pkgDir) => path.join(pkgDir, ARCHIVE_DIRNAME);
+const archiveKey = (version, target) => `${version}@${target ?? TARGET_GENERIC}`;
+const archiveTarPath = (pkgDir, version, target) => path.join(archiveDir(pkgDir), `${archiveKey(version, target)}.tar.gz`);
+const archiveMetaPath = (pkgDir, version, target) => path.join(archiveDir(pkgDir), `${archiveKey(version, target)}.json`);
 const CONFIG_FOR_PORTS = process.env.FRAMEWORK_CONFIG || process.env.CONFIG || null;
 const PORT_REGISTRY_FILE = process.env.PORT_REGISTRY_PATH || (CONFIG_FOR_PORTS
   ? path.join(path.dirname(path.resolve(CONFIG_FOR_PORTS)), '..', 'ports.v1.json') : null);
@@ -43,11 +53,9 @@ const die = (msg) => { console.error(`ERROR: ${msg}`); process.exit(1); };
 // Release 排除項（022 §5.2）；Package 自帶 fixtures 顯式保留
 // 029 §6.3：.sdk/（易變開發狀態）與 HANDOFF.md（易變交接）不進不可變 archive——
 // mutable 交接更新不再改 release hash；payload 文檔只留 README/RELEASE_NOTES
-const EXCLUDES = [
-  '.git', 'node_modules', '__pycache__', '.runtime', '.DS_Store', '.sdk',
-  'HANDOFF.md', 'DEVELOPMENT.md', 'CLAUDE.md',
-];
-const EXCLUDE_SUFFIX = ['.pyc', '.o', '.log'];
+// 判準的唯一真相源在 runtime-contract.mjs：pack 剝什麼、doctor 就不該因什麼而拒絕。
+const EXCLUDES = RELEASE_EXCLUDED_NAMES;
+const EXCLUDE_SUFFIX = RELEASE_EXCLUDED_SUFFIXES;
 // 禁止路徑判準的唯一真相源 = runtime-contract.mjs 的 FORBIDDEN_PATTERNS（023 §5.3 起併入，
 // 避免 pack 查一套、verify 查另一套）
 
@@ -201,12 +209,14 @@ async function cmdPack(id, args) {
 // ============================================================
 // verify <tar> <sha256>（只讀；install 前置共用）
 // ============================================================
-async function verifyArchive(tarPath, shaPath) {
+async function verifyArchive(tarPath, shaPath, options = {}) {
   const fail = (error) => ({ ok: false, error });
   if (!fs.existsSync(tarPath)) return fail(`tar not found: ${tarPath}`);
-  if (!fs.existsSync(shaPath)) return fail(`sha256 sidecar not found: ${shaPath}`);
+  // 保存下来的原包没有 sidecar：它的期望值来自 active.json 记下的那一个。
+  const explicit = options.expectedSha256 ?? null;
+  if (!explicit && !fs.existsSync(shaPath)) return fail(`sha256 sidecar not found: ${shaPath}`);
 
-  const expected = fs.readFileSync(shaPath, 'utf8').trim().split(/\s+/)[0];
+  const expected = explicit ?? fs.readFileSync(shaPath, 'utf8').trim().split(/\s+/)[0];
   const actual = sha256File(tarPath);
   if (!/^[0-9a-f]{64}$/.test(expected)) return fail('sha256 sidecar malformed');
   if (expected !== actual) return fail(`checksum mismatch: expected ${expected}, got ${actual}`);
@@ -603,6 +613,37 @@ async function cmdInstall(tarPath, shaPath, args = []) {
   if (forceTarget && t.verdict === 'needs_force') {
     console.log(`WARNING: --force-target — target "${t.target?.id}" could not be confirmed:\n  ${t.reasons.join('\n  ')}`);
   }
+  /**
+   * dev 保护：active 工作树被改过就不许静默覆盖。
+   *
+   * 判据来自工作树本身，所以「使用者改了什么」和「系统以为他改了什么」不可能分歧。
+   * ⚠ unknown 不当作 dirty——旧的 source_tar 包没有 Git 身份，把它们一律拒绝会让
+   * 过渡期所有升级停摆；但也绝不当作 clean 去覆盖，unknown 只是不触发这道门。
+   */
+  if (prevActive) {
+    const prevDir = path.join(pkgDir, 'versions', prevActive.active_version);
+    const git = packageGitState(prevDir);
+    let prevHead = null;
+    try { prevHead = JSON.parse(fs.readFileSync(archiveMetaPath(pkgDir, prevActive.active_version, prevActive.active_target ?? TARGET_GENERIC), 'utf8')).head ?? null; }
+    catch { /* 舊安裝沒有這份記錄。 */ }
+    const nowHead = packageGitIdentity(prevDir).head;
+    if (prevHead && nowHead && prevHead !== nowHead) {
+      git.state = GIT_STATE.DEV;
+      git.changes = git.changes.length ? git.changes
+        : [{ code: 'HD', path: `HEAD ${nowHead.slice(0, 12)} ≠ released ${prevHead.slice(0, 12)}`, untracked: false }];
+    }
+    if (git.state === GIT_STATE.DEV && !args.includes('--force-dirty')) {
+      const sample = git.changes.slice(0, 10).map((c) => `    ${c.code} ${c.path}`).join('\n');
+      die(`${id} ${prevActive.active_version} has local modifications (${git.changes.length} change(s)); refusing to overwrite them:\n`
+        + `${sample}${git.changes.length > 10 ? '\n    …' : ''}\n`
+        + '  Commit or push them, copy them out, or run\n'
+        + `    node scripts/package-manager.mjs restore ${id}\n`
+        + '  to return to the released content first. --force-dirty overrides and discards them.');
+    }
+    if (git.state === GIT_STATE.DEV) {
+      console.log(`WARNING: --force-dirty — discarding ${git.changes.length} local change(s) in ${id} ${prevActive.active_version}`);
+    }
+  }
   const ext = checkExternal(manifest);
   const missing = ext.items.filter((i) => i.ok === false && i.required);
   if (missing.length && !allowMissing) {
@@ -643,6 +684,16 @@ async function cmdInstall(tarPath, shaPath, args = []) {
       registryBase: process.env.PACKAGE_REGISTRY_URL || 'https://package.termux-os.com',
     });
 
+    // 原包先落 archive/：字节已经过 sha256 与 verify，而 active 还没动，
+    // 所以这一步失败不会留下半成品，也不会让恢复源与安装内容不一致。
+    saveOriginalArchive(pkgDir, tarPath, {
+      id, version, target: t.target?.id ?? TARGET_GENERIC, sha256,
+      origin: readInstallOrigin(tarPath),
+      // 發布態的 HEAD。⚠ 少了它，使用者只要把改動 commit 掉，工作樹就重新變乾淨，
+      // 狀態讀回 release——而內容跟發布的已經不是同一份。「乾淨」不等於「沒改過」。
+      head: packageGitIdentity(stagedPkg).head,
+    });
+
     const versionDir = path.join(pkgDir, 'versions', version);
     fs.rmSync(versionDir, { recursive: true, force: true }); // 殘留半成品清掉（同版本不同 hash 已在上面擋）
     fs.mkdirSync(path.dirname(versionDir), { recursive: true });
@@ -676,6 +727,9 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     for (const d of fs.readdirSync(path.join(pkgDir, 'versions'))) {
       if (!keep.has(d)) fs.rmSync(path.join(pkgDir, 'versions', d), { recursive: true, force: true });
     }
+    // archive/ 与 versions/ 保持同一个版本集合：留着一个无处可装的归档没有意义，
+    // 而少留一个会让 rollback 之后的 restore 失去来源。
+    pruneArchives(pkgDir, keep);
     cleanup();
     console.log(`installed ${id} ${version} (sha256 ${sha256.slice(0, 12)}…)`);
   } catch (e) {
@@ -697,6 +751,171 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     }
     die(String(e?.message ?? e));
   }
+}
+
+// ============================================================
+// 原包保存与恢复（archive/）
+// ============================================================
+
+/** 安装来源。远端下载时由调用方写在 tar 旁的 sidecar 里；本地装则只有路径。 */
+function readInstallOrigin(tarPath) {
+  try { return JSON.parse(fs.readFileSync(`${tarPath}.origin.json`, 'utf8')); }
+  catch { return { kind: 'local_file', path: path.basename(tarPath) }; }
+}
+
+/**
+ * 把已通过校验的原始归档留下来。
+ *
+ * ⭐ 恢复正式态的来源必须是**字节**，不能是 `git checkout -- .`：后者恢复不了被删掉的
+ * 未跟踪文件，也修不好 `.git` 自身被改动的情况，而它对「包里本来有什么」的认知来自
+ * 那个可能已经被改坏的工作树。
+ */
+function saveOriginalArchive(pkgDir, tarPath, meta) {
+  const dir = archiveDir(pkgDir);
+  fs.mkdirSync(dir, { recursive: true });
+  const dest = archiveTarPath(pkgDir, meta.version, meta.target);
+  const tmp = `${dest}.part`;
+  fs.copyFileSync(tarPath, tmp);
+  const digest = sha256File(tmp);
+  if (digest !== meta.sha256) {
+    fs.rmSync(tmp, { force: true });
+    throw new Error(`archive copy mismatch: expected ${meta.sha256}, got ${digest}`);
+  }
+  fs.renameSync(tmp, dest);
+  fs.writeFileSync(archiveMetaPath(pkgDir, meta.version, meta.target), `${JSON.stringify({
+    schema: 'termux-os.package-archive.v1',
+    id: meta.id,
+    version: meta.version,
+    target: meta.target,
+    sha256: meta.sha256,
+    size: fs.statSync(dest).size,
+    origin: meta.origin ?? null,
+    head: meta.head ?? null,
+    saved_at: new Date().toISOString(),
+  }, null, 2)}\n`);
+  console.log(`archived original ${archiveKey(meta.version, meta.target)} (${fs.statSync(dest).size} bytes)`);
+}
+
+/** archive/ 只保留仍然装得回去的版本，与 versions/ 同一个集合。 */
+function pruneArchives(pkgDir, keepVersions) {
+  const dir = archiveDir(pkgDir);
+  if (!fs.existsSync(dir)) return;
+  for (const name of fs.readdirSync(dir)) {
+    const version = name.split('@')[0];
+    if (!keepVersions.has(version)) fs.rmSync(path.join(dir, name), { force: true });
+  }
+}
+
+// ============================================================
+// restore <id>（把 active 版本的内容换回保存的原包）
+// ============================================================
+async function cmdRestore(id) {
+  const root = installedRoot();
+  const active = readActive(id);
+  if (!active) die(`${id} is not installed`);
+  const pkgDir = path.join(root, id);
+  const version = active.active_version;
+  const target = active.active_target ?? TARGET_GENERIC;
+  const tar = archiveTarPath(pkgDir, version, target);
+  if (!fs.existsSync(tar)) {
+    die(`no saved archive for ${id} ${archiveKey(version, target)}.\n`
+      + '  Only versions installed by a build that saves originals can be restored offline;\n'
+      + '  reinstall this version from the catalog to obtain one.');
+  }
+  const expected = active.hashes?.[archiveKey(version, target)] ?? active.archive_sha256 ?? null;
+  const actual = sha256File(tar);
+  if (expected && actual !== expected) {
+    die(`saved archive is not the installed release: expected ${expected}, got ${actual}; refusing to restore`);
+  }
+  const v = await verifyArchive(tar, null, { expectedSha256: actual });
+  if (!v.ok) die(`saved archive failed verification: ${v.error}`);
+  if (v.id !== id || v.version !== version) {
+    die(`saved archive identity mismatch: archive is ${v.id} ${v.version}, active is ${id} ${version}`);
+  }
+
+  const versionDir = path.join(pkgDir, 'versions', version);
+  const staging = path.join(root, '.staging', `${id}-restore-${Date.now()}`);
+  // 修改前的现场先挪开而不是删掉——恢复失败时它是唯一能还回去的东西。
+  const held = `${versionDir}.restoring-${Date.now()}`;
+  let movedAside = false;
+  try {
+    fs.mkdirSync(staging, { recursive: true });
+    execFileSync('tar', ['-xzf', tar, '-C', staging]);
+    const stagedRoot = path.join(staging, v.top_id);
+    const stagedPkg = path.join(staging, id);
+    if (v.top_id !== id) fs.renameSync(stagedRoot, stagedPkg);
+    if (!fs.existsSync(path.join(stagedPkg, MANIFEST_FILENAME))) throw new Error('staging missing manifest');
+
+    let manifest = null;
+    try { manifest = JSON.parse(fs.readFileSync(path.join(versionDir, MANIFEST_FILENAME), 'utf8')); } catch { /* 当前版本坏了正是 restore 的理由 */ }
+    if (manifest) await stopOwnedServices(manifest);
+
+    if (fs.existsSync(versionDir)) { fs.renameSync(versionDir, held); movedAside = true; }
+    fs.renameSync(stagedPkg, versionDir);
+    fs.rmSync(path.join(root, '.staging'), { recursive: true, force: true });
+    if (movedAside) fs.rmSync(held, { recursive: true, force: true });
+
+    // config/、persist/data、外置 asset 一律没碰过：它们本来就不在 versionDir 之下。
+    if (!frameworkRestart()) console.log('note: framework.sh not found, skipped restart (dev machine?)');
+    else {
+      const w = await waitPackageStatus(id, true);
+      if (!w.ok) throw new Error(`post-restore check failed: ${w.error}`);
+    }
+    const git = packageGitState(versionDir);
+    console.log(`restored ${id} ${version} [${target}] from saved archive (${describeGitState(git)})`);
+    if (git.state === GIT_STATE.DEV) {
+      console.error(`WARNING: work tree is still not clean after restore: ${git.changes.length} change(s)`);
+      process.exitCode = 1;
+    }
+  } catch (e) {
+    fs.rmSync(path.join(root, '.staging'), { recursive: true, force: true });
+    if (movedAside && fs.existsSync(held)) {
+      fs.rmSync(versionDir, { recursive: true, force: true });
+      fs.renameSync(held, versionDir);
+      frameworkRestart();
+      console.error(`restore failed, put the previous content back at ${versionDir}`);
+    }
+    die(String(e?.message ?? e));
+  }
+}
+
+// ============================================================
+// state <id>（release / dev / unknown，读自工作树）
+// ============================================================
+function cmdState(id) {
+  const active = readActive(id);
+  if (!active) die(`${id} is not installed`);
+  const dir = path.join(installedRoot(), id, 'versions', active.active_version);
+  const git = packageGitState(dir);
+  const identity = packageGitIdentity(dir);
+  const pkgRoot = path.join(installedRoot(), id);
+  const target = active.active_target ?? TARGET_GENERIC;
+  let releasedHead = null;
+  try { releasedHead = JSON.parse(fs.readFileSync(archiveMetaPath(pkgRoot, active.active_version, target), 'utf8')).head ?? null; }
+  catch { /* 舊安裝沒有這份記錄。 */ }
+  /**
+   * 提交過的本地改動同樣是 dev。
+   *
+   * `git status` 只看得見「還沒 commit 的差異」。使用者一 commit，工作樹就乾淨了，
+   * 而內容跟發布的那一份已經分了岔。乾淨 ≠ 沒改過，所以判據要多問一句 HEAD。
+   */
+  const diverged = Boolean(releasedHead && identity.head && identity.head !== releasedHead);
+  const state = git.state === GIT_STATE.RELEASE && diverged ? GIT_STATE.DEV : git.state;
+  console.log(JSON.stringify({
+    id,
+    version: active.active_version,
+    target,
+    state,
+    reason: state === GIT_STATE.DEV && diverged && git.state === GIT_STATE.RELEASE
+      ? 'head_diverged_from_release' : git.reason,
+    released_head: releasedHead,
+    head_diverged: diverged,
+    error: git.error,
+    changes: git.changes,
+    ignored_paths: git.ignored,
+    git: identity,
+    restorable: fs.existsSync(archiveTarPath(pkgRoot, active.active_version, target)),
+  }, null, 2));
 }
 
 // ============================================================
@@ -805,6 +1024,8 @@ switch (cmd) {
   case 'profile': cmdProfile(); break;
   case 'check': await cmdCheck(rest[0] ?? die('usage: check <tar> [--force-target]'), rest.slice(1)); break;
   case 'check-installed': cmdCheckInstalled(rest[0] ?? die('usage: check-installed <package-id>'), rest.slice(1)); break;
+  case 'restore': await cmdRestore(rest[0] ?? die('usage: restore <package-id>')); break;
+  case 'state': cmdState(rest[0] ?? die('usage: state <package-id>')); break;
   default:
     console.log('usage: node scripts/package-manager.mjs <pack|verify|install|uninstall|rollback|list|profile|check|check-installed> ...');
     process.exit(cmd ? 1 : 0);
