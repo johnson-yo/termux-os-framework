@@ -2,6 +2,32 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.31
+
+- **A Package is one thing, and Git says whether you have edited it.** Development used to mount a
+  workspace copy as a second instance keyed `<id>@<slug>`, running beside the released Package with
+  its own data, its own URL and suffixed service ids. Two instances meant two answers to every
+  question about one Package, and a stored "is dev" flag that could be cleared while the edit
+  survived. There is now one installed copy: `release` or `dev` is read from its work tree, and a
+  committed change that leaves the tree clean is still reported as diverged from the release.
+- **`dev` only watches.** `dev start` begins auto-reloading the installed Package in place and
+  `dev stop` ends it; neither changes what the work tree says. Watching a clean Package leaves it
+  released, and stopping the watcher on an edited one leaves it edited. `--workspace`, `--slug`,
+  `--use-live-data` and `data_mode` are rejected with the reason rather than ignored.
+- **Installing keeps the original archive, so there is a way back.** The verified bytes are stored
+  beside `versions/` and `config/`, and `package-manager restore <id>` unpacks them after checking
+  the recorded SHA-256. Configuration, persisted data and shared assets live outside the work tree
+  and are untouched. An update over an edited Package is refused instead of overwriting it.
+- **One builder produces every package archive.** `termux-os-sdk release` and the standard GitHub
+  Actions workflow both call `scripts/build-package-asset.sh`, which clones depth-1 from the source
+  repository: the archive carries a real shallow history on a named branch with its origin intact,
+  so the installed Package can be inspected, committed to and pushed back from the device.
+- **The catalog can install a Release asset.** `release_asset` is accepted and preferred over the
+  GitHub-generated source archive; a Package that only publishes `source_tar` still installs.
+- **The SDK keeps its notes out of the Package.** Handoff, verify records and dev sessions moved
+  beside the Package instead of inside it, so running them no longer reports a clean Package as
+  edited. The four bundled examples pass `doctor` again, and the test suite now checks them.
+
 ## 0.2.30
 
 - **An installed Package's Update button works too.** It was disabled for any Package whose
