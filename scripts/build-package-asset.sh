@@ -44,8 +44,12 @@ VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['versi
 
 # 正式發布要求來源乾淨。dev 態允許出本地 artifact——它裝到設備上仍然帶同一個 Git
 # baseline，於是解包後自然顯示為 dev，而不是變成另一種包。
-DIRTY="$(git -C "$SOURCE" status --porcelain | head -c 1 || true)"
+# ⚠ 名出证据。此前这里只说「有未提交改动」而不说是哪些，于是 CI 上一个由步骤
+# 自己产生的文件把树弄脏时，日志里没有任何线索指向它。
+DIRTY="$(git -C "$SOURCE" -c core.fileMode=false -c core.autocrlf=false status --porcelain)"
 if [ -n "$DIRTY" ] && [ "$ALLOW_DIRTY" -eq 0 ]; then
+  echo "[asset] uncommitted entries:" >&2
+  printf '%s\n' "$DIRTY" | sed 's/^/[asset]   /' >&2
   fail "$SOURCE has uncommitted changes; commit them or pass --allow-dirty for a local dev artifact"
 fi
 [ -n "$DIRTY" ] && say "WARNING: source work tree is dirty; building a local dev artifact"
