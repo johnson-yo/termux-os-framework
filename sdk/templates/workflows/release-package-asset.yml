@@ -55,15 +55,19 @@ jobs:
       - name: Fetch the Framework builder
         run: |
           set -euo pipefail
-          curl -fsSL -o build-package-asset.sh \
+          # ⚠ Outside the checkout. Downloading it into the repository would add an
+          # untracked file to the very work tree the builder then refuses to publish
+          # as dirty — and the dirty-tree check above runs before this step, so
+          # nothing catches it until the build fails.
+          curl -fsSL -o "$RUNNER_TEMP/build-package-asset.sh" \
             "https://raw.githubusercontent.com/johnson-yo/termux-os-framework/main/scripts/build-package-asset.sh"
-          chmod +x build-package-asset.sh
+          chmod +x "$RUNNER_TEMP/build-package-asset.sh"
 
       - name: Build the shallow-Git asset
         id: asset
         run: |
           set -euo pipefail
-          ./build-package-asset.sh \
+          "$RUNNER_TEMP/build-package-asset.sh" \
             --source . \
             --ref "${GITHUB_REF_NAME}" \
             --branch "${{ steps.branch.outputs.name }}" \

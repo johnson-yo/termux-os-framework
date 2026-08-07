@@ -2,6 +2,13 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.32
+
+- **The standard release workflow no longer dirties the tree it is about to publish.** It fetched
+  the shared builder into the repository, and that untracked file made the work tree dirty, so the
+  builder refused to publish it. The dirty-tree guard runs before the fetch, so nothing caught it
+  until the build failed. The builder is fetched outside the checkout.
+
 ## 0.2.31
 
 - **A Package is one thing, and Git says whether you have edited it.** Development used to mount a
