@@ -53,6 +53,19 @@ function copyTree(src, dst) {
  * ⚠ 這是**模塊載入細節，不是第二個實例**：註冊的仍然是同一個 package id，同一個
  * service id、同一個 URL、同一份 config 與 data。副本只決定 import 從哪裡讀字節。
  */
+/**
+ * 没有 watcher 的那次 reload 留下的 generation。⚠ 不能当场删（见 devReload 里的说明），
+ * 但也不该无限堆积：下一次 reload 顺手清掉上一批。
+ */
+const orphanGenerations = [];
+const sweepOrphanGenerations = (keep) => {
+  while (orphanGenerations.length) {
+    const g = orphanGenerations.shift();
+    if (g === keep) continue;
+    try { fs.rmSync(g, { recursive: true, force: true }); } catch { /* 下次再说 */ }
+  }
+};
+
 function newGeneration(id, dir) {
   const dst = path.join(genRoot(), id, String(Date.now()));
   copyTree(dir, dst);
@@ -172,6 +185,7 @@ export async function devReload(id, { reason = 'manual' } = {}) {
   const wasRunning = await stopPackageServices(id);
   await unregisterPackage(id);
   const gen = newGeneration(id, dir);
+  sweepOrphanGenerations(gen);
   const record = await loadSinglePackage(
     // ⚠ 沒有 workspaceSlug、沒有 persistRoot 覆寫：同一個 id、同一份 config 與 data。
     { dir: gen, expectId: id, source: 'installed', cacheBust: true }, CFG);
@@ -183,7 +197,20 @@ export async function devReload(id, { reason = 'manual' } = {}) {
     w.last_error = record?.error ?? null;
     w.last_reload = new Date().toISOString();
   } else {
-    fs.rmSync(gen, { recursive: true, force: true, maxRetries: 0 });
+    /**
+     * ⛔ **不能删掉刚刚加载的那个 generation。**
+     *
+     * 没有 watcher 时（`dev reload` 单独调用，而它是 CLI 里列着的命令）这里原本
+     * 立刻 `rmSync(gen)`，可下面还要用同一个 record 去 `startService`——
+     * 而 service 的 `cwd` 就是 `record.dir`，也就是刚被删掉的这个目录。
+     * `spawn` 于是报 **ENOENT 指着 node 可执行文件**（cwd 不存在时 Node 就是这么报的），
+     * 那条错误信息指向一个完好无损的 node，没有一个字提到真正消失的东西。
+     * 真机后果：整个 Framework 进程随之退出。
+     *
+     * ⚠ 记下来，交给下一次 reload 或进程退出时清理——一个多留一会儿的临时目录，
+     *   比一个被删掉的工作目录便宜得多。
+     */
+    orphanGenerations.push(gen);
   }
   if (record?.status === 'loaded') {
     // web 資源直讀工作樹，改了立刻可見；backend 跑 generation 副本。

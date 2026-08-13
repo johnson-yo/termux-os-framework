@@ -188,6 +188,29 @@ export async function startService(id) {
     stdio: ['ignore', logFd, logFd],
   });
   fs.closeSync(logFd);
+  /**
+   * ⚠ **一个起不来的服务不许带走控制面。**
+   *
+   * `spawn` 的失败是**异步**的 `error` 事件，没有监听者就是一次
+   * unhandled 'error' → 整个 Framework 进程退出。真机上确实发生过：
+   * 一个 cwd 不存在的 service（见 dev-runtime.mjs 的 orphan generation）
+   * 让 `spawn` 报 ENOENT，Framework 随之消失，连带所有其它 package。
+   * ⛔ 失败要落在这一个服务身上，⛔ 不是落在所有人身上。
+   */
+  child.on('error', (error) => {
+    /**
+     * ⚠ 写进**这个服务自己的**日志——那是有人排查它时会看的地方。
+     * ⚠ 并把 ENOENT 这个最容易指错方向的错误翻译一下：cwd 不存在时，
+     *   Node 报的是「找不到 command」，而 command 好端端地在那儿。
+     */
+    const hint = error?.code === 'ENOENT' && def.cwd && !fs.existsSync(def.cwd)
+      ? ` (working directory does not exist: ${def.cwd} — the command itself is fine)` : '';
+    try {
+      fs.appendFileSync(logPath(id),
+        `[stage] spawn failed: ${String(error?.message ?? error)}${hint}\n`);
+    } catch { /* 日志写不下去不该再抛一次 */ }
+    try { clearMeta(id); } catch { /* 同上 */ }
+  });
   writeMeta(id, {
     service_id: id,
     pid: child.pid,
