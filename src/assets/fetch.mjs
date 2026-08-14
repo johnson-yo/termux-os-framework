@@ -62,14 +62,6 @@ export async function fetchAssetFiles(files, destDir, {
   const landed = [];
   for (const file of files) {
     const target = path.join(destDir, file.path);
-    /**
-     * ⭐ A payload file may sit in a **subdirectory** of the asset dir — a self-describing
-     * model bundle names its own weights (`weights/token_embedding.npy` in metadata.json),
-     * and flattening it would mean rewriting the upstream bundle to suit our store.
-     * ⚠ Only `destDir` was created here, so any nested `path` failed at the first write
-     * with a bare ENOENT that named the temp file, not the missing directory.
-     */
-    fs.mkdirSync(path.dirname(target), { recursive: true });
     if (fs.existsSync(target) && sha256Of(target) === file.sha256) {
       landed.push({ ...file, path: target, reused: true });
       onProgress({ file: file.path, stage: 'reused', bytes: file.size });
@@ -228,23 +220,6 @@ if (process.argv.includes('--self-test')
   landed = await fetchAssetFiles([file], dest4, { fetchImpl: async () => streamOf(body) });
   t('an existing file with the wrong hash is replaced, not trusted',
     landed[0].reused === false && fs.readFileSync(path.join(dest4, 'm.bin')).equals(body));
-
-  /**
-   * ⭐ A self-describing bundle names its own weights (`weights/token_embedding.npy`),
-   *   so a payload file legitimately lives in a subdirectory of the asset dir.
-   * ⚠ Only `destDir` used to be created, so the first nested file died on a bare ENOENT
-   *   that named the `.part` temp file rather than the missing directory.
-   */
-  const dest5 = path.join(tmp, 'store5');
-  const nested = { ...file, path: 'weights/m.bin' };
-  landed = await fetchAssetFiles([nested], dest5, { fetchImpl: async () => streamOf(body) });
-  t('a payload file may live in a subdirectory of the asset dir',
-    landed[0].reused === false
-      && fs.readFileSync(path.join(dest5, 'weights/m.bin')).equals(body));
-  t('a nested file is reused on the second pass just like a flat one',
-    (await fetchAssetFiles([nested], dest5, {
-      fetchImpl: async () => { throw new Error('must not be fetched again'); },
-    }))[0].reused === true);
 
   const space = checkFreeSpace(tmp, 1024);
   t('free space is reported, and an unknowable filesystem does not block', space.ok === true);
