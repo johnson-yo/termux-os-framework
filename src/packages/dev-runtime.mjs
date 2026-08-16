@@ -1,240 +1,308 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
- * [INPUT]: The installed Package tree, `loader.mjs` for in-place reload, and `git-state.mjs`
- *          for the released/edited fact.
- * [OUTPUT]: `initDevRuntime`, `devWatchStart`, `devWatchStop`, `devReload`, `devStatus`,
- *           `listDevWatchers`, `isDevWatched`, `devEvents`.
- * [POS]: src/packages/dev-runtime.mjs in termux-os-framework. A file watcher over the single
- *        installed Package, and nothing more.
- * [PROTOCOL]: This module must never answer "is this Package released or edited". That fact is
- *             read from the work tree by git-state.mjs; a watcher record that also claimed it
- *             would be a second source of truth that can be cleared while the edit survives.
- *             Watching and editing are two independent dimensions — do not merge them.
- *             Keep this English header synchronized with behavior and public contracts.
+ * [INPUT]: The single Installed Package worktree, the Package loader, and the Stage supervisor.
+ * [OUTPUT]: Dev watcher, reload, runtime-generation ownership, and reconcile APIs.
+ * [POS]: src/packages/dev-runtime.mjs in termux-os-framework.
+ * [PROTOCOL]: A generation is only a module-cache copy. It is never a Package
+ *             instance. One Package ID has one active worktree, one loaded
+ *             Package record, and at most one generation owner.
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadSinglePackage, unregisterPackage, _getRecord } from './loader.mjs';
 import { hashWorkspace, WORKSPACE_HASH_SKIP as SKIP } from './workspace-hash.mjs';
 import { packageGitState, describeGitState } from './git-state.mjs';
-import { resolveInstalledPackages } from './installed-root.mjs';
+import { reconcilePackage } from './reconcile.mjs';
+import { acquirePackageLock } from './operation-lock.mjs';
 import * as stage from '../stage/manager.mjs';
 
 export { hashWorkspace };
 
-let CFG = null;               // { frameworkRoot, frameworkVersion, config, configPath, saveConfig, log }
-const watchers = new Map();   // package id → watcher 記錄
+let CFG = null;
+let runtimeSession = null;
+const watchers = new Map();
+const runtimeGenerations = new Map();
+const queues = new Map();
 
-const genRoot = () => path.join(CFG.frameworkRoot, '.runtime/dev/gen');
+const genRoot = () => path.join(CFG.frameworkRoot, '.runtime', 'dev', 'gen');
+const ownerRoot = () => path.join(CFG.frameworkRoot, '.runtime', 'dev', 'owners');
+const ownerKey = (id) => encodeURIComponent(String(id)).replaceAll('%', '_');
 
-/** 這個包當前 active 版本的工作樹。找不到就是沒安裝。 */
-function activeDir(id) {
-  const { entries } = resolveInstalledPackages();
-  return entries.find((e) => e.id === id)?.dir ?? null;
+async function serialized(id, fn) {
+  const previous = queues.get(id) ?? Promise.resolve();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const current = previous.catch(() => {}).then(() => gate);
+  queues.set(id, current);
+  await previous;
+  try { return await fn(); }
+  finally {
+    release();
+    if (queues.get(id) === current) queues.delete(id);
+  }
 }
 
 function copyTree(src, dst) {
   fs.mkdirSync(dst, { recursive: true });
-  for (const e of fs.readdirSync(src, { withFileTypes: true })) {
-    if (SKIP.has(e.name)) continue;
-    const from = path.join(src, e.name);
-    const to = path.join(dst, e.name);
-    if (e.isDirectory()) copyTree(from, to);
-    else if (e.isFile()) fs.copyFileSync(from, to);
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    if (SKIP.has(entry.name)) continue;
+    const from = path.join(src, entry.name);
+    const to = path.join(dst, entry.name);
+    if (entry.isDirectory()) copyTree(from, to);
+    else if (entry.isFile()) fs.copyFileSync(from, to);
   }
 }
 
-/**
- * generation 副本：ESM 沒有模塊快取失效——entry 加查詢串只救 entry 自己，
- * 子模塊（./service/*.mjs）URL 不變照舊命中舊快取。每次重載把工作樹拷到新目錄，
- * 所有相對 import 都落在新 URL 上 → 整棵樹都是新代碼。舊 generation 隨手刪。
- *
- * ⚠ 這是**模塊載入細節，不是第二個實例**：註冊的仍然是同一個 package id，同一個
- * service id、同一個 URL、同一份 config 與 data。副本只決定 import 從哪裡讀字節。
- */
-/**
- * 没有 watcher 的那次 reload 留下的 generation。⚠ 不能当场删（见 devReload 里的说明），
- * 但也不该无限堆积：下一次 reload 顺手清掉上一批。
- */
-const orphanGenerations = [];
-const sweepOrphanGenerations = (keep) => {
-  while (orphanGenerations.length) {
-    const g = orphanGenerations.shift();
-    if (g === keep) continue;
-    try { fs.rmSync(g, { recursive: true, force: true }); } catch { /* 下次再说 */ }
-  }
-};
+function isGeneration(dir) {
+  return Boolean(dir && CFG && path.resolve(dir).startsWith(`${path.resolve(genRoot())}${path.sep}`));
+}
 
 function newGeneration(id, dir) {
-  const dst = path.join(genRoot(), id, String(Date.now()));
+  const generation = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const dst = path.join(genRoot(), id, generation);
   copyTree(dir, dst);
-  return dst;
+  return { id: generation, path: dst };
+}
+
+function writeOwner(id, generation) {
+  const owner = {
+    schema: 'termux-os.dev-runtime-owner.v1', package_id: id,
+    generation: generation.id, pid: process.pid, session: runtimeSession,
+    started_at: new Date().toISOString(),
+  };
+  fs.mkdirSync(ownerRoot(), { recursive: true });
+  const file = path.join(ownerRoot(), `${ownerKey(id)}.json`);
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, `${JSON.stringify(owner, null, 2)}\n`);
+  fs.renameSync(tmp, file);
+  runtimeGenerations.set(id, { ...owner, path: generation.path });
+  return owner;
+}
+
+function clearOwner(id, generation = null) {
+  const current = runtimeGenerations.get(id);
+  if (generation && current?.generation && current.generation !== generation) return;
+  runtimeGenerations.delete(id);
+  try { fs.rmSync(path.join(ownerRoot(), `${ownerKey(id)}.json`), { force: true }); } catch { /* Best effort. */ }
+}
+
+function removeGeneration(dir) {
+  if (!isGeneration(dir)) return;
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* A later reconcile can report it as stale. */ }
+}
+
+function sweepGenerations(id, keep) {
+  const root = path.join(genRoot(), id);
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name !== keep) removeGeneration(path.join(root, entry.name));
+  }
 }
 
 const publicWatcher = (w) => ({
-  package_id: w.id,
-  watching: true,
-  version_dir: w.dir,
-  watch_mode: w.watch_mode ?? null,
-  started_at: w.started_at,
-  seq: w.seq,
-  last_reload: w.last_reload ?? null,
-  last_error: w.last_error ?? null,
+  package_id: w.id, watching: true, version_dir: w.dir,
+  runtime_generation: w.gen?.id ?? null,
+  watch_mode: w.watch_mode ?? null, started_at: w.started_at, seq: w.seq,
+  last_reload: w.last_reload ?? null, last_error: w.last_error ?? null,
 });
+
+function runtimeFor(id) {
+  const current = runtimeGenerations.get(id);
+  return current ? { generation: current.generation, owner: {
+    package_id: id, generation: current.generation, pid: current.pid, session: current.session,
+    started_at: current.started_at,
+  } } : null;
+}
 
 export function initDevRuntime(cfg) {
   CFG = cfg;
-  // 重啟不自動恢復監看：手機開機不能意外跑進自動重載迴圈。監看是使用者的顯式動作，
-  // 而且它不影響 package 的 release/dev 判定，所以不恢復也不會丟失任何事實。
+  runtimeSession = `${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  watchers.clear();
+  runtimeGenerations.clear();
+  // A Framework restart stops the old service owners before this module is
+  // initialized. Any generation left behind is therefore stale, never a
+  // reason to start another Package.
   fs.rmSync(genRoot(), { recursive: true, force: true });
+  fs.rmSync(ownerRoot(), { recursive: true, force: true });
 }
 
 export const listDevWatchers = () => [...watchers.values()].map(publicWatcher);
 export const isDevWatched = (id) => watchers.has(id);
 
-/** 瀏覽器輪詢口：seq 變了就刷新（web 改動/重載都會 bump）。沒在監看就沒有事件。 */
 export const devEvents = (id) => {
   const w = watchers.get(id);
   if (!w) return null;
-  const r = _getRecord(id);
-  return { seq: w.seq, status: r?.status ?? 'unknown', error: r?.error ?? null };
+  const record = _getRecord(id);
+  return { seq: w.seq, status: record?.status ?? 'unknown', error: record?.error ?? null };
 };
 
-/**
- * ⭐ 兩個獨立維度，一次答清楚。
- *
- * `state` 是「這份代碼跟發布的一不一樣」——由工作樹回答，與有沒有人在監看無關。
- * `watching` 是「改了以後會不會自動重載」——與代碼改沒改無關。
- * 把它們壓成一個「dev 態」，就等於又造了一個可以被清掉而修改仍在的狀態標誌。
- */
 export function devStatus(id) {
-  const dir = activeDir(id);
-  if (!dir) return { ok: false, error: 'not_installed', package_id: id };
-  const git = packageGitState(dir);
+  if (!CFG) return { ok: false, error: 'dev_runtime_not_initialized', package_id: id };
   const w = watchers.get(id);
   const record = _getRecord(id);
+  const runtime = runtimeFor(id);
+  const reconcile = reconcilePackage(id, {
+    frameworkRoot: CFG.frameworkRoot,
+    runtime,
+    watcher: w ? publicWatcher(w) : null,
+    ownedServices: record?.registered?.services ?? [],
+  });
+  if (!reconcile.active) return { ok: false, error: 'not_installed', package_id: id, reconcile };
+  const git = packageGitState(reconcile.active.path);
   return {
-    ok: true,
-    package_id: id,
-    version_dir: dir,
-    state: git.state,
-    state_reason: git.reason,
-    state_summary: describeGitState(git),
-    changes: git.changes,
-    ignored_paths: git.ignored,
-    watching: Boolean(w),
-    watch_mode: w?.watch_mode ?? null,
-    seq: w?.seq ?? 0,
+    ok: true, package_id: id, version_dir: reconcile.active.path,
+    state: reconcile.state, state_reason: git.reason, state_summary: reconcile.state === 'conflicted'
+      ? 'conflicted (reconcile required)' : describeGitState(git),
+    changes: git.changes, ignored_paths: git.ignored,
+    watching: Boolean(w), watch_mode: w?.watch_mode ?? null, seq: w?.seq ?? 0,
+    runtime_generation: reconcile.runtime_generation,
+    runtime_owner: reconcile.runtime_owner,
     last_reload: w?.last_reload ?? null,
-    services: record?.registered?.services ?? [],
-    status: record?.status ?? 'unknown',
-    error: record?.error ?? null,
+    services: record?.registered?.services ?? [], status: record?.status ?? 'unknown',
+    error: record?.error ?? null, reconcile,
   };
 }
 
-/** 停掉某包已註冊的 Stage Service；返回停之前在跑的 id 清單（恢復時要照樣拉起） */
+function assertSafe(id) {
+  const result = reconcilePackage(id, { frameworkRoot: CFG.frameworkRoot, runtime: runtimeFor(id) });
+  if (!result.active) return { ok: false, error: 'not_installed', reconcile: result };
+  if (result.conflict) return {
+    ok: false, error: 'package_reconcile_required', reconcile: result,
+    fix: 'Resolve the reported duplicate, stale, or legacy identity before starting or reloading dev runtime.',
+  };
+  return { ok: true, reconcile: result };
+}
+
 async function stopPackageServices(id) {
-  const r = _getRecord(id);
-  if (!r) return [];
+  const record = _getRecord(id);
+  if (!record) return [];
   const live = await stage.listServices();
   const wasRunning = [];
-  for (const sid of r.registered.services) {
-    const svc = live.find((s) => s.id === sid);
-    if (svc?.process?.state === 'running') wasRunning.push(sid);
-    await stage.stopService(sid, { preserveDesired: true }); // 系統性停靠不動用戶意圖
+  for (const sid of record.registered.services) {
+    const service = live.find((item) => item.id === sid);
+    if (service?.process?.state === 'running') wasRunning.push(sid);
+    await stage.stopService(sid, { preserveDesired: true });
   }
   return wasRunning;
 }
 
-/** 開始監看這個包的 active 工作樹。⚠ 它不改變、也不表示 package 的 Git 狀態。 */
-export async function devWatchStart(id) {
+async function devWatchStartImpl(id) {
   if (!CFG) return { ok: false, error: 'dev_runtime_not_initialized' };
-  const dir = activeDir(id);
-  if (!dir) {
-    return { ok: false, error: 'not_installed',
-      fix: `Install ${id} first; dev now watches the installed Package, not a separate workspace.` };
-  }
-  if (watchers.has(id)) return { ok: true, already: true, watcher: publicWatcher(watchers.get(id)) };
+  const safe = assertSafe(id);
+  if (!safe.ok) return safe;
+  if (watchers.has(id)) return { ok: true, already: true, watcher: publicWatcher(watchers.get(id)), state: devStatus(id) };
   const w = {
-    id, dir, started_at: new Date().toISOString(),
-    source_hash: hashWorkspace(dir), seq: 1, last_error: null, last_reload: null,
+    id, dir: safe.reconcile.active.path, started_at: new Date().toISOString(),
+    source_hash: hashWorkspace(safe.reconcile.active.path), seq: 1,
+    last_error: null, last_reload: null,
   };
+  const loaded = _getRecord(id);
+  const current = runtimeGenerations.get(id);
+  if (current) w.gen = { id: current.generation, path: current.path };
+  else if (loaded && isGeneration(loaded.dir)) w.gen = { id: path.basename(loaded.dir), path: loaded.dir };
   watchers.set(id, w);
   startWatcher(w);
-  CFG.log(`dev watch ${id}: ${dir} (${w.watch_mode})`);
+  CFG.log(`dev watch ${id}: ${w.dir} (${w.watch_mode})`);
   return { ok: true, watcher: publicWatcher(w), state: devStatus(id) };
 }
 
-/** 停止監看。⚠ package 的 release/dev 狀態不受影響——改過就是改過。 */
-export function devWatchStop(id) {
+/** Start watching the single active worktree. */
+export function devWatchStart(id) { return serialized(id, () => devWatchStartImpl(id)); }
+
+function devWatchStopImpl(id) {
   const w = watchers.get(id);
-  if (!w) return { ok: false, error: 'not_watching' };
+  if (!w) return { ok: false, error: 'not_watching', state: devStatus(id) };
   stopWatcher(w);
   watchers.delete(id);
+  // The loaded generation belongs to the running Package, not to the watcher.
+  // Stopping a watcher must never delete a live service cwd.
   CFG?.log(`dev watch stopped ${id}`);
   return { ok: true, package_id: id, state: devStatus(id) };
 }
 
-/** 就地重載唯一那份 instance。不建立、也不需要第二個 package。 */
-export async function devReload(id, { reason = 'manual' } = {}) {
+/** Stop watching without changing Package state or removing its runtime owner. */
+export function devWatchStop(id) { return serialized(id, async () => devWatchStopImpl(id)); }
+
+async function devReloadImpl(id, { reason = 'manual' } = {}) {
   if (!CFG) return { ok: false, error: 'dev_runtime_not_initialized' };
-  const dir = activeDir(id);
-  if (!dir) return { ok: false, error: 'not_installed' };
+  const safe = assertSafe(id);
+  if (!safe.ok) return safe;
+  const dir = safe.reconcile.active.path;
   const w = watchers.get(id);
+  const oldRecord = _getRecord(id);
+  let install = null;
+  try {
+    const active = JSON.parse(fs.readFileSync(safe.reconcile.active.active_json, 'utf8'));
+    install = {
+      version: active.active_version,
+      previous_version: active.previous_version ?? null,
+      archive_sha256: active.archive_sha256 ?? null,
+      installed_at: active.installed_at ?? null,
+    };
+  } catch { /* The active identity is already validated by reconcile; keep reload diagnostics primary. */ }
+  const oldGeneration = oldRecord && isGeneration(oldRecord.dir) ? oldRecord.dir : null;
   const wasRunning = await stopPackageServices(id);
   await unregisterPackage(id);
-  const gen = newGeneration(id, dir);
-  sweepOrphanGenerations(gen);
-  const record = await loadSinglePackage(
-    // ⚠ 沒有 workspaceSlug、沒有 persistRoot 覆寫：同一個 id、同一份 config 與 data。
-    { dir: gen, expectId: id, source: 'installed', cacheBust: true }, CFG);
-  if (w?.gen) fs.rmSync(w.gen, { recursive: true, force: true });
-  if (w) {
-    w.gen = gen;
-    w.source_hash = hashWorkspace(dir);
-    w.seq += 1;
-    w.last_error = record?.error ?? null;
-    w.last_reload = new Date().toISOString();
-  } else {
-    /**
-     * ⛔ **不能删掉刚刚加载的那个 generation。**
-     *
-     * 没有 watcher 时（`dev reload` 单独调用，而它是 CLI 里列着的命令）这里原本
-     * 立刻 `rmSync(gen)`，可下面还要用同一个 record 去 `startService`——
-     * 而 service 的 `cwd` 就是 `record.dir`，也就是刚被删掉的这个目录。
-     * `spawn` 于是报 **ENOENT 指着 node 可执行文件**（cwd 不存在时 Node 就是这么报的），
-     * 那条错误信息指向一个完好无损的 node，没有一个字提到真正消失的东西。
-     * 真机后果：整个 Framework 进程随之退出。
-     *
-     * ⚠ 记下来，交给下一次 reload 或进程退出时清理——一个多留一会儿的临时目录，
-     *   比一个被删掉的工作目录便宜得多。
-     */
-    orphanGenerations.push(gen);
-  }
-  if (record?.status === 'loaded') {
-    // web 資源直讀工作樹，改了立刻可見；backend 跑 generation 副本。
-    record.webRoot = path.join(dir, path.dirname(record.manifest.entrypoints.webui));
-    for (const sid of wasRunning) {
-      if (record.registered.services.includes(sid)) await stage.startService(sid);
+  const generation = newGeneration(id, dir);
+  const owner = writeOwner(id, generation);
+  let record = null;
+  try {
+    record = await loadSinglePackage(
+      { dir: generation.path, expectId: id, source: 'installed', install, cacheBust: true }, CFG);
+    const current = runtimeGenerations.get(id);
+    if (!current || current.generation !== owner.generation || current.session !== runtimeSession) {
+      throw Object.assign(new Error('stale dev generation lost ownership'), { code: 'stale_generation_owner' });
     }
+    if (record?.status === 'loaded') {
+      // Web assets read the active worktree; backend imports use this generation.
+      record.webRoot = path.join(dir, path.dirname(record.manifest.entrypoints.webui));
+      for (const sid of wasRunning) {
+        if (record.registered.services.includes(sid)) await stage.startService(sid);
+      }
+    }
+  } catch (error) {
+    await unregisterPackage(id);
+    clearOwner(id, owner.generation);
+    removeGeneration(generation.path);
+    CFG.log(`dev reload ${id} (${reason}): failed — ${String(error?.message ?? error)}`);
+    return { ok: false, status: 'failed', error: String(error?.message ?? error), error_code: error?.code ?? null };
+  }
+  if (oldGeneration && oldGeneration !== generation.path) removeGeneration(oldGeneration);
+  sweepGenerations(id, generation.id);
+  const nextWatcher = watchers.get(id);
+  if (nextWatcher) {
+    nextWatcher.gen = generation;
+    nextWatcher.source_hash = hashWorkspace(dir);
+    nextWatcher.seq += 1;
+    nextWatcher.last_error = record?.error ?? null;
+    nextWatcher.last_reload = new Date().toISOString();
   }
   CFG.log(`dev reload ${id} (${reason}): ${record?.status ?? 'failed'}${record?.error ? ` — ${record.error}` : ''}`);
-  return { ok: record?.status === 'loaded', status: record?.status ?? 'failed', error: record?.error ?? null };
+  return {
+    ok: record?.status === 'loaded', status: record?.status ?? 'failed',
+    error: record?.error ?? null, runtime_generation: generation.id,
+    reconcile: devStatus(id).reconcile,
+  };
 }
 
-// ============================================================
-// Watcher：優先 fs.watch，失敗回退 mtime polling；web/ 改動只 bump seq，
-// backend 改動 debounce 後整包重載。watcher 失靈時 dev reload 是正式 fallback。
-// ============================================================
+/** Reload the one Package record; operation requests for an ID are queued. */
+export function devReload(id, options = {}) {
+  return serialized(id, async () => {
+    const lock = await acquirePackageLock(id, { root: process.env.PACKAGES_INSTALLED_DIR });
+    try { return await devReloadImpl(id, options); }
+    finally { lock.release(); }
+  });
+}
+
 function classifyChange(w, relPath) {
-  if (!relPath) return 'backend'; // 事件沒帶路徑就保守整包重載
+  if (!relPath) return 'backend';
   const top = relPath.split(path.sep)[0];
-  if (SKIP.has(top)) return null;
-  // `.git` 自己的內部寫入不是代碼改動——commit 一次會產生幾十個事件。
-  if (top === '.git') return null;
-  const r = _getRecord(w.id);
-  const webDir = r?.manifest ? path.dirname(r.manifest.entrypoints.webui) : 'web';
+  if (SKIP.has(top) || top === '.git') return null;
+  const record = _getRecord(w.id);
+  const webDir = record?.manifest ? path.dirname(record.manifest.entrypoints.webui) : 'web';
   return relPath.startsWith(`${webDir}${path.sep}`) || relPath.startsWith(`${webDir}/`) ? 'web' : 'backend';
 }
 
@@ -243,19 +311,23 @@ function onFsChange(w, relPath) {
   if (!kind) return;
   if (kind === 'web') { w.seq += 1; return; }
   clearTimeout(w.debounce);
-  w.debounce = setTimeout(() => { devReload(w.id, { reason: `file change: ${relPath}` }); }, 600);
+  w.debounce = setTimeout(() => {
+    devReload(w.id, { reason: `file change: ${relPath}` }).catch((error) => CFG?.log(`dev reload ${w.id}: ${error.message}`));
+  }, 600);
 }
 
 function snapshotMtimes(dir) {
   const map = new Map();
-  const walk = (d, rel) => {
+  const walk = (current, rel) => {
     let entries = [];
-    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      if (SKIP.has(e.name) || e.name === '.git') continue;
-      const r = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) walk(path.join(d, e.name), r);
-      else if (e.isFile()) { try { map.set(r, fs.statSync(path.join(d, e.name)).mtimeMs); } catch { /* 中途被刪 */ } }
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (SKIP.has(entry.name) || entry.name === '.git') continue;
+      const next = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(path.join(current, entry.name), next);
+      else if (entry.isFile()) {
+        try { map.set(next, fs.statSync(path.join(current, entry.name)).mtimeMs); } catch { /* File changed during the scan. */ }
+      }
     }
   };
   walk(dir, '');
@@ -264,18 +336,14 @@ function snapshotMtimes(dir) {
 
 function startWatcher(w) {
   try {
-    // TERMUX_OS_DEV_POLL=1 強制走 polling（共享存儲上 fs.watch 假活比不活更糟——事件靜默丟失）
     if (process.env.TERMUX_OS_DEV_POLL === '1') throw new Error('forced polling');
-    w.watcher = fs.watch(w.dir, { recursive: true }, (_ev, fname) => onFsChange(w, fname ?? null));
+    w.watcher = fs.watch(w.dir, { recursive: true }, (_event, filename) => onFsChange(w, filename ?? null));
     w.watch_mode = 'fs-watch';
   } catch {
-    // Android/共享存儲上 fs.watch 不可靠——低頻 mtime polling 回退
     w.mtimes = snapshotMtimes(w.dir);
     w.pollTimer = setInterval(() => {
       const now = snapshotMtimes(w.dir);
-      for (const [rel, t] of now) {
-        if (w.mtimes.get(rel) !== t) { onFsChange(w, rel); }
-      }
+      for (const [rel, time] of now) if (w.mtimes.get(rel) !== time) onFsChange(w, rel);
       for (const rel of w.mtimes.keys()) if (!now.has(rel)) onFsChange(w, rel);
       w.mtimes = now;
     }, 2000);
@@ -285,7 +353,6 @@ function startWatcher(w) {
 
 function stopWatcher(w) {
   clearTimeout(w.debounce);
-  if (w.watcher) { try { w.watcher.close(); } catch { /* 已關 */ } w.watcher = null; }
+  if (w.watcher) { try { w.watcher.close(); } catch { /* Already closed. */ } w.watcher = null; }
   if (w.pollTimer) { clearInterval(w.pollTimer); w.pollTimer = null; }
-  if (w.gen) { fs.rmSync(w.gen, { recursive: true, force: true }); w.gen = null; }
 }

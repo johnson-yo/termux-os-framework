@@ -694,30 +694,16 @@ async function startPackageUpgrade(item, targetVersion) {
   });
 }
 
-/** 把已安裝的版本派生成工作區專案並掛載——開發從一個能跑的副本開始，而不是空目錄。 */
+/** Start Dev Runtime on the installed active worktree; never create a second source copy. */
 async function startPackageDev(item) {
-  const slug = String(item.id).split('.').pop();
   try {
-    let created;
-    try {
-      created = await apiData('/api/admin/workspaces', {
-        method: 'POST',
-        body: JSON.stringify({ slug, package_id: item.id, from_dir: item.installed_dir }),
-      });
-    } catch (error) {
-      // 專案已存在是**正常**情況：再點一次 Dev 應該掛上既有副本，而不是報一個
-      // 只有路徑的紅字讓人猜發生了什麼。
-      if (error?.data?.error !== 'already_exists') throw error;
-      created = { path: error.data.detail };
-      packageNotice = { kind: 'good', text: `Workspace 已有 ${slug}，直接掛載既有副本。` };
-    }
     await apiData('/api/dev/packages', {
       method: 'POST',
-      body: JSON.stringify({ package_id: item.id, workspace: created.path, slug }),
+      body: JSON.stringify({ package_id: item.id }),
     });
-    packageNotice = { kind: 'good', text: `已在 Workspace 建立並掛載 ${slug}；正式版仍在服務。` };
+    packageNotice = { kind: 'good', text: `已开始监视 ${item.id} 的唯一 active worktree；主机代码请用 SDK dev sync 推送。` };
   } catch (error) {
-    packageNotice = { kind: 'bad', text: `建立開發副本：${error.message ?? error}` };
+    packageNotice = { kind: 'bad', text: `启动 Dev Runtime：${error.message ?? error}` };
   }
   return loadPackageManager();
 }

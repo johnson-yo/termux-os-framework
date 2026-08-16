@@ -1,14 +1,11 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
- * [INPUT]: The workspace root on disk, Dev Runtime mounts, loaded Package records, Stage services.
+ * [INPUT]: The source-repository root on disk, Dev Runtime watchers, loaded Package records, Stage services.
  * [OUTPUT]: workspaceSnapshot / createWorkspace / packWorkspace / deleteWorkspace / workspaceRoot.
  * [POS]: src/system/workspace-view.mjs in termux-os-framework. Backs /admin/packages/workspace.
  *
- *        A workspace is a **directory on disk**; mounting is one of its properties, not its
- *        existence. Listing only mounted workspaces meant a project the user had created was
- *        invisible until they mounted it, so the only way to know what existed was to open a
- *        shell and run ls. Everything under the root is listed; a mount that lives outside the
- *        root is still listed, marked external, so adopting the standard root loses nothing.
+ *        The administration page lists source repositories under the supported source root.
+ *        The retired termux-os-dev tree is not a source root and is never watched or loaded.
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
 
@@ -24,9 +21,9 @@ const MANIFEST = 'termux-os.package.json';
 
 /** Same resolution order as the SDK, so CLI and UI never disagree about where projects live. */
 export function workspaceRoot(config = null) {
-  return process.env.TERMUX_OS_DEV_ROOT
-    || config?.workspace?.root
-    || path.join(os.homedir(), 'termux-os-dev/packages');
+  return process.env.TERMUX_OS_SOURCE_ROOT
+    || config?.source?.root
+    || path.join(os.homedir(), 'termux-os-sources');
 }
 
 const readManifest = (dir) => {
@@ -34,7 +31,7 @@ const readManifest = (dir) => {
   catch { return null; }
 };
 
-/** Slug identifies a workspace in the API. Directory name is the slug; both must stay URL-safe. */
+/** Slug identifies a source repository in the legacy-compatible admin API. */
 export const toWorkspaceSlug = (value) => String(value ?? '')
   .toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 
@@ -55,8 +52,7 @@ function directorySize(dir) {
 }
 
 /**
- * Every page a record serves, as absolute URLs. A workspace instance registers under
- * `<id>@<slug>`, so a menu path written for the released id needs rewriting.
+ * Every page a record serves, as absolute URLs. Release and dev use the same Package ID.
  */
 function pagesOf(record) {
   if (!record?.manifest) return [];
@@ -77,7 +73,7 @@ function describe(dir, { slug, external = false, watcher = null, services = [] }
   // 一個 package id 只有一條記錄：被監看的和已發布的是同一份。
   const record = manifest?.id ? getPackage(manifest.id) : null;
   const released = record;
-  const git = manifest?.id && record?.dir ? packageGitState(record.dir) : null;
+  const git = manifest?.id ? packageGitState(dir) : null;
   return {
     slug,
     path: dir,
@@ -86,8 +82,7 @@ function describe(dir, { slug, external = false, watcher = null, services = [] }
     name: manifest?.name ?? null,
     version: manifest?.version ?? null,
     types: manifest?.types ?? [],
-    // A directory without a manifest is not a package project; say so rather than hiding it,
-    // because the user put it there and needs to know why it cannot be mounted.
+    // A directory without a manifest is not a Package repository; report it rather than hiding it.
     valid: Boolean(manifest?.id),
     invalid_reason: manifest?.id ? null : `${MANIFEST} missing or unreadable`,
     size_bytes: directorySize(dir),
@@ -133,10 +128,6 @@ export function workspaceSnapshot({ services = [], config = null } = {}) {
       slug: toWorkspaceSlug(entry.name), watcher: byPackage.get(readManifest(dir)?.id) ?? null, services,
     }));
   }
-
-  // 舊模型可以從 root 之外掛載一個工作區，於是這裡要把它補進清單。新模型沒有
-  // 「掛載一個目錄」這回事：watcher 監看的永遠是已安裝的那份 package，所以
-  // root 之外不會再有第三方項目需要補。
 
   return { ok: true, root, root_exists: fs.existsSync(root), projects };
 }
@@ -185,7 +176,7 @@ export function createWorkspace({ slug, packageId, type = 'service', name, fromD
   const sdk = path.join(path.dirname(path.dirname(new URL(import.meta.url).pathname)), '..', 'sdk', 'termux-os-sdk');
   const result = spawnSync(process.execPath, [sdk, 'new',
     '--type', type, '--id', packageId, '--name', name ?? packageId,
-    '--workspace', target.root, '--json'], { encoding: 'utf8', timeout: 60_000 });
+    '--out-dir', target.dir, '--json'], { encoding: 'utf8', timeout: 60_000 });
   if (result.status !== 0) {
     return { ok: false, error: 'template_failed', detail: (result.stderr || result.stdout || '').trim().slice(0, 400) };
   }
@@ -242,7 +233,7 @@ export function deleteWorkspace({ slug, config = null }) {
   const target = resolveProject(slug, config);
   if (!target || !fs.existsSync(target.dir)) return { ok: false, error: 'unknown_workspace' };
   if (listDevWatchers().some((w) => w.package_id === readManifest(target.dir)?.id)) {
-    return { ok: false, error: 'mounted', fix: 'Stop the mount before deleting the project.' };
+    return { ok: false, error: 'watching', fix: 'Stop the watcher before deleting the source repository.' };
   }
   fs.rmSync(target.dir, { recursive: true, force: true });
   return { ok: true, project: target.safe };

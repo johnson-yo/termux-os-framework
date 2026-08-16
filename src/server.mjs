@@ -352,7 +352,7 @@ DEV WORKSPACE — 載入失敗（Framework 本體正常）</div>
 <h2 style="color:#fca5a5">${pkgId}</h2>
 <pre style="white-space:pre-wrap;background:#292524;padding:1rem;border-radius:8px;color:#fda4af">${
   String(ev.error ?? 'unknown error').replace(/</g, '&lt;')}</pre>
-<p>修好 Workspace 代碼後會自動重載；或手動：<code>./sdk/termux-os-sdk dev reload ${pkgId}</code></p>
+<p>修好 Package 代碼後會自動重載；或手動：<code>./sdk/termux-os-sdk dev reload ${pkgId}</code></p>
 <button onclick="location.reload()" style="padding:.5rem 1rem;border-radius:6px;border:0;background:#57534e;color:#fff">Retry Reload</button>
 <script>setInterval(function(){fetch('/api/dev/packages/${pkgId}/events').then(function(r){return r.json();})
 .then(function(d){if(d.status==='loaded')location.reload();}).catch(function(){});},1500);</script>
@@ -1932,7 +1932,7 @@ const server = http.createServer(async (req, res) => {
     return json(res, result.error === 'unknown_scene' ? 404 : 200, result);
   }
 
-  // 029 Dev Runtime API —— 掛載/停止/重載 Workspace Package（帶 POST：必須在 GET-only 閘門之前）
+  // 029 Dev Runtime API —— watch/stop/reload the single active Package worktree
   // events 是唯一公開子路由：瀏覽器注入腳本輪詢 seq 決定刷新，只暴露計數與載入狀態
   {
     const ev = url.match(/^\/api\/dev\/packages\/([\w.@-]+)\/events$/);
@@ -1963,17 +1963,24 @@ const server = http.createServer(async (req, res) => {
         }
       }
       const r = await devWatchStart(b.package_id);
-      return json(res, r.ok ? 200 : 400, r);
+      return json(res, r.error === 'package_reconcile_required' ? 409 : r.ok ? 200 : 400, r);
     }
     const st = url.match(/^\/api\/dev\/packages\/([\w.-]+)\/status$/);
     if (st && req.method === 'GET') {
       const r = devStatus(st[1]);
       return json(res, r.ok ? 200 : 404, r);
     }
+    const reconcile = url.match(/^\/api\/dev\/packages\/([\w.-]+)\/reconcile$/);
+    if (reconcile && req.method === 'GET') {
+      const r = devStatus(reconcile[1]);
+      return json(res, r.ok ? 200 : 404, r.reconcile ?? r);
+    }
     const m = url.match(/^\/api\/dev\/packages\/([\w.-]+)\/(stop|reload)$/);
     if (m && req.method === 'POST') {
-      const r = m[2] === 'stop' ? devWatchStop(m[1]) : await devReload(m[1]);
-      return json(res, r.error === 'not_watching' || r.error === 'not_installed' ? 404 : r.ok ? 200 : 400, r);
+      const r = m[2] === 'stop' ? await devWatchStop(m[1]) : await devReload(m[1]);
+      const status = r.error === 'not_watching' || r.error === 'not_installed' ? 404
+        : r.error === 'package_reconcile_required' ? 409 : r.ok ? 200 : 400;
+      return json(res, status, r);
     }
     return json(res, 404, { ok: false, error: 'not found' });
   }

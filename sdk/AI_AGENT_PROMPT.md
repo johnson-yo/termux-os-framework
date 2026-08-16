@@ -24,9 +24,9 @@ user for the feature request before editing.]
 
 ## Keep the boundary clean
 
-- Develop Package source in its own repository or under
-  `~/termux-os-dev/packages/`. Never add product logic or Package source to
-  Framework Core.
+- Develop Package source in its own Git repository or under
+  `~/termux-os-sources/`. Never add product logic or Package source to Framework Core. The retired
+  `~/termux-os-dev/packages/` path is report-only and must not be loaded or watched.
 - Core owns lifecycle, authentication, administration, port assignment, and SDK
   contracts. Audio, speech, models, vendor runtimes, device bridges, workflows,
   and other product behavior belong in independently licensed Packages.
@@ -76,7 +76,8 @@ user for the feature request before editing.]
 3. Add a fast isolated `test/self-test.mjs`. Use fixtures and temporary
    directories; do not require a real device, network account, model, or user
    data.
-4. Iterate with Dev Runtime when useful. A Dev Mount is not release evidence.
+4. For device iteration, use `termux-os-sdk dev sync <id> --connection <name> --source <repo>`;
+   Dev Runtime reloads the one active Installed Root worktree and is not release evidence.
 5. Run:
 
    ```sh

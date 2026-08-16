@@ -33,10 +33,10 @@ export async function cmdVerifyDevice(flags, pos) {
   const conn = resolveConnection(flags);
   const wsDir = packageDir(id);
 
-  // Dev mode runs Workspace code and does not bind Release evidence.
+  // Dev mode runs the selected source repository and does not bind Release evidence.
   if (flags.dev) {
     let m;
-    try { m = readManifest(wsDir); } catch { return fail(flags, 'workspace_not_found', wsDir, null); }
+    try { m = readManifest(wsDir); } catch { return fail(flags, 'source_not_found', wsDir, null); }
     const decl = m.verification?.device;
     if (!decl) return fail(flags, 'no_verify_hook', 'Manifest does not declare verification.device', 'Add verification.device.command to the manifest.');
     const r = runHook(conn, wsDir, decl, flags);
@@ -46,11 +46,12 @@ export async function cmdVerifyDevice(flags, pos) {
   // Installed mode binds the exact Package, target, SHA-256, and Framework build.
   const p = await frameworkFetch(conn, `/api/packages/${id}`, { token: TOKEN });
   if (!p.ok) return fail(flags, 'framework_unreachable', p.error, 'Start Framework and retry.');
-  if (p.status === 404 || !p.data?.package) return fail(flags, 'not_installed', id, 'Release and install the Package, or use --dev for Workspace iteration.');
+  if (p.status === 404 || !p.data?.package) return fail(flags, 'not_installed', id, 'Release and install the Package, or use --dev for source-repository iteration.');
   const pk = p.data.package;
-  if (pk.source === 'dev-mount') {
-    return fail(flags, 'dev_shadowing', `${id} is shadowed by Dev Runtime; Installed code is not active.`,
-      `Run termux-os-sdk dev stop ${id} before installed verification, or add --dev.`);
+  const dev = await frameworkFetch(conn, `/api/dev/packages/${id}/status`, { token: TOKEN });
+  if (dev.ok && ['dev', 'conflicted'].includes(dev.data?.reconcile?.state)) {
+    return fail(flags, 'dev_active', `${id} active worktree is ${dev.data.reconcile.state}; installed verification cannot bind Release evidence.`,
+      `Restore/reconcile ${id}, or use termux-os-sdk verify-device ${id} --dev for source-repository evidence.`);
   }
   const decl = pk.manifest?.verification?.device;
   if (!decl) {
@@ -118,7 +119,7 @@ function report(flags, { id, mode, hook, binding: b, wsDir }) {
   const d = hook.parsed;
   const rec = { schema: 'termux-os.device-verify-record.v1', mode, result: d.result,
     checks: d.checks ?? [], at: new Date().toISOString(), ...(b ?? {}), ...(hook.note ? { note: hook.note } : {}) };
-  // Verification records are mutable Workspace evidence and stay outside Release archives.
+  // Verification records are mutable source-repository evidence and stay outside Release archives.
   if (fs.existsSync(wsDir)) {
     const metaDir = sdkMetaDir(wsDir);
     fs.mkdirSync(metaDir, { recursive: true });

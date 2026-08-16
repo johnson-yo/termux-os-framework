@@ -11,13 +11,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { defaultAuthFile, readAuthFile } from '../../src/system/auth-file.mjs';
+import { legacyWorkspaceCandidates } from '../../src/packages/reconcile.mjs';
 
 export const SDK_ROOT = path.dirname(path.dirname(new URL(import.meta.url).pathname));
 export const FW_ROOT = path.dirname(SDK_ROOT);
-export const DEV_ROOT = process.env.TERMUX_OS_DEV_ROOT
+// `TERMUX_OS_DEV_ROOT` is retained only as a legacy scanner input. It is not a
+// source root and no SDK command loads Package source from it.
+export const LEGACY_DEV_ROOT = process.env.TERMUX_OS_DEV_ROOT
   || path.join(os.homedir(), 'termux-os-dev/packages');
-export const PKGS_DIR = DEV_ROOT;
-export const defaultWorkspaceRoot = () => DEV_ROOT;
+export const SOURCE_ROOT = process.env.TERMUX_OS_SOURCE_ROOT
+  || path.join(os.homedir(), 'termux-os-sources');
+export const PKGS_DIR = SOURCE_ROOT;
+export const defaultSourceRoot = () => SOURCE_ROOT;
 
 export function frameworkToken() {
   if (process.env.TERMUX_OS_TOKEN) return process.env.TERMUX_OS_TOKEN;
@@ -73,7 +78,7 @@ export function readManifest(dir) {
   return JSON.parse(fs.readFileSync(path.join(dir, 'termux-os.package.json'), 'utf8'));
 }
 
-/** Resolve a Package from the current repository or the independent development root. */
+/** Resolve a Package from the current repository or the supported source root. */
 /**
  * SDK 元資料的落點：**永遠不在包的工作樹裡**。
  *
@@ -89,11 +94,12 @@ export function sdkMetaDir(dir) {
   return path.join(parent, `${path.basename(dir)}.sdk`);
 }
 
-export function packageDir(id) {
+export function packageDir(id, { source = null } = {}) {
+  if (source) return path.resolve(source);
   try {
     if (readManifest(process.cwd()).id === id) return process.cwd();
   } catch { /* The current directory is not this package. */ }
-  return path.join(DEV_ROOT, id);
+  return path.join(SOURCE_ROOT, id);
 }
 
 export function listSourcePackages() {
@@ -110,12 +116,20 @@ export function listSourcePackages() {
   };
   add(process.cwd(), 'current-directory');
   let names = [];
-  try { names = fs.readdirSync(DEV_ROOT); } catch { return out; }
+  try { names = fs.readdirSync(SOURCE_ROOT); } catch { return out; }
   for (const name of names) {
-    const dir = path.join(DEV_ROOT, name);
+    const dir = path.join(SOURCE_ROOT, name);
     try {
-      if (fs.statSync(dir).isDirectory()) add(dir, 'workspace');
+      if (fs.statSync(dir).isDirectory()) add(dir, 'source-repository');
     } catch { /* The directory changed during the scan. */ }
   }
   return out;
+}
+
+export function listLegacyPackages() {
+  const ids = new Set();
+  for (const root of [process.env.TERMUX_OS_DEV_ROOT, LEGACY_DEV_ROOT].filter(Boolean)) {
+    try { for (const name of fs.readdirSync(root)) ids.add(name); } catch { /* Legacy root may not exist. */ }
+  }
+  return [...ids].sort().flatMap((id) => legacyWorkspaceCandidates(id));
 }

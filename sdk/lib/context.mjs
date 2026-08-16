@@ -8,7 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { FW_ROOT, PKGS_DIR, emit, fail, listSourcePackages, packageDir, readManifest, runCapture, sdkMetaDir } from './util.mjs';
+import { FW_ROOT, emit, fail, listLegacyPackages, listSourcePackages, packageDir, readManifest, runCapture, sdkMetaDir } from './util.mjs';
 
 const CORE_CONCEPTS = [
   'Capability', 'Action', 'Feed', 'State', 'Stage Service',
@@ -31,7 +31,8 @@ export function cmdContext(flags) {
   const ctx = {
     ok: true,
     framework_root: FW_ROOT,
-    package_source: 'current Package repository or ~/termux-os-dev/packages/<package-id>/',
+    package_source: 'current Git Package repository or ~/termux-os-sources/<package-id>/',
+    legacy_source: listLegacyPackages(),
     installed_root: '~/.termux-os/packages/<package-id>/',
     persistent_root: '/sdcard/termux-os/framework/',
     package_types: PACKAGE_TYPES,
@@ -52,7 +53,7 @@ export function cmdContext(flags) {
   emit(ctx, flags, (c) => {
     console.log('Termux-OS SDK Context\n');
     console.log(`Framework root:\n  ${c.framework_root}\n`);
-    console.log(`Package source:\n  ${c.package_source}\nInstalled root:\n  ${c.installed_root}\nPersistent config/data:\n  ${c.persistent_root}\n`);
+    console.log(`Package source:\n  ${c.package_source}\nLegacy source (reported only):\n${(c.legacy_source ?? []).map((p) => `  ${p.path}`).join('\n') || '  none'}\nInstalled root:\n  ${c.installed_root}\nPersistent config/data:\n  ${c.persistent_root}\n`);
     console.log(`Package types:\n${c.package_types.map((t) => `  ${t}`).join('\n')}\n`);
     console.log(`Core concepts:\n${c.core_concepts.map((t) => `  ${t}`).join('\n')}\n`);
     console.log(`Current providers:\n${c.current_providers.map((t) => `  ${t}`).join('\n')}\n`);
@@ -97,7 +98,7 @@ export function cmdInspect(flags, pos) {
   const dir = packageDir(id);
   if (!fs.existsSync(dir)) {
     return fail(flags, 'package_not_found', `${id} was not found in the current repository or development root`,
-      `List source workspaces with: termux-os-sdk context; create one with: termux-os-sdk new --type <type> --id ${id} --name "<Name>"`);
+      `List source repositories with: termux-os-sdk context; create one with: termux-os-sdk new --type <type> --id ${id} --name "<Name>"`);
   }
   let m;
   try { m = readManifest(dir); } catch (e) {

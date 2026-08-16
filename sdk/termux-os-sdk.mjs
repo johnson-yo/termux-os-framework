@@ -22,18 +22,19 @@ http://127.0.0.1:8980. For another device, use a private
 --connection <name> profile from ~/.termux-os-sdk/connections/, or use
 --framework-url <url>. --remote <host> remains an SSH compatibility alias.
 
-  context [--json] [--remote <host>]   Show the current architecture and workspaces
+  context [--json] [--remote <host>]   Show architecture and source repositories
   access [<package-id>]                Show local and LAN browser URLs
-  inspect <package-id> [--json]        Inspect one Package source workspace
+  inspect <package-id> [--json]        Inspect one Package source repository
   choose [--<question> yes|no] [--json] Choose the smallest Package type
-  new --type <t> --id <id> --name <n> [--workspace <dir>]
-                                       Generate service|app|adapter|asset source;
-                                       default: ~/termux-os-dev/packages
+  new --type <t> --id <id> --name <n> [--out-dir <dir>]
+                                       Generate source in a Git-oriented source root;
+                                       legacy ~/termux-os-dev/packages is not used
   dev start|status|reload|logs|stop <package-id>
-                                       Mount a Workspace temporarily; a Dev Mount
-                                       is never Installed Release evidence
+                                       Watch/reload the one active worktree
+  dev sync <package-id> --connection <c> [--source <repo>]
+                                       Atomically sync host Git source to active device code
   doctor <package-id> [--json]         Validate current Package contracts
-  status <package-id> [--json]         Show Workspace/Dev/Release/Installed/
+  status <package-id> [--json]         Show source/Dev/Release/Installed/
                                        Running/Verify truth and drift
   next <package-id> [--json]           Show the next evidence-producing step
   test <package-id> [--json]           Run only this Package's tests and doctor

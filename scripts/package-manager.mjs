@@ -25,6 +25,8 @@ import {
 import { defaultAuthFile, readAuthFile } from '../src/system/auth-file.mjs';
 import { checkPackagePorts, configurePortRegistry } from '../src/system/port-registry.mjs';
 import { packageGitState, packageGitIdentity, describeGitState, GIT_STATE } from '../src/packages/git-state.mjs';
+import { reconcilePackage, legacyWorkspaceCandidates } from '../src/packages/reconcile.mjs';
+import { acquirePackageLockSync } from '../src/packages/operation-lock.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FRAMEWORK_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version ?? '0.0.0';
@@ -49,6 +51,23 @@ configurePortRegistry({
 });
 
 const die = (msg) => { console.error(`ERROR: ${msg}`); process.exit(1); };
+
+function lockPackage(id) {
+  try { return acquirePackageLockSync(id, { root: installedRoot() }); }
+  catch (error) { die(`${error.code ?? 'package_operation_locked'}: ${error.message}`); }
+}
+
+function requireReconciled(id, { allowLegacy = false } = {}) {
+  const snapshot = reconcilePackage(id, { frameworkRoot: ROOT });
+  const conflicts = allowLegacy
+    ? snapshot.conflicts.filter((item) => item.kind !== 'legacy_workspace')
+    : snapshot.conflicts;
+  if (conflicts.length) {
+    die(`${id} requires reconcile before this operation (${conflicts.map((item) => item.kind).join(', ')}).\n`
+      + '  Run: node scripts/package-manager.mjs reconcile ' + id);
+  }
+  return snapshot;
+}
 
 // Release 排除項（022 §5.2）；Package 自帶 fixtures 顯式保留
 // 029 §6.3：.sdk/（易變開發狀態）與 HANDOFF.md（易變交接）不進不可變 archive——
@@ -608,6 +627,8 @@ async function cmdInstall(tarPath, shaPath, args = []) {
   const { id, version, sha256, manifest } = v;
   const root = installedRoot();
   const pkgDir = path.join(root, id);
+  const operationLock = lockPackage(id);
+  requireReconciled(id);
   const prevActive = readActive(id);
   const forceTarget = args.includes('--force-target');
   const allowMissing = args.includes('--allow-missing-external');
@@ -670,7 +691,11 @@ async function cmdInstall(tarPath, shaPath, args = []) {
   // 023 §7.1：身份=id+version+**target**，故同版本不同 target 允許不同 hash
   const sameTarget = (prevActive?.active_target ?? TARGET_GENERIC) === (t.target?.id ?? TARGET_GENERIC);
   if (prevActive?.active_version === version && sameTarget) {
-    if (prevActive.archive_sha256 === sha256) { console.log(`already installed ${id} ${version} (changed=false)`); return; }
+    if (prevActive.archive_sha256 === sha256) {
+      operationLock.release();
+      console.log(`already installed ${id} ${version} (changed=false)`);
+      return;
+    }
     die(`same version ${version} + same target ${t.target?.id} with different hash refused (installed ${prevActive.archive_sha256}, archive ${sha256}); bump the version`);
   }
   const knownHash = prevActive?.hashes?.[`${version}@${t.target?.id ?? TARGET_GENERIC}`];
@@ -744,6 +769,7 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     // 而少留一个会让 rollback 之后的 restore 失去来源。
     pruneArchives(pkgDir, keep);
     cleanup();
+    operationLock.release();
     console.log(`installed ${id} ${version} (sha256 ${sha256.slice(0, 12)}…)`);
   } catch (e) {
     // 失敗恢復（§6.4）：staging 清除、active 復原、舊版本回歸、framework 重啟
@@ -764,6 +790,163 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     }
     die(String(e?.message ?? e));
   }
+}
+
+// ============================================================
+// dev-sync / legacy migration helpers
+// ============================================================
+
+function syncStagingPath(root, id) {
+  return path.join(root, '.staging', `${id}-dev-sync-${process.pid}-${Date.now()}`);
+}
+
+async function cmdDevSync(tarPath, args = []) {
+  const shaPath = args.find((arg) => arg.startsWith('--sha256='))?.slice('--sha256='.length)
+    ?? `${tarPath}.sha256`;
+  const v = await verifyArchive(tarPath, shaPath);
+  if (!v.ok) die(`dev-sync verify failed: ${v.error}`);
+  const id = v.id;
+  const lock = lockPackage(id);
+  const root = installedRoot();
+  const current = requireReconciled(id);
+  if (!current.active) die(`${id} is not installed`);
+  if (v.version !== current.active.version) {
+    die(`dev-sync version mismatch: active is ${current.active.version}, source archive is ${v.version}; release/install a version change first`);
+  }
+  const staging = syncStagingPath(root, id);
+  const held = `${current.active.path}.dev-sync-held-${process.pid}-${Date.now()}`;
+  let moved = false;
+  let lockHeld = true;
+  try {
+    fs.mkdirSync(staging, { recursive: true });
+    execFileSync('tar', ['-xzf', tarPath, '-C', staging]);
+    const stagedRoot = path.join(staging, v.top_id);
+    if (!fs.existsSync(path.join(stagedRoot, '.git'))) {
+      die('dev-sync source must include a Git worktree identity (.git)');
+    }
+    const sourceIdentity = packageGitIdentity(stagedRoot);
+    if (!sourceIdentity.head || !sourceIdentity.branch) {
+      die('dev-sync source must have a named branch and HEAD');
+    }
+    await stopOwnedServices(v.manifest);
+    fs.renameSync(current.active.path, held);
+    moved = true;
+    fs.renameSync(stagedRoot, current.active.path);
+    // The Framework reload has its own per-ID queue and acquires the same
+    // cross-process lock. Release this CLI lock before asking the running
+    // Framework to reload, otherwise the two halves would wait on each other.
+    lock.release();
+    lockHeld = false;
+    const reloaded = await frameworkApi().call('POST', `/api/dev/packages/${id}/reload`);
+    if (!reloaded?.ok) {
+      throw new Error(`Framework dev reload failed: ${reloaded?.error ?? 'unreachable'}`);
+    }
+    fs.rmSync(held, { recursive: true, force: true });
+    fs.rmSync(staging, { recursive: true, force: true });
+    console.log(JSON.stringify({
+      ok: true, operation: 'dev-sync', package_id: id,
+      active_path: current.active.path, version: v.version,
+      source_git: sourceIdentity, reload: reloaded,
+      reconcile: reconcilePackage(id, { frameworkRoot: ROOT }),
+    }, null, 2));
+  } catch (error) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* Best effort. */ }
+    if (moved) {
+      try {
+        let restoreLock = null;
+        if (!lockHeld) {
+          restoreLock = lockPackage(id);
+          lockHeld = true;
+        }
+        fs.rmSync(current.active.path, { recursive: true, force: true });
+        fs.renameSync(held, current.active.path);
+        if (restoreLock) {
+          restoreLock.release();
+          lockHeld = false;
+        }
+        await frameworkApi().call('POST', `/api/dev/packages/${id}/reload`);
+      } catch (restoreError) {
+        console.error(`ERROR: dev-sync restore also failed: ${String(restoreError?.message ?? restoreError)}`);
+      }
+    }
+    if (lockHeld) lock.release();
+    die(String(error?.message ?? error));
+  }
+}
+
+function cmdLegacyList(id) {
+  const items = id ? legacyWorkspaceCandidates(id) : (() => {
+    const ids = new Set();
+    for (const root of [process.env.TERMUX_OS_DEV_ROOT, path.join(os.homedir(), 'termux-os-dev', 'packages')].filter(Boolean)) {
+      try { for (const name of fs.readdirSync(root)) ids.add(name); } catch { /* Root may not exist. */ }
+    }
+    return [...ids].sort().flatMap((name) => legacyWorkspaceCandidates(name));
+  })();
+  console.log(JSON.stringify({ schema: 'termux-os.legacy-workspaces.v1', workspaces: items }, null, 2));
+}
+
+async function cmdLegacyArchive(id) {
+  const lock = lockPackage(id);
+  try {
+    const active = readActive(id);
+    const activePath = active ? path.join(installedRoot(), id, 'versions', active.active_version) : null;
+    const candidates = legacyWorkspaceCandidates(id).filter((item) => !samePathForManager(item.path, activePath));
+    if (!candidates.length) die(`${id} has no legacy workspace to archive`);
+    const stamp = `${new Date().toISOString().replaceAll(':', '')}-${process.pid}`;
+    const destination = path.join(os.homedir(), '.termux-os', 'legacy-workspaces', id, stamp);
+    fs.mkdirSync(destination, { recursive: true });
+    const archived = [];
+    for (const item of candidates) {
+      const target = path.join(destination, path.basename(item.path));
+      fs.renameSync(item.path, target);
+      archived.push({ from: item.path, to: target });
+    }
+    console.log(JSON.stringify({ ok: true, operation: 'legacy-archive', package_id: id, archived }, null, 2));
+  } finally { lock.release(); }
+}
+
+function samePathForManager(a, b) {
+  try { return Boolean(a && b && fs.realpathSync(a) === fs.realpathSync(b)); }
+  catch { return Boolean(a && b && path.resolve(a) === path.resolve(b)); }
+}
+
+async function cmdArchiveDevArtifacts(id) {
+  const lock = lockPackage(id);
+  try {
+    const current = requireReconciled(id);
+    if (!current.active) die(`${id} is not installed`);
+    const changes = new Set((current.git.changes ?? []).filter((item) => item.untracked).map((item) => item.path));
+    const files = [];
+    const walk = (dir, rel = '') => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === '.git' || entry.name === '.runtime') continue;
+        const next = rel ? `${rel}/${entry.name}` : entry.name;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full, next);
+        else if (entry.isFile() && changes.has(next)
+          && (entry.name.includes('.before-') || entry.name.endsWith('.bak') || entry.name.endsWith('.backup'))) files.push({ full, rel: next });
+      }
+    };
+    walk(current.active.path);
+    if (!files.length) {
+      console.log(JSON.stringify({ ok: true, operation: 'archive-dev-artifacts', package_id: id, archived: [] }, null, 2));
+      return;
+    }
+    const destination = path.join(os.homedir(), '.termux-os', 'package-archives', id,
+      `active-backups-${new Date().toISOString().replaceAll(':', '')}-${process.pid}`);
+    const archived = [];
+    for (const file of files) {
+      const target = path.join(destination, file.rel);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.renameSync(file.full, target);
+      archived.push({ from: file.full, to: target });
+    }
+    console.log(JSON.stringify({ ok: true, operation: 'archive-dev-artifacts', package_id: id, archived }, null, 2));
+  } finally { lock.release(); }
+}
+
+function cmdReconcile(id) {
+  console.log(JSON.stringify(reconcilePackage(id, { frameworkRoot: ROOT }), null, 2));
 }
 
 // ============================================================
@@ -823,6 +1006,8 @@ function pruneArchives(pkgDir, keepVersions) {
 // restore <id>（把 active 版本的内容换回保存的原包）
 // ============================================================
 async function cmdRestore(id) {
+  const operationLock = lockPackage(id);
+  requireReconciled(id);
   const root = installedRoot();
   const active = readActive(id);
   if (!active) die(`${id} is not installed`);
@@ -876,6 +1061,7 @@ async function cmdRestore(id) {
     }
     const git = packageGitState(versionDir);
     console.log(`restored ${id} ${version} [${target}] from saved archive (${describeGitState(git)})`);
+    operationLock.release();
     if (git.state === GIT_STATE.DEV) {
       console.error(`WARNING: work tree is still not clean after restore: ${git.changes.length} change(s)`);
       process.exitCode = 1;
@@ -896,38 +1082,26 @@ async function cmdRestore(id) {
 // state <id>（release / dev / unknown，读自工作树）
 // ============================================================
 function cmdState(id) {
-  const active = readActive(id);
-  if (!active) die(`${id} is not installed`);
-  const dir = path.join(installedRoot(), id, 'versions', active.active_version);
-  const git = packageGitState(dir);
-  const identity = packageGitIdentity(dir);
-  const pkgRoot = path.join(installedRoot(), id);
-  const target = active.active_target ?? TARGET_GENERIC;
-  let releasedHead = null;
-  try { releasedHead = JSON.parse(fs.readFileSync(archiveMetaPath(pkgRoot, active.active_version, target), 'utf8')).head ?? null; }
-  catch { /* 舊安裝沒有這份記錄。 */ }
-  /**
-   * 提交過的本地改動同樣是 dev。
-   *
-   * `git status` 只看得見「還沒 commit 的差異」。使用者一 commit，工作樹就乾淨了，
-   * 而內容跟發布的那一份已經分了岔。乾淨 ≠ 沒改過，所以判據要多問一句 HEAD。
-   */
-  const diverged = Boolean(releasedHead && identity.head && identity.head !== releasedHead);
-  const state = git.state === GIT_STATE.RELEASE && diverged ? GIT_STATE.DEV : git.state;
+  const reconcile = reconcilePackage(id, { frameworkRoot: ROOT });
+  if (!reconcile.active) die(`${id} is not installed`);
+  const git = packageGitState(reconcile.active.path);
+  const state = reconcile.state;
   console.log(JSON.stringify({
     id,
-    version: active.active_version,
-    target,
+    version: reconcile.active.version,
+    target: reconcile.active.target,
     state,
-    reason: state === GIT_STATE.DEV && diverged && git.state === GIT_STATE.RELEASE
+    reason: reconcile.conflict ? 'reconcile_required' : reconcile.git.head_diverged
       ? 'head_diverged_from_release' : git.reason,
-    released_head: releasedHead,
-    head_diverged: diverged,
+    released_head: reconcile.git.released_head,
+    head_diverged: reconcile.git.head_diverged,
     error: git.error,
     changes: git.changes,
     ignored_paths: git.ignored,
-    git: identity,
-    restorable: fs.existsSync(archiveTarPath(pkgRoot, active.active_version, target)),
+    git: reconcile.git,
+    restorable: Boolean(reconcile.archive?.entries?.some((entry) => entry.kind === 'archive'
+      && entry.version === reconcile.active.version && (entry.target ?? reconcile.active.target) === reconcile.active.target)),
+    reconcile,
   }, null, 2));
 }
 
@@ -935,9 +1109,11 @@ function cmdState(id) {
 // uninstall <id>（§7：只刪代碼；配置/數據/綁定/Desired 全保留）
 // ============================================================
 async function cmdUninstall(id) {
+  const operationLock = lockPackage(id);
+  requireReconciled(id);
   const root = installedRoot();
   const active = readActive(id);
-  if (!active) { console.log(`${id} is not installed (changed=false)`); return; }
+  if (!active) { operationLock.release(); console.log(`${id} is not installed (changed=false)`); return; }
   let manifest = null;
   try { manifest = JSON.parse(fs.readFileSync(path.join(root, id, 'versions', active.active_version, MANIFEST_FILENAME), 'utf8')); }
   catch { /* 版本目錄壞了也照樣卸載 */ }
@@ -952,6 +1128,7 @@ async function cmdUninstall(id) {
     const w = await waitPackageStatus(id, false);
     if (!w.ok) die(`uninstall post-check failed: ${w.error}`);
   }
+  operationLock.release();
   console.log(`uninstalled ${id} (was ${active.active_version}); config/data/bindings/desired preserved`);
 }
 
@@ -959,6 +1136,8 @@ async function cmdUninstall(id) {
 // rollback <id>（§8：active ↔ previous 互換；只留兩版本）
 // ============================================================
 async function cmdRollback(id) {
+  const operationLock = lockPackage(id);
+  requireReconciled(id);
   const root = installedRoot();
   const active = readActive(id);
   if (!active) die(`${id} is not installed`);
@@ -1005,6 +1184,7 @@ async function cmdRollback(id) {
     const w = await waitPackageStatus(id, true);
     if (!w.ok) die(`rollback post-check failed: ${w.error}`);
   }
+  operationLock.release();
   console.log(`rolled back ${id} to ${prev} (previous now ${active.active_version})`);
 }
 
@@ -1039,7 +1219,12 @@ switch (cmd) {
   case 'check-installed': cmdCheckInstalled(rest[0] ?? die('usage: check-installed <package-id>'), rest.slice(1)); break;
   case 'restore': await cmdRestore(rest[0] ?? die('usage: restore <package-id>')); break;
   case 'state': cmdState(rest[0] ?? die('usage: state <package-id>')); break;
+  case 'reconcile': cmdReconcile(rest[0] ?? die('usage: reconcile <package-id>')); break;
+  case 'dev-sync': await cmdDevSync(rest[0] ?? die('usage: dev-sync <archive.tar.gz> [--sha256=<sidecar>]'), rest.slice(1)); break;
+  case 'legacy-list': cmdLegacyList(rest[0] ?? null); break;
+  case 'legacy-archive': await cmdLegacyArchive(rest[0] ?? die('usage: legacy-archive <package-id>')); break;
+  case 'archive-dev-artifacts': await cmdArchiveDevArtifacts(rest[0] ?? die('usage: archive-dev-artifacts <package-id>')); break;
   default:
-    console.log('usage: node scripts/package-manager.mjs <pack|verify|install|uninstall|rollback|list|profile|check|check-installed> ...');
+    console.log('usage: node scripts/package-manager.mjs <pack|verify|install|uninstall|rollback|list|profile|check|check-installed|restore|state|reconcile|dev-sync|legacy-list|legacy-archive|archive-dev-artifacts> ...');
     process.exit(cmd ? 1 : 0);
 }

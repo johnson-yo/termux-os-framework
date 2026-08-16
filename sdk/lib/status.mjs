@@ -42,13 +42,13 @@ export async function cmdStatus(flags, pos) {
   if (!id) return fail(flags, 'missing_package_id', null, 'Usage: termux-os-sdk status <package-id> [--connection <name>|--framework-url <url>]');
   const conn = resolveConnection(flags);
 
-  // Workspace.
-  const wsDir = packageDir(id);
-  let workspace = null;
-  if (fs.existsSync(path.join(wsDir, 'termux-os.package.json'))) {
+  // Host source repository. This is intentionally separate from Installed Root truth.
+  const sourceDir = packageDir(id);
+  let source = null;
+  if (fs.existsSync(path.join(sourceDir, 'termux-os.package.json'))) {
     let version = null;
-    try { version = readManifest(wsDir).version; } catch { /* Keep the Workspace visible even with a broken manifest. */ }
-    workspace = { dir: wsDir, version, content: hashWorkspace(wsDir) };
+    try { version = readManifest(sourceDir).version; } catch { /* Keep the source visible even with a broken manifest. */ }
+    source = { dir: sourceDir, version, content: hashWorkspace(sourceDir) };
   }
 
   // Last Release.
@@ -56,13 +56,21 @@ export async function cmdStatus(flags, pos) {
 
   // Dev, Installed, Running, and Verify truth from HTTP.
   let reachable = false;
-  let dev = null; let installed = null; let running = null;
+  let dev = null; let installed = null; let running = null; let reconcile = null;
   const dm = await frameworkFetch(conn, '/api/dev/packages', { token: TOKEN });
   if (dm.ok) {
     reachable = true;
     // watcher 只說「有沒有在監看」。package 是不是被改過，由 Git 回答，不在這裡。
     const w = (dm.data?.watchers ?? []).find((x) => x.package_id === id);
     if (w) dev = { watching: true, version_dir: w.version_dir, watch_mode: w.watch_mode, seq: w.seq };
+  }
+  const ds = await frameworkFetch(conn, `/api/dev/packages/${id}/status`, { token: TOKEN });
+  if (ds.ok && ds.data?.ok) {
+    dev = { watching: ds.data.watching, version_dir: ds.data.version_dir,
+      watch_mode: ds.data.watch_mode, runtime_generation: ds.data.runtime_generation ?? null };
+    reconcile = ds.data.reconcile ?? null;
+  } else if (ds.ok && ds.status === 404 && ds.data?.reconcile) {
+    reconcile = ds.data.reconcile;
   }
   const p = await frameworkFetch(conn, `/api/packages/${id}`, { token: TOKEN });
   if (p.ok && p.data?.package) {
@@ -80,10 +88,10 @@ export async function cmdStatus(flags, pos) {
   } else if (p.ok && p.status === 404 && dev == null) {
     installed = null; // Confirmed absent.
   }
-  // Device Verify record stored in Workspace development state.
+  // Device Verify record stored in SDK metadata beside the source repository.
   let verify = null;
   try {
-    const v = JSON.parse(fs.readFileSync(path.join(sdkMetaDir(wsDir), 'verify.v1.json'), 'utf8'));
+    const v = JSON.parse(fs.readFileSync(path.join(sdkMetaDir(sourceDir), 'verify.v1.json'), 'utf8'));
     verify = { result: v.result, at: v.at, release_sha256: v.release_sha256 ?? null, mode: v.mode ?? 'installed' };
   } catch { /* No recorded Device Verify result. */ }
 
@@ -95,10 +103,10 @@ export async function cmdStatus(flags, pos) {
   // Drift remains unknown when target truth is unreachable.
   const drift = [];
   if (!reachable) drift.push('unknown');
-  if (dev && installed) drift.push('dev-shadowing-installed');
+  if (reconcile?.conflict) drift.push('reconcile-required');
   const relArt = release?.artifacts?.[0] ?? null;
-  if (workspace && release && relArt?.source_hash && relArt.source_hash !== workspace.content) drift.push('workspace-ahead');
-  if (workspace && !release) drift.push('workspace-ahead');
+  if (source && release && relArt?.source_hash && relArt.source_hash !== source.content) drift.push('source-ahead');
+  if (source && !release) drift.push('source-ahead');
   if (reachable && release && !installed && !dev) drift.push('release-not-installed');
   if (reachable && release && installed && relArt?.sha256 && installed.sha256 && relArt.sha256 !== installed.sha256) drift.push('installed-behind');
   if (verify && installed?.sha256 && verify.release_sha256 && verify.release_sha256 !== installed.sha256) drift.push('verify-stale');
@@ -106,7 +114,7 @@ export async function cmdStatus(flags, pos) {
 
   const out = { ok: true, package: id, connection: conn.name ?? conn.source, reachable,
     framework_build: frameworkBuild,
-    workspace: workspace ?? null, dev_runtime: dev ?? { active: false },
+    source: source ?? null, dev_runtime: dev ?? { active: false }, reconcile,
     last_release: release ? { version: release.version, ...relArt } : null,
     installed, running, device_verify: verify, drift };
 
@@ -114,12 +122,18 @@ export async function cmdStatus(flags, pos) {
     const line = (k, v) => console.log(`  ${k}: ${v ?? 'unknown'}`);
     console.log(`Package: ${o.package}  Connection: ${o.connection}${o.reachable ? '' : ' (Framework unreachable; target state is unknown)'}`);
     console.log(`Framework build: ${o.framework_build}\n`);
-    console.log('Workspace');
-    if (o.workspace) { line('version', o.workspace.version); line('content', `${o.workspace.content.slice(0, 12)}…`); }
-    else console.log('  no local Workspace');
+    console.log('Source');
+    if (o.source) { line('version', o.source.version); line('content', `${o.source.content.slice(0, 12)}…`); }
+    else console.log('  no local Git source repository');
     console.log('\nDev Runtime');
-    line('active', o.dev_runtime.active);
-    if (o.dev_runtime.active) { line('source', o.dev_runtime.source); line('data', o.dev_runtime.data); }
+    line('watching', o.dev_runtime.watching ?? false);
+    line('generation', o.dev_runtime.runtime_generation ?? 'none');
+    if (o.reconcile) {
+      line('active', o.reconcile.active?.path);
+      line('state', o.reconcile.state);
+      line('legacy', o.reconcile.legacy_workspaces?.length ?? 0);
+      line('stale generations', o.reconcile.stale_generations?.length ?? 0);
+    }
     console.log('\nLast Release');
     if (o.last_release) { line('version', o.last_release.version); line('target', o.last_release.target); line('sha256', `${o.last_release.sha256?.slice(0, 12)}…`); }
     else console.log('  none');

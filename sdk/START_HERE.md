@@ -40,17 +40,25 @@ termux-os-sdk new \
 termux-os-sdk inspect org.example.service.demo
 ```
 
-The default source workspace is `~/termux-os-dev/packages/`. Set `TERMUX_OS_DEV_ROOT` to use another collection, or run the SDK from the Package repository itself.
+The default source root is `~/termux-os-sources/`. Set `TERMUX_OS_SOURCE_ROOT` to use another
+collection, or run the SDK from the Package Git repository itself. The old
+`~/termux-os-dev/packages/` tree is legacy: `context` and `reconcile` report it, but the SDK never
+loads or watches it.
 
 ## 3. Build confidence
 
 ```sh
 termux-os-sdk doctor org.example.service.demo
 termux-os-sdk test org.example.service.demo
+termux-os-sdk dev sync org.example.service.demo \
+  --connection <name> --source /absolute/path/to/the/repository
 termux-os-sdk dev start org.example.service.demo
 ```
 
-Development mounts are temporary and cannot be treated as release evidence.
+`dev` watches the installed active worktree; it does not create a second Package. A sync is atomic,
+keeps `config/`, persistent data, and assets outside the version directory, and reports the target
+path and Git diff before replacing it. Runtime generations are module-cache copies only and never
+become Package identities.
 
 ## 4. Release and install
 

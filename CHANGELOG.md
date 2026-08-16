@@ -2,6 +2,17 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.35
+
+- **Package development now has one identity.** Install, restore, rollback, uninstall, and Dev
+  Runtime writes are serialized by Package ID; duplicate active records, stale generations, and
+  retired legacy source trees are reconciled instead of silently selected. Previous versions and
+  runtime generations are reported as rollback/cache material, never as second Packages.
+- **Host-to-device development uses an atomic `dev sync`.** The SDK transfers one selected Git
+  source repository into the phone's unique active worktree, preserves configuration/data/assets,
+  reloads the same Package ID, and restores the previous tree if swap or reload fails. The former
+  `~/termux-os-dev/packages` source is report-only and can be archived without deleting its files.
+
 ## 0.2.34
 
 - **Installing on a slower device no longer rolls back a Package that installed fine.** The

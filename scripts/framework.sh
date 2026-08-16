@@ -99,7 +99,7 @@ start_runtime() {
   [ -f "$CONF" ] || { err "缺少配置 $CONF"; return 1; }
   ensure_auth
   cd "$RUNTIME" || return 1
-  # 正式 Package 唯一來源=Installed Root；PACKAGES_DEV_DIR 只供顯式舊開發入口，029 Dev Mount 走 API。
+  # 正式 Package 唯一來源=Installed Root；旧 PACKAGES_DEV_DIR 仅会被报告，不再加载。
   HOST="${FRAMEWORK_HOST:-}" PORT="$PORT" CONFIG="$CONF" PACKAGES_INSTALLED_DIR="$INSTALLED_ROOT" \
     FRAMEWORK_RUNTIME="$RUNTIME" FRAMEWORK_PERSIST="$PERSIST" FRAMEWORK_CONFIG="$CONF" \
     FRAMEWORK_CONTROL="$CONTROL" FRAMEWORK_CONTROL_PATH="$CONTROL" FRAMEWORK_UPDATE_ROOT="$UPDATE_DIR" \
@@ -568,7 +568,7 @@ ensure_no_dev_mounts() {
   mounts="$(active_dev_mounts)"
   [ -z "$mounts" ] || {
     err "active Dev Runtime: $mounts"
-    err "請到 Packages → Workspace 停止挂载後再更新；Workspace 的專案不會被刪"
+    err "请到 Packages → Workspace 停止监视后再更新；源代码项目不会被删除"
     return 1
   }
 }

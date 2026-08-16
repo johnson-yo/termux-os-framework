@@ -99,7 +99,7 @@ export const listPackages = () => [...packages.values()].map((r) => ({
   runtime: r.status === 'loaded' ? (getPackageRuntime(r.id)?.summary ?? null) : null,
   target: r.manifest?.targets?.[0]?.id ?? 'generic',
   ports: getPackagePorts(r.id),
-  dev: r.dev ?? null, // 029：Dev Mount 標記（workspace/shadow 等，正式包=null）
+  dev: r.dev ?? null, // Compatibility field; current Dev Runtime reloads the active tree in place.
 }));
 
 export const getPackage = (id) => {
@@ -278,8 +278,8 @@ export async function loadSinglePackage({ dir, expectId, source, install = null,
 /**
  * Where a Package keeps its own settings: `config/` under the Package root, beside `versions/`
  * rather than inside one, so upgrading the Package does not discard what the user configured.
- * A workspace instance is deliberately given its own directory — it exists to try changes out,
- * and writing them into the released Package's settings is what coexistence is meant to prevent.
+ * Dev Runtime uses a generation directory only as a module-cache copy while the Package's
+ * installed active worktree remains the sole identity and source of truth.
  */
 function packageConfigRoot(record, overrides) {
   // overrides.persistRoot 仍然保留給非 dev 的注入場景（測試夾具）；dev 本身不再注入，
@@ -420,9 +420,8 @@ function makeContext(record, config, configPath, overrides = null, saveConfig = 
       /**
        * The instance-scoped id of a service this package declares.
        *
-       * Namespacing the registration alone is not enough: a package computes its own
-       * runtime paths (status file, pid file) from its literal service id, so two
-       * instances would read and write the same files while appearing isolated.
+       * A Package computes its own runtime paths from its literal service id. Release and
+       * dev share that identity, so there is no second path namespace to keep in sync.
        * Packages must derive those paths from this, not from a local constant.
        */
       id: (localId) => ns(localId),
@@ -536,9 +535,9 @@ function makeContext(record, config, configPath, overrides = null, saveConfig = 
 
 // ============================================================
 // Loader —— 掃描/驗證/載入；任何一步失敗只 failed 該 Package
-// 022：默認來源 = Installed Root（~/.termux-os/packages，active.json→versions/<v>）；
-//      開發樹須顯式 PACKAGES_DEV_DIR，測試附加根 PACKAGES_EXTRA_DIR；roots 參數（self-test/doctor）
-//      維持原始目錄掃描語義
+// 022：默認來源 = Installed Root（~/.termux-os/packages，active.json→versions/<v>）。
+//      來源 Git repository 由 SDK dev-sync 进入这个 active worktree；旧的
+//      PACKAGES_DEV_DIR 不再是加载入口。PACKAGES_EXTRA_DIR 仅保留给测试夹具。
 // ============================================================
 async function loadCandidate({ dir, expectId, source, install, contextOverrides = null, cacheBust = false,
   packageRoot = null },
@@ -602,12 +601,8 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
   if (!fs.existsSync(webuiPath)) return fail(id, manifest, `webui entry not found: ${manifest.entrypoints.webui}`);
 
   try {
-    // Ports are keyed by package id, and a workspace instance has its own id, so the
-    // allocator hands it a different port and avoids the released one by construction.
-    // Denying ports outright was wrong: a package that needs one could not run at all
-    // in a workspace — it failed to register with "did not assign the HTTP port".
-    // The globally-scoped claims are integrations and artifact contracts, which resolve
-    // by capability name to exactly one owner; those a workspace still must not take.
+    // Ports are keyed by the single Package ID, so release and dev reuse the same
+    // Package-owned assignment instead of creating a shadow port.
     record.ports = registerPackagePorts(id, manifest.ports ?? []);
     // 029：dev 重載時 entry 加查詢串繞開 ESM 快取（子模塊靠 dev-runtime 的 generation 副本換新 URL）
     const entryUrl = pathToFileURL(backendPath).href + (cacheBust ? `?dev=${Date.now()}` : '');
@@ -680,7 +675,9 @@ export async function loadPackages({ roots, frameworkVersion, config = {}, confi
         install: { version: en.active.active_version, previous_version: en.active.previous_version ?? null,
           archive_sha256: en.active.archive_sha256 ?? null, installed_at: en.active.installed_at ?? null } });
     }
-    if (process.env.PACKAGES_DEV_DIR) candidates.push(...scanRawRoot(process.env.PACKAGES_DEV_DIR, 'dev'));
+    if (process.env.PACKAGES_DEV_DIR) {
+      log(`legacy Package source ignored (not loaded): ${process.env.PACKAGES_DEV_DIR}`);
+    }
     if (process.env.PACKAGES_EXTRA_DIR) candidates.push(...scanRawRoot(process.env.PACKAGES_EXTRA_DIR, 'extra'));
   }
 

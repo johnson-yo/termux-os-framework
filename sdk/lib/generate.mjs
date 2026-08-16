@@ -8,7 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { FW_ROOT, defaultWorkspaceRoot, emit, fail, sdkMetaDir } from './util.mjs';
+import { FW_ROOT, defaultSourceRoot, emit, fail, sdkMetaDir } from './util.mjs';
 
 const TYPES = ['service', 'app', 'adapter', 'asset'];
 const MENU_PARENT = {
@@ -31,11 +31,13 @@ export async function cmdNew(flags, pos) {
       'Use at least four lowercase segments, for example github.termux-os.service.keyword-counter.');
   }
   if (!name) return fail(flags, 'missing_name', null, 'Add --name "Human Readable Name".');
-  const wsRoot = flags.workspace ? path.resolve(String(flags.workspace)) : defaultWorkspaceRoot();
-  const dir = flags['out-dir'] ? path.resolve(String(flags['out-dir'])) : path.join(wsRoot, id);
+  if (flags.workspace !== undefined) {
+    return fail(flags, 'retired_option', '--workspace', 'Use --out-dir or TERMUX_OS_SOURCE_ROOT; ~/termux-os-dev/packages is legacy only.');
+  }
+  const sourceRoot = flags['out-dir'] ? path.dirname(path.resolve(String(flags['out-dir']))) : defaultSourceRoot();
+  const dir = flags['out-dir'] ? path.resolve(String(flags['out-dir'])) : path.join(sourceRoot, id);
   const location = flags['out-dir'] ? `explicit --out-dir (${dir})`
-    : flags.workspace ? `explicit --workspace (${wsRoot})`
-      : `independent development root (${wsRoot})`;
+    : `source repository root (${sourceRoot})`;
   if (fs.existsSync(dir)) {
     return fail(flags, 'package_exists', dir, `Inspect it first: termux-os-sdk inspect ${id}`);
   }
@@ -172,10 +174,10 @@ TODO: State one responsibility and the explicit non-responsibilities.
 Files in this Package repository may be changed. Do not change Framework Core, another Package, or existing user data to hide a Package defect.
 
 ## Runtime paths
-- Ephemeral status: \`<frameworkRoot>/.runtime/services/<instance-scoped service id>/\`
-  (use \`context.services.id('${v.SERVICE_ID}')\`; a Workspace instance is suffixed with its slug)
-- Persistent configuration: \`/sdcard/termux-os/framework/conf/${v.SHORT}.v1.json\`
-- Persistent data: \`/sdcard/termux-os/framework/data/${v.SHORT}/\`
+- Ephemeral status: \`<frameworkRoot>/.runtime/services/<service id>/\`
+  (use \`context.services.id('${v.SERVICE_ID}')\`; release and dev share one service id)
+- Persistent configuration: Package-owned \`config/\` beside the active version directory
+- Persistent data: Framework-managed Package data outside the active worktree
 
 Create persistent files only when missing and never overwrite user configuration during an update.
 
@@ -200,6 +202,7 @@ Use \`termux-os-sdk\` from \`PATH\`, or invoke
 - Doctor: \`termux-os-sdk doctor ${v.ID}\`
 - Release: \`termux-os-sdk release ${v.ID}\`
 - Install: \`termux-os-sdk install <tar> --connection <name>\`
+- Dev sync: \`termux-os-sdk dev sync ${v.ID} --connection <name> --source <repository>\`
 
 ## Completion
 The self-test passes, doctor has no failures, an immutable release is installed and device-verified, and the handoff records any known issues.
@@ -512,9 +515,8 @@ import { loadConfig } from './service/config.mjs';
 const EDITABLE = { interval_ms: 'number' };
 
 export async function register(context) {
-  // Derive runtime paths from the instance-scoped service id, never from the literal
-  // one: a Workspace runs alongside the released Package, and two instances that
-  // build this path from the same constant read and write each other's status file.
+  // Derive runtime paths from the Package-owned service id. Release and dev use
+  // the same service identity; Dev Runtime does not create a second instance.
   const SERVICE_ID = context.services.id('${v.SERVICE_ID}');
   const STATUS_FILE = path.join(context.frameworkRoot, \`.runtime/services/\${SERVICE_ID}/status.json\`);
   // 設定放在 Package 自己的 config/ 下，不在 Framework 的持久樹裡：

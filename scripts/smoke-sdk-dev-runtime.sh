@@ -19,7 +19,8 @@ mkdir -p "$ROOT/tmp"
 WORK=$(mktemp -d "$ROOT/tmp/sdk-dev-smoke.XXXXXX")
 FWPID=""
 
-export TERMUX_OS_DEV_ROOT=$WORK/ws
+export TERMUX_OS_SOURCE_ROOT=$WORK/source
+export TERMUX_OS_DEV_ROOT=$WORK/legacy
 export TERMUX_OS_SDK_HOME=$WORK/sdkhome
 export TERMUX_OS_FRAMEWORK_URL=$B
 export TERMUX_OS_TOKEN=$TOKEN
@@ -30,7 +31,7 @@ cleanup() {
   rm -rf "$WORK" "dist/releases/$ID" ".runtime/persist/conf/sdk-smoke-dr.v1.json"
 }
 trap cleanup EXIT
-mkdir -p "$WORK/installed" "$WORK/ws"
+mkdir -p "$WORK/installed" "$WORK/source"
 
 pass=0; fail=0
 ok()  { echo "PASS $1"; pass=$((pass+1)); }
@@ -41,7 +42,7 @@ jq() { python3 -c "import json,sys;d=json.load(sys.stdin);$1"; }
 
 start_fw() {
   FRAMEWORK_ADMIN_TOKEN=$TOKEN FRAMEWORK_ADMIN_PASSWORD=$TOKEN \
-    PACKAGES_INSTALLED_DIR=$WORK/installed BROWSER_SESSION_PATH=$WORK/browser-sessions.v1.json \
+    PACKAGES_INSTALLED_DIR=$WORK/installed PACKAGES_DEV_DIR=$WORK/legacy BROWSER_SESSION_PATH=$WORK/browser-sessions.v1.json \
     HOST=127.0.0.1 PORT=$PORT node src/server.mjs >"$WORK/fw.log" 2>&1 &
   FWPID=$!
   for _ in $(seq 1 30); do
@@ -72,20 +73,20 @@ cat > "$WORK/sdkhome/connections/urlonly.json" <<EOF
 EOF
 t "profile（transport=none）可解析" $SDK access --connection urlonly
 
-echo "--- 1. Workspace 建立 ---"
-$SDK new --type service --id $ID --name "DR Smoke" --workspace "$WORK/ws" --json \
-  | jq "assert '--workspace' in d['location']" && ok "new 明示落點（--workspace）" || bad "new location"
+echo "--- 1. Git source repository 建立 ---"
+$SDK new --type service --id $ID --name "DR Smoke" --out-dir "$WORK/source/$ID" --json \
+  | jq "assert '--out-dir' in d['location']" && ok "new 明示 source 落點" || bad "new location"
 # .sdk/ 落在工作樹之外（兄弟目錄）：它是開發痕跡不是包的內容，寫進去會讓
 # `new` 生成的包在第一秒就已經是 dev。
-[ -f "$WORK/ws/$ID.sdk/project.v1.json" ] && [ -f "$WORK/ws/$ID/RELEASE_NOTES.md" ] \
-  && [ -f "$WORK/ws/$ID/scripts/verify-device.mjs" ] && [ ! -f "$WORK/ws/$ID/HANDOFF.md" ] \
-  && [ ! -e "$WORK/ws/$ID/.sdk" ] \
-  && ok "骨架含 .sdk/+RELEASE_NOTES+verify hook、無根 HANDOFF、工作樹無 .sdk" || bad "workspace 骨架"
+[ -f "$WORK/source/$ID.sdk/project.v1.json" ] && [ -f "$WORK/source/$ID/RELEASE_NOTES.md" ] \
+  && [ -f "$WORK/source/$ID/scripts/verify-device.mjs" ] && [ ! -f "$WORK/source/$ID/HANDOFF.md" ] \
+  && [ ! -e "$WORK/source/$ID/.sdk" ] \
+  && ok "骨架含 .sdk/+RELEASE_NOTES+verify hook、無根 HANDOFF、工作樹無 .sdk" || bad "source 骨架"
 
 echo "--- 2. release 產出 shallow-Git asset ---"
 # ⭐ 正式 release 現在要求來源是一個乾淨的 Git 倉庫：package asset 帶真實 shallow
 #    baseline，裝到設備上才可能「解包即用、Git 即狀態」。
-GW="$WORK/ws/$ID"
+GW="$WORK/source/$ID"
 git -C "$GW" init -q -b main
 git -C "$GW" config user.name Smoke; git -C "$GW" config user.email s@e
 git -C "$GW" remote add origin https://github.com/example/dr-smoke.git
@@ -126,17 +127,25 @@ echo "$OUT" | grep -q "verify-device" && ok "install 輸出下一步 verify-devi
 
 echo "--- 5. 起 Framework：status 對齊 ---"
 start_fw
+grep -q "legacy Package source ignored (not loaded): $WORK/legacy" "$WORK/fw.log" \
+  && ok "legacy PACKAGES_DEV_DIR is reported but never loaded" || bad "legacy source loader gate"
 $SDK status $ID --json | jq "assert d['drift']==['clean'] and d['installed']['version']=='0.1.0'" \
   && ok "install 對齊 → drift=clean" || bad "clean drift"
 $SDK status $ID --json | jq "
-for k in ['workspace','dev_runtime','last_release','installed','running','device_verify','drift']: assert k in d" \
+for k in ['source','dev_runtime','reconcile','last_release','installed','running','device_verify','drift']: assert k in d" \
   && ok "status runtime fields 齊全" || bad "status runtime fields"
+# A URL-only connection can observe Framework but cannot execute the target-side
+# atomic swap. The local profile supplies both the HTTP endpoint and local
+# command transport for this isolated test.
+$SDK dev sync $ID --source "$GW" --json \
+  | jq "assert d['ok'] and d['after']['reconcile']['active']['version']=='0.1.0' and d['target']['active_path']" \
+  && ok "host source → unique active worktree dev sync" || bad "dev sync"
 
 echo "--- 6. verify-device（installed 綁定）---"
 FRAMEWORK_URL=$B $SDK verify-device $ID --json >/dev/null 2>&1 && ok "verify-device pass" || bad "verify-device"
 SHA=$(cut -d' ' -f1 "$TAR.sha256")
 python3 -c "
-import json; d=json.load(open('$WORK/ws/$ID.sdk/verify.v1.json'))
+import json; d=json.load(open('$WORK/source/$ID.sdk/verify.v1.json'))
 assert d['result']=='pass' and d['release_sha256']=='$SHA' and d['version']=='0.1.0'" \
   && ok "verify 記錄綁 release sha+version" || bad "verify 綁定"
 
@@ -178,6 +187,25 @@ SVC_AFTER=$(curl -s -H "$AUTH" $B/api/stage/services | python3 -c "
 import json,sys;print(','.join(sorted(s['id'] for s in json.load(sys.stdin)['services'])))")
 [ "$SVC_BEFORE" = "$SVC_AFTER" ] && ok "reload 前後 service id 完全相同" || bad "service id 變了: $SVC_BEFORE → $SVC_AFTER"
 curl -s -H "$AUTH" $B/api/packages/$ID | grep -q '"id"' && ok "唯一 package 記錄仍可查" || bad "package 記錄丟失"
+$SDK dev status $ID --json | python3 -c "
+import json,sys; d=json.load(sys.stdin); r=d['reconcile']
+assert r['active']['path']==d['version_dir'] and d['runtime_generation'] and not r['stale_generations']
+assert len(d['services'])==len(set(d['services']))
+assert r['previous'] is None or r['previous']['path'] != r['active']['path']" \
+  && ok "reconcile 對齊 active/previous，generation 單 owner" || bad "reconcile/generation"
+
+echo "--- 11b. legacy/duplicate identity gates ---"
+mkdir -p "$WORK/legacy/$ID"
+cp "$V/termux-os.package.json" "$WORK/legacy/$ID/termux-os.package.json"
+tf "legacy source blocks dev start" $SDK dev start $ID --json
+$SDK dev status $ID --json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['state']=='conflicted' and d['reconcile']['legacy_workspaces']" \
+  && ok "legacy workspace is reported, not loaded" || bad "legacy reconcile"
+rm -rf "$WORK/legacy/$ID"
+mkdir -p "$WORK/installed/duplicate/versions/0.1.0"
+cp "$V/termux-os.package.json" "$WORK/installed/duplicate/versions/0.1.0/termux-os.package.json"
+printf '{\"schema\":\"termux-os.package-active.v1\",\"id\":\"%s\",\"active_version\":\"0.1.0\"}\n' "$ID" > "$WORK/installed/duplicate/active.json"
+tf "duplicate active worktree blocks dev start" $SDK dev start $ID --json
+rm -rf "$WORK/installed/duplicate"
 
 echo "--- 12. 舊入口已移除 ---"
 # 舊參數必須不再被接受：靜默忽略比報錯更糟，使用者會以為隔離資料區還在生效。

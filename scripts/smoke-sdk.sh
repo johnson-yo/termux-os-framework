@@ -18,7 +18,7 @@ AST=$PFX.asset.sdk-smoke-ast
 mkdir -p "$ROOT/tmp" || exit 1
 WORK=$(mktemp -d "$ROOT/tmp/sdk-smoke.XXXXXX") || exit 1
 PKGS="$WORK/packages"
-export TERMUX_OS_DEV_ROOT="$PKGS"
+export TERMUX_OS_SOURCE_ROOT="$PKGS"
 cleanup() { rm -rf "$WORK" dist/releases/$PFX.*.sdk-smoke-*; }
 trap cleanup EXIT
 cleanup
@@ -78,8 +78,8 @@ grep -q '/admin/session.js' "$PKGS/$SVC/web/index.html" \
 grep -q 'id="token".*data-provider-credential' "$PKGS/$ADP/web/index.html" \
   && grep -q 'ACTIVE_PACKAGE_ID' "$PKGS/$ADP/web/app.js" \
   && ! grep -rqE 'localStorage|sessionStorage|Authorization.*Bearer' "$PKGS/$ADP/web" \
-  && ok "generated Adapter separates external credentials and supports Workspace instance routes" \
-  || bad "generated Adapter credential or Workspace route contract"
+  && ok "generated Adapter separates external credentials and supports Package routes" \
+  || bad "generated Adapter credential or Package route contract"
 grep -q 'process.env.PORT' "$PKGS/$SVC/service/main.mjs" \
   && grep -q 'TERMUX_OS_SYSTEM_KEY' "$PKGS/$SVC/service/main.mjs" \
   && grep -q 'TERMUX_OS_FRAMEWORK_URL' "$PKGS/$APP/app/worker.mjs" \

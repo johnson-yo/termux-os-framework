@@ -21,7 +21,7 @@ export async function cmdTest(flags, pos) {
   const id = pos[0];
   if (!id) return fail(flags, 'missing_package_id', null, 'Usage: termux-os-sdk test <package-id>');
   const dir = packageDir(id);
-  if (!fs.existsSync(dir)) return fail(flags, 'package_not_found', dir, 'Run termux-os-sdk context to list source workspaces.');
+  if (!fs.existsSync(dir)) return fail(flags, 'package_not_found', dir, 'Run termux-os-sdk context to list source repositories.');
   const steps = [];
   const record = (step, ok, detail) => steps.push({ step, ok, ...(detail ? { detail } : {}) });
 

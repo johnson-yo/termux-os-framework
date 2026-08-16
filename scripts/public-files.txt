@@ -207,6 +207,8 @@ src/packages/git-state.mjs
 src/packages/installed-root.mjs
 src/packages/loader.mjs
 src/packages/manifest.mjs
+src/packages/operation-lock.mjs
+src/packages/reconcile.mjs
 src/packages/runtime-contract.mjs
 src/packages/version.mjs
 src/packages/workspace-hash.mjs

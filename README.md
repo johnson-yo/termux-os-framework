@@ -12,7 +12,7 @@ Core provides:
 - Package manifests, runtime contracts, device-target checks, and asset registration;
 - Capability discovery and provider binding;
 - service desired state, process supervision, health, and logs;
-- application coordination and isolated development mounts;
+- application coordination and single-instance development reloads;
 - authenticated HTTP APIs, a browser administration shell, device verification, and atomic Framework updates;
 - an SDK for creating and releasing independent Extension Package repositories.
 
@@ -69,7 +69,10 @@ To expose the service to a trusted LAN, explicitly change `server.host` in a pri
 
 ## Extension development
 
-Package source does not live in this repository. The SDK uses the current Package repository or `~/termux-os-dev/packages/`:
+Package source does not live in this repository. The SDK uses the current Package Git repository or
+`~/termux-os-sources/<package-id>/`. The former `~/termux-os-dev/packages/` tree is detected and
+reported as legacy only; it is never loaded, watched, or used as source. Use `dev sync` to move a
+chosen host repository into the one installed active worktree:
 
 ```sh
 ./sdk/termux-os-sdk new \
@@ -77,6 +80,9 @@ Package source does not live in this repository. The SDK uses the current Packag
   --id org.example.service.demo \
   --name "Demo Service"
 
+./sdk/termux-os-sdk dev sync org.example.service.demo \
+  --connection <connection-name> \
+  --source /path/to/org.example.service.demo
 ./sdk/termux-os-sdk doctor org.example.service.demo
 ./sdk/termux-os-sdk test org.example.service.demo
 ./sdk/termux-os-sdk release org.example.service.demo

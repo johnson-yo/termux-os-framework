@@ -34,9 +34,9 @@
 - Configuration and durable data stay outside immutable release directories.
 - Status distinguishes desired state, process state, health, and last activity.
 - Package routes are namespaced under `/api/packages/<id>/`.
-- A Dev Runtime page is instance-scoped as `<id>@<workspace-slug>` and must call the matching
-  `/api/packages/<instance-id>/` route. SDK-generated WebUI derives this value from the current
-  `/packages/<instance-id>/` pathname instead of hard-coding the release ID.
+- A Package has one identity: `<id>`. Dev Runtime reloads that installed active worktree in place;
+  it does not create `<id>@<workspace-slug>` or a second route namespace. SDK-generated WebUI uses
+  `/packages/<id>/` and the same Package-owned service IDs in release and dev.
 - An interactive Package may register `context.websockets.register('/path', handler)`.
   The Core authenticates the Browser Session and dispatches the upgrade on the same
   `/api/packages/<id>/path` origin; the handler receives the client socket and

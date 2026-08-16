@@ -20,6 +20,8 @@ for file in \
   src/packages/manifest.mjs \
   src/packages/dependencies.mjs \
   src/packages/git-state.mjs \
+  src/packages/operation-lock.mjs \
+  src/packages/reconcile.mjs \
   src/packages/dependency-runtime.mjs \
   src/packages/runtime-contract.mjs \
   src/packages/loader.mjs \

@@ -27,6 +27,19 @@ termux-os-sdk dev logs   <package-id>   # logs of the Package's own services
 The Package must already be installed: `dev` acts on the one installed copy, using its service
 ids, ports, URL, configuration and data. Nothing is duplicated, shadowed, or namespaced.
 
+For host-to-device iteration, use the formal sync path before starting the watcher:
+
+```sh
+termux-os-sdk dev sync <package-id> --connection <name> --source /absolute/path/to/repository
+termux-os-sdk dev start <package-id>
+```
+
+Framework reconcile reports the active path/version, Git `HEAD` and released `HEAD`, dirty state,
+previous/archive rollback material, generation owner, watcher, owned services, and any legacy or
+duplicate identity. A conflict blocks install, restore, rollback, uninstall, and dev writes until
+it is explicitly reconciled. The old `~/termux-os-dev/packages` source is report-only and can be
+moved to the private legacy archive without deleting user content.
+
 ## Returning to the released content
 
 Editing is one-way by design; a cleared flag would not un-edit a file. Restore the bytes:
