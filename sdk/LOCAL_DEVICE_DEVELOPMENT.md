@@ -17,10 +17,12 @@ termux-os-sdk dev sync <package-id> \
 termux-os-sdk dev status <package-id> --connection <name> --json
 ```
 
-The sync checks the Package ID and version, excludes `.sdk`, `tmp`, `backup`, and local backup
-artifacts, transfers only the selected Git repository, swaps the active version atomically, and
-reloads the same Package ID. `config/`, persistent data, assets, and the rollback archive are not
-part of the source sync. A failed swap or reload restores the previous active tree.
+The sync checks the Package ID and version, stages a compact shallow Git worktree containing the
+current `HEAD`, branch/index identity, and exact dirty source files, then excludes unrelated Git
+history plus `.sdk`, `tmp`, `backup`, and local backup artifacts. It transfers only the selected
+source tree, swaps the active version atomically, and reloads the same Package ID. `config/`,
+persistent data, assets, and the rollback archive are not part of the source sync. A failed swap or
+reload restores the previous active tree.
 
 `~/termux-os-dev/packages/` and `TERMUX_OS_DEV_ROOT` are retired legacy locations. Framework and
 SDK report them and provide `legacy-archive`, but never load, watch, or silently delete their

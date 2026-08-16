@@ -65,11 +65,46 @@ function sha256File(file) {
   });
 }
 
+function syncCopyAllowed(sourcePath, root) {
+  const rel = path.relative(root, sourcePath);
+  if (!rel) return true;
+  const parts = rel.split(path.sep);
+  if (parts.some((part) => ['.git', '.sdk', 'tmp', 'backup', '.runtime', 'node_modules'].includes(part))) return false;
+  const name = path.basename(sourcePath);
+  return !name.includes('.before-') && !name.endsWith('.bak') && !name.endsWith('.backup');
+}
+
+function prepareCompactWorktree(source, sourceIdentity, tmp) {
+  const base = path.basename(source);
+  const compact = path.join(tmp, base);
+  const cloned = run('git', [
+    'clone', '--quiet', '--depth', '1', '--no-local', '--branch', sourceIdentity.branch, source, compact,
+  ], { stdio: 'ignore' });
+  if (cloned !== 0) throw new Error('could not create a shallow Git worktree for dev sync');
+
+  // Keep the shallow commit/tree/index, but overlay the exact dirty host tree. This
+  // preserves HEAD/branch/status without shipping the host repository's full history.
+  for (const entry of fs.readdirSync(compact)) {
+    if (entry !== '.git') fs.rmSync(path.join(compact, entry), { recursive: true, force: true });
+  }
+  for (const entry of fs.readdirSync(source)) {
+    const from = path.join(source, entry);
+    if (!syncCopyAllowed(from, source)) continue;
+    fs.cpSync(from, path.join(compact, entry), { recursive: true, dereference: false, force: true });
+  }
+  if (sourceIdentity.origin) {
+    run('git', ['-C', compact, 'remote', 'set-url', 'origin', sourceIdentity.origin], { stdio: 'ignore' });
+  }
+  return compact;
+}
+
 async function makeSyncArchive(source, id) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'termux-os-dev-sync-'));
   const archive = path.join(tmp, `${id}.tar.gz`);
-  const parent = path.dirname(source);
-  const base = path.basename(source);
+  const sourceIdentity = packageGitIdentity(source);
+  const compact = prepareCompactWorktree(source, sourceIdentity, tmp);
+  const parent = path.dirname(compact);
+  const base = path.basename(compact);
   const status = run('tar', [
     '-czf', archive,
     '--exclude=.sdk', '--exclude=tmp', '--exclude=backup', '--exclude=.runtime',

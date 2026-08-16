@@ -2,6 +2,12 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.37
+
+- Dev sync now transfers a compact shallow Git worktree: the host's dirty files
+  and current commit identity are preserved, while unrelated repository history
+  is not sent to the device.
+
 ## 0.2.36
 
 - Detect legacy dev workspaces named by Package slug (for example
