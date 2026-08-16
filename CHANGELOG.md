@@ -2,6 +2,11 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.38
+
+- Dev sync retries the post-reload status check across the short Framework socket
+  reset, avoiding a false transfer failure after an atomic swap succeeds.
+
 ## 0.2.37
 
 - Dev sync now transfers a compact shallow Git worktree: the host's dirty files

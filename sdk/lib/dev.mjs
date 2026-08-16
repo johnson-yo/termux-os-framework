@@ -18,6 +18,17 @@ import { packageGitIdentity, packageGitState } from '../../src/packages/git-stat
 const TOKEN = frameworkToken();
 const api = (conn, p, opts = {}) => frameworkFetch(conn, p, { token: TOKEN, ...opts });
 const quote = (value) => `'${String(value).replaceAll("'", "'\"'\"'")}'`;
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function apiWithRetry(conn, p, attempts = 5) {
+  let result;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    result = await api(conn, p);
+    if (result.ok || attempt === attempts - 1) return result;
+    await delay(300 * (attempt + 1));
+  }
+  return result;
+}
 
 async function post(conn, p, body) {
   if (conn.framework_url) {
@@ -179,7 +190,7 @@ async function cmdDevSync(flags, id, conn) {
     if (result.status !== 0) {
       return fail(flags, 'dev_sync_failed', result.stderr || result.stdout, 'The active tree was restored if the swap or reload failed. Inspect reconcile and retry.');
     }
-    const after = await api(conn, `/api/dev/packages/${id}/status`);
+    const after = await apiWithRetry(conn, `/api/dev/packages/${id}/status`);
     if (!after.ok || !after.data?.ok) return fail(flags, 'sync_postcheck_unreachable', after.error ?? after.data, 'Query Framework status and retry only after it is healthy.');
     const output = {
       ok: true, operation: 'dev-sync', package_id: id, source,
