@@ -2,6 +2,12 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.36
+
+- Detect legacy dev workspaces named by Package slug (for example
+  `termux-speech`) as well as full Package IDs, and scan manifests for custom
+  legacy directory names so duplicate sources cannot be silently ignored.
+
 ## 0.2.35
 
 - **Package development now has one identity.** Install, restore, rollback, uninstall, and Dev

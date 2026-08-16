@@ -22,6 +22,12 @@ const samePath = (a, b) => Boolean(a && b && real(a) === real(b));
 const targetOf = (active) => active?.active_target ?? 'generic';
 const archiveKey = (version, target) => `${version}@${target ?? 'generic'}`;
 const safeKey = (id) => encodeURIComponent(String(id)).replaceAll('%', '_');
+const legacyDirectoryNames = (id) => {
+  const names = new Set([id]);
+  const shortName = String(id).split('.').at(-1);
+  if (shortName) names.add(shortName);
+  return [...names];
+};
 
 export function legacyWorkspaceCandidates(id, {
   home = os.homedir(),
@@ -32,20 +38,34 @@ export function legacyWorkspaceCandidates(id, {
     path.join(home, 'termux-os-dev', 'packages'),
   ].filter(Boolean).map((root) => path.resolve(root));
   const seen = new Set();
+  const names = new Set(legacyDirectoryNames(id));
   const out = [];
   for (const root of roots) {
-    const dir = path.join(root, id);
-    if (seen.has(dir) || !fs.existsSync(dir)) continue;
-    seen.add(dir);
-    const manifest = readJson(path.join(dir, 'termux-os.package.json'));
-    out.push({
-      path: dir,
-      exists: true,
-      manifest_id: manifest?.id ?? null,
-      version: manifest?.version ?? null,
-      git: packageGitIdentity(dir),
-      valid_identity: manifest?.id === id,
-    });
+    // Legacy workspaces historically used the package slug (for example
+    // termux-speech) while the installed root is keyed by the full id. Check
+    // both names, then inspect manifests so custom names are still reported.
+    try {
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          const manifest = readJson(path.join(root, entry.name, 'termux-os.package.json'));
+          if (manifest?.id === id) names.add(entry.name);
+        }
+      }
+    } catch { /* A missing legacy root is a clean result. */ }
+    for (const name of names) {
+      const dir = path.join(root, name);
+      if (seen.has(dir) || !fs.existsSync(dir)) continue;
+      seen.add(dir);
+      const manifest = readJson(path.join(dir, 'termux-os.package.json'));
+      out.push({
+        path: dir,
+        exists: true,
+        manifest_id: manifest?.id ?? null,
+        version: manifest?.version ?? null,
+        git: packageGitIdentity(dir),
+        valid_identity: manifest?.id === id,
+      });
+    }
   }
   return out;
 }
@@ -253,7 +273,7 @@ if (process.argv[1] && process.argv[1].endsWith('reconcile.mjs') && process.argv
     ['one active worktree', release.active?.version === '1.0.0' && release.previous?.version === '0.9.0'],
     ['previous is rollback material', release.previous?.restorable === false && release.runtime_generations.length === 0],
   ];
-  const legacyDir = path.join(tmp, 'legacy', 'example.id');
+  const legacyDir = path.join(tmp, 'legacy', 'example-package');
   fs.mkdirSync(legacyDir, { recursive: true });
   fs.writeFileSync(path.join(legacyDir, 'termux-os.package.json'), JSON.stringify({ id: 'example.id', version: '0.8.0' }));
   const withLegacy = reconcilePackage('example.id', { root, frameworkRoot: framework, legacyRoot: path.dirname(legacyDir) });
