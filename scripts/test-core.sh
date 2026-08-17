@@ -46,6 +46,7 @@ for file in \
   src/theatre/runtime.mjs; do
   node "$file" --self-test
 done
+node sdk/lib/dev-mount.mjs --self-test
 
 echo "== isolated integration smokes =="
 for script in \

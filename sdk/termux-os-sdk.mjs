@@ -33,6 +33,8 @@ http://127.0.0.1:8980. For another device, use a private
                                        Watch/reload the one active worktree
   dev sync <package-id> --connection <c> [--source <repo>]
                                        Atomically sync host Git source to active device code
+  dev-mount mount|status|remount|unmount <connection> <package-id> <local-mount>
+                                       SSHFS view of the one reconciled active worktree
   doctor <package-id> [--json]         Validate current Package contracts
   status <package-id> [--json]         Show source/Dev/Release/Installed/
                                        Running/Verify truth and drift
@@ -55,6 +57,7 @@ async function main() {
     case 'choose': return (await import('./lib/context.mjs')).cmdChoose(flags);
     case 'new': return (await import('./lib/generate.mjs')).cmdNew(flags, pos);
     case 'dev': return (await import('./lib/dev.mjs')).cmdDev(flags, pos);
+    case 'dev-mount': return (await import('./lib/dev-mount.mjs')).cmdDevMount(flags, pos);
     case 'status': return (await import('./lib/status.mjs')).cmdStatus(flags, pos);
     case 'doctor': return (await import('./lib/doctor.mjs')).cmdDoctor(flags, pos);
     case 'next': return (await import('./lib/doctor.mjs')).cmdNext(flags, pos);

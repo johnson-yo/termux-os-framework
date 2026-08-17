@@ -66,6 +66,7 @@ sdk/AI_AGENT_PROMPT.md
 sdk/ARCHITECTURE.md
 sdk/CLAUDE.md
 sdk/CONNECTIONS.md
+sdk/UI_AGENT_LIVE_EDIT.md
 sdk/CONTRACTS.md
 sdk/DEVELOPMENT_FLOW.md
 sdk/DEVICE_VERIFY.md
@@ -145,6 +146,7 @@ sdk/examples/service-basic/web/style.css
 sdk/lib/connection.mjs
 sdk/lib/context.mjs
 sdk/lib/dev.mjs
+sdk/lib/dev-mount.mjs
 sdk/lib/doctor.mjs
 sdk/lib/flow.mjs
 sdk/lib/generate.mjs

@@ -13,6 +13,9 @@ worktree or runtime instance.
   replaces the installed active worktree, and reloads that same Package ID.
 - Delegate release and installation to the Core Package Manager; do not duplicate its rules.
 - Return non-zero on failure and include a stable error code plus a concrete next step.
+- `dev-mount` may expose a user-private SSHFS view of the one reconciled active
+  Installed Root worktree; it must never create a Package, worktree, runtime owner,
+  or shadow data root.
 - Keep templates, generated documentation, headers, and CLI help in English.
 - Never generate a credential, device address, workstation path, provider identity, or engine dependency into a Package.
 - Generated Adapter guidance may expose a blank `data-provider-credential` password field for an
