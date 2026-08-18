@@ -9,6 +9,9 @@ Scripts here operate Framework Core, deterministic releases, local fixtures, or 
   must never accept or persist a password through public Framework config.
 - On Termux, the installer and `framework.sh` use the normal application
   resolver; they do not require `adb`, `su`, or a process-wide DNS wrapper.
+- Framework Core is non-root by contract: the Core runtime, controller, and
+  installer run as the ordinary Termux user. Root-only behavior belongs to the
+  owning Package and its explicit capability boundary, never to Core startup.
 - `package-manager.mjs` is the single Package release and installation engine.
   Public Package releases require `README.md`, `AGENTS.md`, `NOTICE.md`, and
   `LICENSE`; internal `CLAUDE.md`, `DEVELOPMENT.md`, `.sdk/`, and handoff notes
