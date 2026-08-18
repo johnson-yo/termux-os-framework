@@ -1,9 +1,31 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
 # [INPUT]: Runtime inputs documented by this file, its public API, and adjacent documentation.
 # [OUTPUT]: Framework lifecycle, private credential recovery, and Termux network-ready runtime control.
 # [POS]: scripts/framework.sh in termux-os-framework.
 # [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
+
+# Android Termux does not provide /usr/bin/env, so the installed controller's
+# original env-based shebang cannot resolve even when Termux bash is present.
+# Keep the public entry point directly executable while retaining Bash for the
+# implementation below.
+if [ -z "${BASH_VERSION:-}" ]; then
+  if [ -z "${PREFIX:-}" ] && [ -n "${HOME:-}" ]; then
+    TERMUX_PREFIX="${HOME%/files/home}/files/usr"
+    if [ -x "$TERMUX_PREFIX/bin/bash" ]; then
+      PREFIX="$TERMUX_PREFIX"
+      export PREFIX
+    fi
+  fi
+  if [ -n "${PREFIX:-}" ] && [ -x "$PREFIX/bin/bash" ]; then
+    exec "$PREFIX/bin/bash" "$0" "$@"
+  fi
+  if command -v bash >/dev/null 2>&1; then
+    exec bash "$0" "$@"
+  fi
+  echo "framework.sh requires Bash" >&2
+  exit 127
+fi
 
 set -u
 

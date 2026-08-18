@@ -4,7 +4,7 @@ Scripts here operate Framework Core, deterministic releases, local fixtures, or 
 
 - Device aliases, IP addresses, product engines, models, and vendor build tools do not belong here.
 - Tests must isolate home, ports, Installed Root, state, and generated artifacts.
-- `framework.sh` is the runtime controller. On Termux it is installed in private Home as `~/framework.sh`; Web Update invokes that trusted controller and never replaces it. The independent public `install.sh`, `upgrade.sh`, and `uninstall.sh` entrypoints are the source-release lifecycle path and may intentionally install a new controller after archive verification.
+- `framework.sh` is the runtime controller. On Termux it is installed in private Home as `~/framework.sh`; the installed controller has a POSIX trampoline so direct execution works on Android even though Android lacks `/usr/bin/env`, while the implementation still runs under Termux Bash. Web Update invokes that trusted controller and never replaces it. The independent public `install.sh`, `upgrade.sh`, and `uninstall.sh` entrypoints are the source-release lifecycle path and may intentionally install a new controller after archive verification.
 - `framework.sh reset-password` is the local private-auth recovery command; it
   must never accept or persist a password through public Framework config.
 - On Termux, the installer and `framework.sh` use the normal application
