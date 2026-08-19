@@ -227,6 +227,7 @@ src/system/admin-pages.mjs
 src/system/auth-file.mjs
 src/system/auth.mjs
 src/system/config-migrate.mjs
+src/system/dev-marker.mjs
 src/system/framework-update-control.mjs
 src/system/job-store.mjs
 src/system/menu.mjs

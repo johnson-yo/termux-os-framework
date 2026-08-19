@@ -2,6 +2,13 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.2.39
+
+- Replace the intrusive Dev Runtime banner with a Framework-owned, non-interactive
+  orange viewport border that is injected only into watched Dev HTML and is absent
+  from Installed Release HTML. The marker cannot affect layout, clicks, scrolling,
+  or safe-area geometry.
+
 ## 0.2.38
 
 - Dev sync retries the post-reload status check across the short Framework socket

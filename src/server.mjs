@@ -41,6 +41,7 @@ import {
 } from './system/auth.mjs';
 import { adminMenuHasPath, buildAdminMenu } from './system/menu.mjs';
 import { configOverrides, migrateConfig, migrationChangedConfig } from './system/config-migrate.mjs';
+import { devInjection, devMarkerHtml } from './system/dev-marker.mjs';
 import { configureSetupState, isLoopbackAddress, readSetupState, setupDecision, writeSetupState } from './system/setup-state.mjs';
 import {
   configurePackageControl, discardPackageUpload, getPackageJob, getPackageUpload,
@@ -317,20 +318,6 @@ const serveStatic = (res, rootDir, rel) => {
   res.end(fs.readFileSync(file));
 };
 
-// ============================================================
-// 029 Dev Runtime 的頁面注入：DEV banner（醒目、不可誤認正式）+ seq 輪詢自動刷新；
-// 載入失敗時整頁換錯誤頁（保 Framework、不自動切回 Installed 冒充成功）
-// ============================================================
-const devInjection = (pkgId, seq) => `
-<div style="position:fixed;top:0;left:0;right:0;z-index:99999;background:#b45309;color:#fff;
-  font:600 13px/1.6 system-ui;padding:4px 12px;text-align:center">
-  DEV WORKSPACE — Not Installed Release — Not eligible for release verification
-</div>
-<script>(function(){var last=${seq};setInterval(function(){
-  fetch('/api/dev/packages/${pkgId}/events').then(function(r){return r.json();}).then(function(d){
-    if(d.seq!==last||d.status!=='loaded')location.reload();
-  }).catch(function(){});},1500);})();</script>`;
-
 function serveDevHtml(res, webRoot, rel, pkgId) {
   const file = path.join(webRoot, path.normalize(rel));
   if (!file.startsWith(webRoot + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
@@ -347,6 +334,7 @@ function serveDevErrorPage(res, pkgId, ev) {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(`<!doctype html><meta charset="utf-8"><title>DEV failed — ${pkgId}</title>
 <body style="font:14px/1.7 system-ui;background:#1c1917;color:#e7e5e4;padding:2rem;max-width:52rem;margin:auto">
+${devMarkerHtml()}
 <div style="background:#b45309;color:#fff;font-weight:600;padding:6px 12px;border-radius:6px">
 DEV WORKSPACE — 載入失敗（Framework 本體正常）</div>
 <h2 style="color:#fca5a5">${pkgId}</h2>

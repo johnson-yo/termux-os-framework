@@ -1,6 +1,6 @@
 # System module contract
 
-System modules own Framework authentication, browser sessions, CSRF, administration, jobs, access reporting, observations, Package control and Package Setting state, the public Package Registry client, and Framework updates. Package Setting state is private persistent metadata: it may change Package port assignments/visibility and enablement without changing an immutable Release.
+System modules own Framework authentication, browser sessions, CSRF, administration, jobs, access reporting, observations, Package control and Package Setting state, the public Package Registry client, Framework updates, and the Core-owned Dev viewport marker. Package Setting state is private persistent metadata: it may change Package port assignments/visibility and enablement without changing an immutable Release. Dev marker output is injected only for watched Dev HTML and never for an Installed Release.
 
 Child Node processes must use the shared runtime resolver. On Android Termux,
 `process.execPath` can be the platform linker rather than the `PREFIX/bin/node`
