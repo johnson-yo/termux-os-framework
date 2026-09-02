@@ -1,7 +1,8 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
  * [INPUT]: Package state declarations, writer values, and Stage service liveness.
- * [OUTPUT]: registerState/setState/getState/listStates/unregisterPackageStates for the state bus.
+ * [OUTPUT]: registerState/setState/getState/listStates/unregisterPackageStates for the state bus,
+ *           plus a change observer for Core-owned lifecycle reconciliation.
  * [POS]: src/state/registry.mjs — the third Core mechanism beside Action and Feed. A Capability
  *        answers "who can provide this ability"; a state answers "what is the fact right now", so a
  *        state has exactly one writer and no binding. Values live in memory only.
@@ -23,6 +24,24 @@ const MAX_VALUE_BYTES = 1024;
 
 const states = new Map();
 let sequence = 0;
+let changeObserver = null;
+
+/**
+ * Core may subscribe to actual fact changes without making the state bus own any lifecycle policy.
+ * The observer is deliberately one-way and best-effort: a broken observer must never reject a
+ * valid state write. Consumers that need durable/high-rate history still belong on a Feed.
+ */
+export function setStateChangeHandler(fn) {
+  changeObserver = typeof fn === 'function' ? fn : null;
+}
+
+function notifyChange(event) {
+  if (!changeObserver) return;
+  try {
+    const result = changeObserver(event);
+    if (result && typeof result.catch === 'function') result.catch(() => {});
+  } catch { /* Observability must not become a second writer failure mode. */ }
+}
 
 const fail = (code, detail) => {
   const error = new Error(detail);
@@ -105,9 +124,16 @@ export function setState(name, value, { package: writer = null } = {}) {
   if (writer && entry.package && writer !== entry.package) {
     throw fail('not_owner', `state "${name}" is written by ${entry.package}, not ${writer}`);
   }
+  const previous = entry.value;
   entry.value = validate(entry, value);
   entry.seq = ++sequence;
   entry.updated_at_ms = Date.now();
+  if (!Object.is(previous, entry.value)) {
+    notifyChange({
+      kind: 'state_changed', name: entry.name, package: entry.package,
+      previous, value: entry.value, sequence: entry.seq,
+    });
+  }
   return { ...entry };
 }
 
@@ -171,6 +197,7 @@ export function unregisterPackageStates(packageId) {
   for (const [name, entry] of states) {
     if (entry.package === packageId) { states.delete(name); removed.push(name); }
   }
+  if (removed.length) notifyChange({ kind: 'package_states_removed', package: packageId, names: removed });
   return removed;
 }
 
@@ -196,6 +223,11 @@ if (process.argv.includes('--state-self-test') && process.argv[1]
   t('a written state is live and carries a sequence', (await getState('speech.stage')).live === true
     && (await getState('speech.stage')).value === 'kws'
     && (await getState('speech.stage')).seq > 0);
+  const changes = [];
+  setStateChangeHandler((event) => changes.push(event));
+  setState('speech.stage', 'vad', { package: 'p1' });
+  t('a changed fact emits one lifecycle observation', changes.length === 1
+    && changes[0].name === 'speech.stage' && changes[0].previous === 'kws' && changes[0].value === 'vad');
   t('an out-of-domain enum value is refused',
     threw(() => setState('speech.stage', 'listening', { package: 'p1' }), 'invalid_value'));
   t('a foreign writer is refused',
@@ -214,5 +246,6 @@ if (process.argv.includes('--state-self-test') && process.argv[1]
   t('bad names are refused', threw(() => registerState({ name: 'Speech.Stage', package: 'p1' }), 'invalid_name'));
   t('unloading a package removes its facts',
     unregisterPackageStates('p1').length === 3 && stateNames().length === 0);
+  setStateChangeHandler(null);
   process.exit(fails ? 1 : 0);
 }

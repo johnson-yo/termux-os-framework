@@ -1,7 +1,8 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
  * [INPUT]: Runtime inputs documented by this file, its public API, and adjacent documentation.
- * [OUTPUT]: Package lifecycle registries, HTTP route dispatch, and authenticated WebSocket route dispatch.
+ * [OUTPUT]: Package lifecycle registries, HTTP route dispatch, authenticated WebSocket route dispatch,
+ * bounded byte-level observation for an active asset fetch, and Package lifecycle change events.
  * [POS]: src/packages/loader.mjs in termux-os-framework.
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
@@ -43,6 +44,20 @@ const websocketRoutes = new Map(); // packageId → [{ path, handler }]
 // 029 §12：Integration Contract / Artifact 只讀契約——皆來自 Manifest 宣告（載入時登記，卸載時回收）
 const integrationProvides = new Map(); // capabilityId → packageId
 const artifactContracts = new Map();   // artifactId → { ...descriptor, package }
+let packageStateChangeHandler = null;
+
+/** Core installs the lifecycle consumer; the loader remains independent of Stage policy. */
+export function setPackageStateChangeHandler(fn) {
+  packageStateChangeHandler = typeof fn === 'function' ? fn : null;
+}
+
+function notifyPackageStateChange(event) {
+  if (!packageStateChangeHandler) return;
+  try {
+    const result = packageStateChangeHandler(event);
+    if (result && typeof result.catch === 'function') result.catch(() => {});
+  } catch { /* A lifecycle observer must not turn a Package load into a Core failure. */ }
+}
 
 // ============================================================
 // Runtime Contract 就緒（023 §10）
@@ -139,15 +154,116 @@ export const getPackageWebRoot = (id) => {
  * 点下去，两个下载写同一个 `.part`。落盘的字节数看起来一直在涨，校验却必然失败。
  * 谁在取这件事必须由知道它的一方说出来。
  */
-const fetchingAssets = new Map(); // assetId → started_at
+const fetchingAssets = new Map(); // assetId → { started_at, last_progress_at, controller, done }
+// 只保留很小的、最近的终态；页面刷新后仍能读到最后一次真实结果，且不会变成历史任务数据库。
+const fetchProgresses = new Map(); // assetId → progress snapshot
+const FETCH_PROGRESS_TTL_MS = 60_000;
+const FETCH_PROGRESS_MAX = 32;
 
-export const assetFetchInFlight = (assetId) => fetchingAssets.get(assetId) ?? null;
+export const assetFetchInFlight = (assetId) => fetchingAssets.get(assetId)?.started_at ?? null;
+
+function pruneFetchProgresses(now = Date.now()) {
+  for (const [id, value] of fetchProgresses) {
+    if (!value.active && value.finished_at && now - Date.parse(value.finished_at) > FETCH_PROGRESS_TTL_MS) {
+      fetchProgresses.delete(id);
+    }
+  }
+  while (fetchProgresses.size > FETCH_PROGRESS_MAX) {
+    const first = fetchProgresses.keys().next().value;
+    if (first === undefined) break;
+    fetchProgresses.delete(first);
+  }
+}
+
+function beginFetchProgress(assetId) {
+  pruneFetchProgresses();
+  const now = new Date().toISOString();
+  const state = {
+    schema: 'termux-os.asset-fetch-progress.v1',
+    asset_id: assetId,
+    active: true,
+    started_at: now,
+    updated_at: now,
+    finished_at: null,
+    stage: 'start',
+    current_file: null,
+    bytes_done: 0,
+    bytes_total: 0,
+    progress: 0,
+    error: null,
+    files: {},
+  };
+  fetchProgresses.set(assetId, state);
+  return state;
+}
+
+function observeFetchProgress(assetId, event) {
+  const state = fetchProgresses.get(assetId);
+  if (!state || !event || typeof event !== 'object') return null;
+  const file = String(event.file ?? '');
+  if (file) {
+    const previous = state.files[file] ?? { bytes_done: 0, bytes_total: null, stage: null };
+    const total = Number.isFinite(Number(event.total)) ? Number(event.total) : previous.bytes_total;
+    const rawDone = event.stage === 'reused' && total !== null
+      ? total
+      : (Number.isFinite(Number(event.bytes)) ? Number(event.bytes) : previous.bytes_done);
+    const boundedDone = total === null ? Math.max(previous.bytes_done, rawDone) : Math.min(total, rawDone);
+    state.files[file] = {
+      bytes_done: Math.max(previous.bytes_done, boundedDone),
+      bytes_total: total,
+      stage: event.stage ?? previous.stage,
+    };
+  }
+  const values = Object.values(state.files);
+  state.bytes_done = values.reduce((sum, item) => sum + Number(item.bytes_done || 0), 0);
+  const totals = values.map((item) => item.bytes_total).filter((value) => Number.isFinite(value));
+  state.bytes_total = totals.length === values.length ? totals.reduce((sum, value) => sum + value, 0) : null;
+  if (state.bytes_total > 0) {
+    const next = Math.min(100, Math.floor((state.bytes_done / state.bytes_total) * 100));
+    // The first small file can finish before a later large file announces its
+    // total.  Progress is an aggregate over the known files, not a terminal
+    // latch: keeping the earlier 100 here would make a multi-file fetch report
+    // complete while its largest file is still only starting.
+    state.progress = next;
+  }
+  state.stage = event.stage ?? state.stage;
+  state.current_file = file || state.current_file;
+  state.updated_at = new Date().toISOString();
+  const active = fetchingAssets.get(assetId);
+  if (active) active.last_progress_at = state.updated_at;
+  return state;
+}
+
+export function assetFetchProgress(assetId) {
+  pruneFetchProgresses();
+  const state = fetchProgresses.get(assetId);
+  if (!state) return null;
+  return JSON.parse(JSON.stringify(state));
+}
+
+function finishFetchProgress(assetId, result, error = null) {
+  const state = fetchProgresses.get(assetId);
+  if (!state) return;
+  if (result?.ok) {
+    state.stage = 'done';
+    state.progress = 100;
+    if (state.bytes_total > 0) state.bytes_done = state.bytes_total;
+    state.error = null;
+  } else {
+    state.error = error ?? result?.error ?? 'fetch_failed';
+  }
+  state.active = false;
+  state.finished_at = new Date().toISOString();
+  state.updated_at = state.finished_at;
+  pruneFetchProgresses();
+}
 
 export async function fetchAssetOnDemand(assetId, {
   onProgress = () => {},
   // 沒給就用載入時記下的那一個；⛔ 不預設一個公網地址——Catalog 地址是部署決定，
   // 在這裡編一個出來會讓「它到底去哪裡取」變成一個要讀源碼才知道的問題。
   registryBase = loadedRegistryBase,
+  allowRequired = false,
   ...rest
 } = {}) {
   const provider = getAssetProvider(assetId);
@@ -161,16 +277,33 @@ export async function fetchAssetOnDemand(assetId, {
   }
   if (fetchingAssets.has(assetId)) {
     return { ok: false, error: 'already_fetching', detail: `${assetId} is already being fetched`,
-      started_at: fetchingAssets.get(assetId) };
+      started_at: fetchingAssets.get(assetId)?.started_at ?? null };
   }
   const packageTarget = manifestTargets(manifest)[0]?.id ?? TARGET_GENERIC;
-  fetchingAssets.set(assetId, new Date().toISOString());
+  const startedAt = new Date().toISOString();
+  const controller = new AbortController();
+  let settle;
+  const done = new Promise((resolve) => { settle = resolve; });
+  const active = {
+    started_at: startedAt,
+    last_progress_at: startedAt,
+    controller,
+    done,
+  };
+  fetchingAssets.set(assetId, active);
+  beginFetchProgress(assetId);
+  const report = (event) => {
+    const observed = observeFetchProgress(assetId, event);
+    onProgress({ ...event, ...(observed ?? {}) });
+  };
   try {
-    return await fetchOptionalAsset(assetId, {
+    const result = await fetchOptionalAsset(assetId, {
     ...rest,
     packageManifest: manifest,
-    onProgress,
+    onProgress: report,
     registryBase,
+    allowRequired,
+    signal: controller.signal,
     storeDirFor: (declared) => path.join(
       assetVersionDir(manifest.id, manifest.version, declared.target?.id ?? packageTarget),
       path.basename(declared.payload),
@@ -187,9 +320,67 @@ export async function fetchAssetOnDemand(assetId, {
       fetched_on_demand: true,
     }),
     });
+    finishFetchProgress(assetId, result);
+    return result;
+  } catch (error) {
+    finishFetchProgress(assetId, null, String(error?.message ?? error));
+    throw error;
   } finally {
-    fetchingAssets.delete(assetId);
+    if (fetchingAssets.get(assetId) === active) fetchingAssets.delete(assetId);
+    settle();
   }
+}
+
+/**
+ * Reconcile the one in-memory worker that owns an asset fetch.
+ *
+ * A caller may only abort a worker that has stopped producing progress for the
+ * requested stale window. A recent worker remains authoritative and is never
+ * replaced by a second download. The identity check in the finally block
+ * prevents an old worker from deleting a newer retry's lock.
+ */
+export async function reconcileAssetFetch(assetId, { staleAfterMs = 120_000 } = {}) {
+  const active = fetchingAssets.get(assetId);
+  if (!active) {
+    const progress = fetchProgresses.get(assetId);
+    const orphaned = progress?.active === true;
+    if (orphaned) {
+      progress.active = false;
+      progress.stage = 'reconciled';
+      progress.error = 'orphaned_fetch_reconciled';
+      progress.finished_at = new Date().toISOString();
+      progress.updated_at = progress.finished_at;
+    }
+    return { ok: true, active: false, reconciled: orphaned, reason: 'no_active_worker' };
+  }
+  const now = Date.now();
+  const last = Date.parse(active.last_progress_at ?? active.started_at);
+  const ageMs = Number.isFinite(last) ? Math.max(0, now - last) : null;
+  if (ageMs === null || ageMs < Math.max(0, Number(staleAfterMs) || 0)) {
+    return {
+      ok: false, active: true, reconciled: false, error: 'fetch_active',
+      started_at: active.started_at, last_progress_at: active.last_progress_at, age_ms: ageMs,
+    };
+  }
+  active.controller.abort(new Error('stale asset fetch reconciled'));
+  await Promise.race([
+    active.done,
+    new Promise((resolve) => setTimeout(resolve, 10_000)),
+  ]);
+  const stillActive = fetchingAssets.get(assetId) === active;
+  return {
+    ok: !stillActive, active: stillActive, reconciled: !stillActive,
+    error: stillActive ? 'reconcile_pending' : null,
+    started_at: active.started_at, last_progress_at: active.last_progress_at, age_ms: ageMs,
+  };
+}
+
+/**
+ * 逻辑模型删除后的恢复专用入口。必需资产只有在带有逻辑模型坐标的受限路由中
+ * 才能走这里；普通 Package context.assets.fetch 仍然只能取 optional 资产。
+ */
+export async function restoreAssetOnDemand(assetId, opts = {}) {
+  return fetchAssetOnDemand(assetId, { ...opts, allowRequired: true });
 }
 
 /** 這台機器該用哪一份載荷宣告——狀態頁與 CLI 用來說明「有幾檔、你是哪一檔」。 */
@@ -205,6 +396,7 @@ export function describeAssetVariants(assetId, profile = deviceProfile()) {
     selected: picked.ok ? (picked.declaration.target?.id ?? TARGET_GENERIC) : null,
     // 正在取吗。⚠ 页面刷新后客户端不记得自己点过，只有这一侧说得出。
     fetching: assetFetchInFlight(assetId),
+    progress: assetFetchProgress(assetId),
     reason: picked.ok ? null : picked.error,
     detail: picked.ok ? null : picked.detail,
   };
@@ -262,6 +454,7 @@ export async function unregisterPackage(id) {
   websocketRoutes.delete(id);
   packages.delete(id);
   if (cleanupErrors.length) r.cleanup_errors = cleanupErrors;
+  notifyPackageStateChange({ kind: 'package_unregistered', package_id: id, status: r.status });
   return r;
 }
 
@@ -269,7 +462,9 @@ export async function unregisterPackage(id) {
 export async function loadSinglePackage({ dir, expectId, source, install = null,
   contextOverrides = null, cacheBust = false }, opts) {
   await loadCandidate({ dir, expectId, source, install, contextOverrides, cacheBust }, opts);
-  return packages.get(expectId) ?? null;
+  const record = packages.get(expectId) ?? null;
+  notifyPackageStateChange({ kind: 'package_loaded', package_id: expectId, status: record?.status ?? 'absent' });
+  return record;
 }
 
 // ============================================================
@@ -391,7 +586,11 @@ function makeContext(record, config, configPath, overrides = null, saveConfig = 
       resolve: (assetId, opts) => resolveAssetById(assetId, opts),
       describe: (assetId, opts) => describeAssetById(assetId, opts),
       list: (opts) => listAssets(opts),
-      fetch: (assetId, opts) => fetchAssetOnDemand(assetId, opts),
+      // 不把逻辑模型恢复的 allowRequired 口子暴露给 Package；恢复只能走 Framework
+      // 的受限 HTTP 路由，并由上层先完成停用。
+      fetch: (assetId, opts = {}) => fetchAssetOnDemand(assetId, {
+        onProgress: opts.onProgress,
+      }),
     },
     // 狀態總線（第三種機制）。Capability 回答「誰能提供這個能力」，可多家競標由綁定裁決；
     // state 回答「這件事此刻的事實是什麼」，只能有一個知情者，所以沒有綁定也不許重名。
@@ -681,7 +880,11 @@ export async function loadPackages({ roots, frameworkVersion, config = {}, confi
     if (process.env.PACKAGES_EXTRA_DIR) candidates.push(...scanRawRoot(process.env.PACKAGES_EXTRA_DIR, 'extra'));
   }
 
-  for (const c of candidates) await loadCandidate(c, opts);
+  for (const c of candidates) {
+    await loadCandidate(c, opts);
+    const record = packages.get(c.expectId) ?? null;
+    notifyPackageStateChange({ kind: 'package_loaded', package_id: c.expectId, status: record?.status ?? 'absent' });
+  }
   // Keep assignments for an explicitly disabled Package so re-enabling it does
   // not silently change its configured port. Broken/uninstalled Packages are
   // still pruned from the private registry.

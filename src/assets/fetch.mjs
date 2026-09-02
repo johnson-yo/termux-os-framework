@@ -57,6 +57,7 @@ export async function fetchAssetFiles(files, destDir, {
   registryBase = '',
   onProgress = () => {},
   headers = {},
+  signal = undefined,
 } = {}) {
   fs.mkdirSync(destDir, { recursive: true });
   const landed = [];
@@ -71,7 +72,7 @@ export async function fetchAssetFiles(files, destDir, {
     const url = assetFileUrl(file, { via, registryBase });
     onProgress({ file: file.path, stage: 'start', bytes: 0, total: file.size, url });
 
-    const response = await fetchImpl(url, { headers, redirect: 'follow' });
+    const response = await fetchImpl(url, { headers, redirect: 'follow', signal });
     if (!response.ok || !response.body) {
       throw new Error(`asset file ${file.path}: HTTP ${response.status} from ${file.repo}`);
     }
@@ -80,6 +81,7 @@ export async function fetchAssetFiles(files, destDir, {
     const handle = fs.openSync(temporary, 'w', 0o600);
     try {
       for await (const chunk of response.body) {
+        signal?.throwIfAborted?.();
         const buffer = Buffer.from(chunk);
         hash.update(buffer);
         fs.writeSync(handle, buffer);
@@ -87,6 +89,11 @@ export async function fetchAssetFiles(files, destDir, {
         onProgress({ file: file.path, stage: 'progress', bytes: written, total: file.size });
       }
       fs.fsyncSync(handle);
+    } catch (error) {
+      // A transport error or an explicit reconcile must never leave a .part
+      // file that a later retry could mistake for progress.
+      fs.rmSync(temporary, { force: true });
+      throw error;
     } finally { fs.closeSync(handle); }
 
     const digest = hash.digest('hex');
@@ -203,6 +210,30 @@ if (process.argv.includes('--self-test')
   t('a truncated download is refused', /got 5 bytes, declared 17/.test(String(error?.message)));
   t('a refused download leaves nothing behind, not even a .part',
     !fs.existsSync(path.join(dest2, 'm.bin')) && !fs.existsSync(path.join(dest2, 'm.bin.part')));
+
+  // A stream can fail after writing bytes, which is the failure shape that
+  // used to leave the logical fetch locked until the process was restarted.
+  const destStreamFailure = path.join(tmp, 'stream-failure');
+  error = null;
+  try {
+    await fetchAssetFiles([file], destStreamFailure, {
+      fetchImpl: async () => ({
+        ok: true, status: 200,
+        body: (async function* broken() {
+          yield body.subarray(0, 5);
+          throw new Error('controlled stream failure');
+        }()),
+      }),
+    });
+  } catch (e) { error = e; }
+  t('a stream failure is surfaced and removes its .part',
+    /controlled stream failure/.test(String(error?.message))
+      && !fs.existsSync(path.join(destStreamFailure, 'm.bin.part')));
+  landed = await fetchAssetFiles([file], destStreamFailure, {
+    fetchImpl: async () => streamOf(body),
+  });
+  t('the same asset can be retried after a stream failure',
+    landed[0].reused === false && fs.readFileSync(path.join(destStreamFailure, 'm.bin')).equals(body));
 
   // 长度对但内容不对：只比大小的实现会放它过去。
   const wrong = Buffer.from('HELLO ASSET WORLD');

@@ -65,8 +65,12 @@ export const resolveAsset = (id, opts = {}) => resolveFromRegistry(id, opts);
  * ⭐ 坐標全部來自宣告它的那個 Package 的 Manifest——調用方只給一個 id，不給 URL。
  * 讓調用方傳路徑會讓「這台機器上的這個資產到底是什麼」變成一個沒人答得出的問題。
  *
- * ⛔ 只有 `optional: true` 的資產走這條路。必需資產在安裝時就該到位；
- * 允許事後補取會讓「裝好了」這個狀態失去意義。
+ * ⛔ 默认只有 `optional: true` 的資產走這條路。必需資產在安裝時就該到位；
+ * 允許一般调用方事後補取會讓「裝好了」這個狀態失去意義。
+ *
+ * `allowRequired` 只由 Framework 的「逻辑模型恢复」受限入口传入。它不是
+ * Package context 的通用开关：恢复前必须由上层完成停用，并携带逻辑模型语义，
+ * 让“删掉后恢复”与“任意包偷偷补齐必需资产”保持可区分。
  */
 export async function fetchOptionalAsset(id, {
   packageManifest,
@@ -76,7 +80,9 @@ export async function fetchOptionalAsset(id, {
   via = 'registry',
   registryBase = '',
   onProgress = () => {},
+  allowRequired = false,
   fetchImpl = fetch,
+  signal = undefined,
 } = {}) {
   /**
    * ⭐ 先挑硬件檔位，再談取不取。同一個 id 可以有 V73/V79 兩份宣告，而這台機器只有一份能用。
@@ -86,7 +92,7 @@ export async function fetchOptionalAsset(id, {
   const picked = selectAssetDeclaration(packageManifest, id, profile ?? deviceProfile());
   if (!picked.ok) return { ok: false, error: picked.error, detail: picked.detail, candidates: picked.candidates };
   const declared = picked.declaration;
-  if (declared.optional !== true) {
+  if (declared.optional !== true && !allowRequired) {
     return { ok: false, error: 'not_optional', detail: `${id} is installed with its package, not fetched on demand` };
   }
   const files = declared.source?.files ?? [];
@@ -113,7 +119,7 @@ export async function fetchOptionalAsset(id, {
   if (!space.ok) {
     return { ok: false, error: 'insufficient_space', need_bytes: need, free_bytes: space.free_bytes };
   }
-  await fetchAssetFiles(files, destDir, { via, registryBase, onProgress, fetchImpl });
+  await fetchAssetFiles(files, destDir, { via, registryBase, onProgress, fetchImpl, signal });
   const entry = activate(declared, destDir, Object.fromEntries(files.map((f) => [f.path, f.sha256])));
   return { ok: true, id, path: destDir, bytes: need, entry };
 }

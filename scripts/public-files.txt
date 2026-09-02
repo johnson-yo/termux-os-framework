@@ -39,6 +39,8 @@ scripts/export-public-tree.mjs
 scripts/extract-ui-strings.mjs
 scripts/framework-update-job.mjs
 scripts/framework.sh
+scripts/termux-os-bootstrap.sh
+scripts/test-termux-os-bootstrap.sh
 scripts/hooks/commit-msg
 scripts/install.sh
 scripts/installer-lib.sh

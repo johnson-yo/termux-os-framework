@@ -23,15 +23,16 @@ import {
 import {
   loadPackages, loadSinglePackage, unregisterPackage, _getRecord,
   listPackages, getPackage, getPackageWebRoot, dispatchPackageRoute, dispatchPackageWebSocket, listArtifactContracts,
-  fetchAssetOnDemand, describeAssetVariants,
+  fetchAssetOnDemand, restoreAssetOnDemand, assetFetchProgress, reconcileAssetFetch, describeAssetVariants,
+  setPackageStateChangeHandler,
 } from './packages/loader.mjs';
 import { resolveInstalledPackages } from './packages/installed-root.mjs';
 import { deviceProfile } from './packages/runtime-contract.mjs';
 import {
   initDevRuntime, devWatchStart, devWatchStop, devReload, devStatus, listDevWatchers, isDevWatched, devEvents,
 } from './packages/dev-runtime.mjs';
-import { listCapabilities, describeCapability, setCapabilityBinding, invokeCapability } from './capabilities/resolver.mjs';
-import { getState, listStates, setState } from './state/registry.mjs';
+import { listCapabilities, describeCapability, setCapabilityBinding, invokeCapability, setCapabilityStateChangeHandler } from './capabilities/resolver.mjs';
+import { getState, listStates, setState, setStateChangeHandler } from './state/registry.mjs';
 import { listAppsWithState, getAppState, prepareApp } from './apps/coordinator.mjs';
 import { collectMetrics } from './system/metrics.mjs';
 import { accessInfo } from './system/access.mjs';
@@ -492,6 +493,14 @@ initDevRuntime({ frameworkRoot: ROOT, frameworkVersion: FRAMEWORK_VERSION, confi
  * 這裡是唯一知道兩邊都已就緒的地方。
  */
 stage.setServiceStartGate((def) => serviceDependencyGate(def, { log: console.log }));
+const requestReconcile = (event) => {
+  const kind = String(event?.kind ?? 'state_change');
+  const subject = event?.name ?? event?.package_id ?? event?.capability ?? event?.service ?? '';
+  return stage.requestDesiredReconcile(subject ? `${kind}:${subject}` : kind);
+};
+setStateChangeHandler(requestReconcile);
+setPackageStateChangeHandler(requestReconcile);
+setCapabilityStateChangeHandler(requestReconcile);
 await loadPackages({ frameworkVersion: FRAMEWORK_VERSION, config: CFG, configPath: CONFIG_PATH, saveConfig: persistConfiguration, registryBase: PACKAGE_REGISTRY_URL });
 
 // 025 §8：Session 只操作 Stage 管的 framework 自有 Service（§8.4 邊界：不碰 Android/Termux/APK/Core）
@@ -521,7 +530,7 @@ const reconciled = stage.reconcileRuntimeState();
 if (reconciled.adopted.length || reconciled.cleared.length) {
   console.log(`stage reconcile: adopted=${JSON.stringify(reconciled.adopted)} cleared=${JSON.stringify(reconciled.cleared)}`);
 }
-// restore 必須在 reconcile 之後：收編倖存進程 → 只補啟 desired=running 且未運行者（020 §12.3）
+// restore 必須在 reconcile 之後：收編倖存進程 → 與 runtime event 使用同一個 desired reconcile（020 §12.3）
 const restored = await stage.restoreDesiredServices();
 if (restored.length) console.log(`stage restore: ${JSON.stringify(restored.map((r) => ({ id: r.id, ok: r.ok })))}`);
 
@@ -1762,12 +1771,52 @@ const server = http.createServer(async (req, res) => {
    * 安裝／激活／卸載仍然只歸 Installer CLI。
    *
    * 唯一的例外是 `POST /api/assets/<id>/fetch`：**可選**資產的按需取得。
+   * 逻辑模型删除后的恢复走另外一条受限 `POST /restore`，并且只能携带逻辑模型坐标；
+   * 它不是普通资产 API 的“强制下载”开关。
    * 它不是「另一種安裝」——安裝時就該到位的東西不走這裡（`not_optional` 直接拒），
    * 它服務的是「裝完之後才做的選擇」：使用者到了要開始聽寫的那一刻才知道自己要哪一檔
    * ASR，而把三檔都在安裝時下載是 1.8 GB，其中一半永遠用不到。
    */
   if (url === '/api/assets' || url.startsWith('/api/assets/')) {
     if (!authed(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
+    const restoreAsset = url.match(/^\/api\/assets\/(.+)\/restore$/);
+    if (restoreAsset && req.method === 'POST') {
+      if (!authed(req, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });
+      const assetId = decodeURIComponent(restoreAsset[1]);
+      const logicalModelId = parsed.searchParams.get('logical_model_id') ?? '';
+      const deactivated = parsed.searchParams.get('deactivated') === '1';
+      if (!/^model\.[a-z0-9._-]+$/i.test(logicalModelId) || !deactivated) {
+        return json(res, 400, {
+          ok: false,
+          error: 'logical_restore_confirmation_required',
+          detail: 'restore requires logical_model_id=model.* and deactivated=1',
+        });
+      }
+      const r = await restoreAssetOnDemand(assetId).catch((error) => ({
+        ok: false, error: 'restore_failed', detail: String(error?.message ?? error),
+      }));
+      const status = r.ok ? 200
+        : r.error === 'already_fetching' ? 409
+          : r.error === 'unknown_asset' || r.error === 'provider_not_loaded' ? 404
+            : r.error === 'insufficient_space' ? 507
+              : String(r.error).startsWith('target_mismatch') ? 409 : 502;
+      return json(res, status, { ...r, logical_model_id: logicalModelId, restored: r.ok });
+    }
+    const fetchProgress = url.match(/^\/api\/assets\/(.+)\/fetch\/progress$/);
+    if (fetchProgress && req.method === 'GET') {
+      const assetId = decodeURIComponent(fetchProgress[1]);
+      return json(res, 200, { ok: true, asset_id: assetId, progress: assetFetchProgress(assetId) });
+    }
+    const fetchReconcile = url.match(/^\/api\/assets\/(.+)\/fetch\/reconcile$/);
+    if (fetchReconcile && req.method === 'POST') {
+      if (!authed(req, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });
+      const assetId = decodeURIComponent(fetchReconcile[1]);
+      const requested = Number(parsed.searchParams.get('stale_after_ms'));
+      const staleAfterMs = Number.isFinite(requested)
+        ? Math.max(0, Math.min(30 * 60_000, requested)) : 120_000;
+      const r = await reconcileAssetFetch(assetId, { staleAfterMs });
+      return json(res, r.ok ? 200 : 409, { ...r, asset_id: assetId, stale_after_ms: staleAfterMs });
+    }
     const fetchAsset = url.match(/^\/api\/assets\/(.+)\/fetch$/);
     if (fetchAsset && req.method === 'POST') {
       // ⚠ 取一个资产会写几百 MB 到共享 store，那不是读操作。
@@ -1841,6 +1890,51 @@ const server = http.createServer(async (req, res) => {
         }
         return json(res, 502, { ok: false, error: 'provider_install_failed', detail: String(error?.message ?? error) });
       }
+    }
+
+    /**
+     * 逻辑模型删除后的精确清理。它接受包随附的必需 payload，但必须同时给出
+     * 逻辑模型坐标和“上层已停用”的事实；普通 `/payload` 仍严格拒绝非按需载荷。
+     * 这条路不删除 Package 声明、不删除模型记录，只摘掉这一份已验证载荷登记和目录。
+     */
+    const dropLogicalPayload = url.match(/^\/api\/assets\/(.+)\/payload\/logical-model$/);
+    if (dropLogicalPayload && req.method === 'DELETE') {
+      if (!authed(req, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });
+      const assetId = decodeURIComponent(dropLogicalPayload[1]);
+      const logicalModelId = parsed.searchParams.get('logical_model_id') ?? '';
+      const deactivated = parsed.searchParams.get('deactivated') === '1';
+      if (!/^model\.[a-z0-9._-]+$/i.test(logicalModelId) || !deactivated) {
+        return json(res, 400, {
+          ok: false,
+          error: 'logical_delete_confirmation_required',
+          detail: 'logical delete requires logical_model_id=model.* and deactivated=1',
+        });
+      }
+      const entry = readAssetRegistry().assets?.[assetId];
+      if (!entry) return json(res, 404, { ok: false, error: 'unknown_asset' });
+      // The registry entry is the inventory authority for this destructive,
+      // logical-model-confirmed operation. Provider registration is runtime
+      // state: a package may be unloaded while its verified payload remains
+      // installed. Generic `/payload` deletion keeps its fetched-on-demand
+      // guard; this route is the explicit deactivation boundary.
+      // Registry 先摘下，避免在删除目录后仍把一个空路径说成 ready；失败时如实返回。
+      deactivateAsset(assetId);
+      let removed = 0;
+      try {
+        if (entry.path && fs.existsSync(entry.path)) {
+          removed = fs.readdirSync(entry.path).length;
+          fs.rmSync(entry.path, { recursive: true, force: true });
+        }
+      } catch (error) {
+        return json(res, 500, {
+          ok: false, error: 'payload_delete_failed', logical_model_id: logicalModelId,
+          registry_deactivated: true, detail: String(error?.message ?? error), path: entry.path ?? null,
+        });
+      }
+      return json(res, 200, {
+        ok: true, id: assetId, logical_model_id: logicalModelId, removed_files: removed,
+        path: entry.path ?? null, registry_deactivated: true,
+      });
     }
 
     const dropAsset = url.match(/^\/api\/assets\/(.+)\/payload$/);

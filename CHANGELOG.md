@@ -2,6 +2,21 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.1
+
+- Core now reconciles desired Stage state from state-bus and capability-readiness
+  events instead of waiting for the next external request. The state bus and the
+  capability resolver expose one-way, best-effort observers; a broken observer can
+  never reject a write or block a lifecycle decision.
+- Package loader reports lifecycle changes to Core through an installed consumer,
+  so the loader stays independent of Stage policy.
+- Add `scripts/termux-os-bootstrap.sh`: the single boot bridge a Termux `.bashrc`
+  invokes. One bounded, idempotent recovery run - SSHD and Framework first, then a
+  bounded ADB recovery that rediscovers adbd's TLS port by sweeping the kernel
+  ephemeral range - appended to a per-boot log with the newest two kept.
+- Asset fetch gains bounded byte-level observation of an in-flight download, so a
+  stalled transfer is distinguishable from a slow one.
+
 ## 0.2.39
 
 - Replace the intrusive Dev Runtime banner with a Framework-owned, non-interactive

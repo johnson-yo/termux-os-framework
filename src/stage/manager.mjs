@@ -86,16 +86,10 @@ export function setServiceDesiredState(id, desired) {
 
 export const getServiceDesired = (id) => readDesiredState().services?.[id]?.desired ?? 'stopped';
 
-// Framework 啟動時恢復：必須在 reconcileRuntimeState 之後調用，否則 crash 後會啟第二份
+// Framework 啟動時恢復：必須在 reconcileRuntimeState 之後調用，否則 crash 後會啟第二份。
+// Startup and later dependency/provider events intentionally share the same pass and guard.
 export async function restoreDesiredServices() {
-  const restored = [];
-  for (const s of services) {
-    if (getServiceDesired(s.id) !== 'running') continue;
-    const status = await getServiceStatus(s.id);
-    if (status.process.state === 'running') continue; // 已被 reconcile 收編
-    restored.push({ id: s.id, ...(await startService(s.id)) });
-  }
-  return restored;
+  return requestDesiredReconcile('startup_restore');
 }
 
 // ============================================================
@@ -156,8 +150,86 @@ export async function checkServiceHealth(id) {
  */
 let startGate = async () => ({ ok: true, reason: 'no_gate_installed' });
 
+let reconcileLogger = (...args) => console.log(...args);
+let reconcilePromise = null;
+let reconcileDirty = false;
+let reconcileReasons = [];
+
+export function setDesiredReconcileLogger(fn) {
+  reconcileLogger = typeof fn === 'function' ? fn : (...args) => console.log(...args);
+}
+
+const reconcileLog = (line) => {
+  try { reconcileLogger(line); } catch { /* Logging must not affect lifecycle decisions. */ }
+};
+
 export function setServiceStartGate(fn) {
   startGate = typeof fn === 'function' ? fn : (async () => ({ ok: true, reason: 'no_gate_installed' }));
+}
+
+/**
+ * One desired-state pass. A dependency refusal is a normal waiting result: startService keeps the
+ * user's desired=running bit and returns the structured gate facts, while this pass does not invent
+ * a timer or a second supervisor. A later state/package/service event calls requestDesiredReconcile.
+ */
+export async function reconcileDesiredServices({ reason = 'manual' } = {}) {
+  const attempted = [];
+  for (const s of [...services]) {
+    if (getServiceDesired(s.id) !== 'running') continue;
+    const before = await getServiceStatus(s.id);
+    if (before?.process?.state === 'running') continue;
+
+    const result = await startService(s.id);
+    attempted.push({ id: s.id, ...result });
+    if (result.error === 'dependencies_not_ready') {
+      const blocked = (result.blocked ?? []).map((item) => `${item.kind}:${item.id}:${item.state}`).join(',');
+      reconcileLog(`stage reconcile at=${new Date().toISOString()} reason=${reason} service=${s.id} desired=running action=waiting_dependencies blocked=${blocked || 'unknown'}`);
+    } else if (result.ok && result.process?.state === 'running') {
+      reconcileLog(`stage reconcile at=${new Date().toISOString()} reason=${reason} service=${s.id} desired=running dependencies=ready action=start`);
+    } else if (!result.ok) {
+      // A command/config/runtime failure is recorded once for this event. It is not converted into
+      // a self-triggering restart loop; only a later actual state change can request another pass.
+      reconcileLog(`stage reconcile at=${new Date().toISOString()} reason=${reason} service=${s.id} desired=running action=start_failed error=${result.error ?? 'unknown'}`);
+    }
+  }
+  return attempted;
+}
+
+/**
+ * Event-driven reconcile request with a tiny reentrancy guard. A request during a pass marks it
+ * dirty; the same promise then performs one more idempotent pass after the current one finishes.
+ * There is intentionally no timer, queue, interval, or backoff here.
+ */
+export function requestDesiredReconcile(reason = 'state_change') {
+  const label = String(reason || 'state_change');
+  reconcileReasons.push(label);
+  if (reconcileReasons.length > 32) reconcileReasons.splice(0, reconcileReasons.length - 32);
+  reconcileLog(`stage reconcile requested reason=${label}`);
+  if (reconcilePromise) {
+    reconcileDirty = true;
+    return reconcilePromise;
+  }
+
+  reconcilePromise = (async () => {
+    const all = [];
+    do {
+      reconcileDirty = false;
+      const passReason = reconcileReasons.splice(0).join(',') || 'state_change';
+      try {
+        all.push(...await reconcileDesiredServices({ reason: passReason }));
+      } catch (error) {
+        // Keep the Framework alive if a malformed third-party service status throws. The next
+        // explicit dependency/package event can request a fresh pass, but this pass is not retried.
+        reconcileLog(`stage reconcile at=${new Date().toISOString()} reason=${passReason} action=error error=${String(error?.message ?? error)}`);
+      }
+    } while (reconcileDirty || reconcileReasons.length);
+    return all;
+  })().finally(() => {
+    reconcilePromise = null;
+    reconcileDirty = false;
+    reconcileReasons = [];
+  });
+  return reconcilePromise;
 }
 
 // ============================================================
@@ -222,7 +294,11 @@ export async function startService(id) {
   attachExitRecorder(id, child);
   child.unref();
   await sleep(400); // 短暫確認沒有立即退出（立即退出會被 exit recorder 記成 exited）
-  return { ok: true, changed: true, ...(await getServiceStatus(id)) };
+  const result = { ok: true, changed: true, ...(await getServiceStatus(id)) };
+  // A newly running provider can unblock another desired service. Only a confirmed running process
+  // emits this event; spawn errors and later crashes never become an automatic restart supervisor.
+  if (result.process?.state === 'running') requestDesiredReconcile(`service_ready:${id}`);
+  return result;
 }
 
 export async function stopService(id, { preserveDesired = false } = {}) {
@@ -296,6 +372,7 @@ if (process.argv.includes('--self-test')
   let fails = 0;
   const t = (name, cond) => { console.log(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
   const ID = 'stage.hello';
+  setDesiredReconcileLogger(() => {});
   services.push({
     id: ID,
     name: 'Stage self-test fixture',
@@ -370,11 +447,92 @@ if (process.argv.includes('--self-test')
     allowed.ok && allowed.process.state === 'running');
   await stopService(ID);
   clearMeta(ID);
+  setServiceDesiredState(ID, 'running');
+  const startupPass = await restoreDesiredServices();
+  t('startup restore uses the same desired reconcile pass',
+    startupPass.some((item) => item.id === ID && item.ok && item.changed)
+      && (await getServiceStatus(ID)).process.state === 'running');
+  await stopService(ID);
+  clearMeta(ID);
   setServiceStartGate(null);
   t('clearing the gate restores the default open state',
     (await startService(ID)).ok);
   await stopService(ID);
   clearMeta(ID);
+
+  // ---- Desired-state reconcile：dependency refusal is waiting, not a dead end --------
+  let dependencyReady = false;
+  let gateCalls = 0;
+  setServiceStartGate(async () => {
+    gateCalls += 1;
+    return dependencyReady
+      ? { ok: true, reason: 'satisfied' }
+      : { ok: false, error: 'dependencies_not_ready', blocked: [
+        { kind: 'capability', id: 'cap.late', state: 'reachable', blocked_by: 'configured but not reachable' },
+      ] };
+  });
+  setServiceDesiredState(ID, 'running');
+  const waiting = await requestDesiredReconcile('test:dependency_not_ready');
+  const waitingStatus = await getServiceStatus(ID);
+  t('desired running plus unmet dependency remains waiting without a process',
+    waiting.some((item) => item.id === ID && item.error === 'dependencies_not_ready')
+      && getServiceDesired(ID) === 'running' && waitingStatus.process.state === 'stopped');
+
+  dependencyReady = true;
+  const recovered = await requestDesiredReconcile('test:dependency_ready');
+  const recoveredStatus = await getServiceStatus(ID);
+  t('dependency transition reconciles and starts the service',
+    recovered.some((item) => item.id === ID && item.ok && item.changed)
+      && recoveredStatus.process.state === 'running');
+
+  const startedPid = recoveredStatus.process.pid;
+  const beforeDuplicate = gateCalls;
+  const duplicate = await requestDesiredReconcile('test:second_dependency_ready');
+  t('multiple readiness events do not start an already-running service again',
+    gateCalls === beforeDuplicate && duplicate.length === 0
+      && (await getServiceStatus(ID)).process.pid === startedPid);
+
+  await stopService(ID);
+  clearMeta(ID);
+  const stoppedCalls = gateCalls;
+  const stoppedPass = await requestDesiredReconcile('test:desired_stopped');
+  t('desired stopped is never started by a dependency event',
+    getServiceDesired(ID) === 'stopped' && stoppedPass.length === 0 && gateCalls === stoppedCalls);
+
+  // Two requests while the first gate is awaiting the same dependency are coalesced. The second
+  // pass is allowed to observe the now-running process, but it must not invoke the gate twice.
+  let releaseGate;
+  const gateRelease = new Promise((resolve) => { releaseGate = resolve; });
+  gateCalls = 0;
+  setServiceStartGate(async () => {
+    gateCalls += 1;
+    await gateRelease;
+    return { ok: true, reason: 'satisfied' };
+  });
+  setServiceDesiredState(ID, 'running');
+  const coalescedA = requestDesiredReconcile('test:coalesce:a');
+  const coalescedB = requestDesiredReconcile('test:coalesce:b');
+  t('reconcile requests during a pass share one in-flight promise', coalescedA === coalescedB);
+  releaseGate();
+  await Promise.all([coalescedA, coalescedB]);
+  t('coalescing still starts exactly once', gateCalls === 1
+    && (await getServiceStatus(ID)).process.state === 'running');
+
+  await stopService(ID);
+  clearMeta(ID);
+  let failedStarts = 0;
+  setServiceStartGate(async () => {
+    failedStarts += 1;
+    return { ok: false, error: 'start_failed', reason: 'fixture failure' };
+  });
+  setServiceDesiredState(ID, 'running');
+  await requestDesiredReconcile('test:start_failed');
+  await sleep(50);
+  t('a real start failure does not self-retry', failedStarts === 1
+    && (await getServiceStatus(ID)).process.state === 'stopped');
+  await stopService(ID);
+  clearMeta(ID);
+  setServiceStartGate(null);
 
   process.exit(fails ? 1 : 0);
 }

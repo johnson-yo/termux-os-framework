@@ -44,6 +44,14 @@ private Home. The installer generates the local runtime identity and release
 metadata because a raw GitHub source archive does not contain device-specific
 deployment state.
 
+The runtime also contains `scripts/termux-os-bootstrap.sh`. The Android App's
+boot receiver sends a fixed explicit `ACTION_RUN` Intent to Termux; Termux's
+login shell then calls this one Framework-owned bridge from `.bashrc`. The
+bridge uses a private `flock`, verifies loopback ADB before attempting repair,
+ensures SSHD only when port 8022 is absent, and checks Framework's HTTP health
+before considering its controller. It does not start or name individual
+Package Works; Stage remains the sole owner of Work restoration.
+
 ## Upgrade, rollback, and uninstall
 
 ```sh

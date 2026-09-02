@@ -24,6 +24,29 @@ const readBindings = () => {
 };
 
 const providersFor = (capId) => listCapabilityProviders().filter((p) => p.id === capId);
+let capabilityStateChangeHandler = null;
+const observedReadiness = new Map();
+
+/** Core observes transitions; this resolver remains the sole readiness source of truth. */
+export function setCapabilityStateChangeHandler(fn) {
+  capabilityStateChangeHandler = typeof fn === 'function' ? fn : null;
+}
+
+function observeReadiness(capId, result) {
+  const ready = result?.ready === true;
+  const previous = observedReadiness.get(capId);
+  observedReadiness.set(capId, ready);
+  if (previous !== undefined && previous !== ready && capabilityStateChangeHandler) {
+    try {
+      const event = capabilityStateChangeHandler({
+        kind: 'capability_readiness_changed', capability: capId, previous, ready,
+        reason: result?.reason ?? null,
+      });
+      if (event && typeof event.catch === 'function') event.catch(() => {});
+    } catch { /* Readiness observation must not change the resolver result. */ }
+  }
+  return result;
+}
 
 /**
  * Feed 的連線資料可由 Provider 靜態聲明，也可用 connection() 隨配置即時生成。
@@ -61,28 +84,33 @@ export function setCapabilityBinding(capId, providerId) {
   const bindings = { ...readBindings(), [capId]: providerId };
   fs.mkdirSync(path.dirname(BINDINGS_PATH), { recursive: true });
   fs.writeFileSync(BINDINGS_PATH, `${JSON.stringify({ schema: 'termux-os-framework.providers.v1', bindings }, null, 2)}\n`);
+  try {
+    const event = capabilityStateChangeHandler?.({ kind: 'capability_binding_changed', capability: capId, provider: providerId });
+    if (event && typeof event.catch === 'function') event.catch(() => {});
+  } catch { /* Binding persistence already succeeded; observer failure is non-fatal. */ }
   return { ok: true, capability: capId, provider: providerId };
 }
 
 // 解析 + 就緒判定；ready=false 必帶 reason（禁止假裝 Ready，021 §11.3）
 export async function describeCapability(capId) {
   const ps = providersFor(capId);
-  if (!ps.length) return { ok: false, capability: capId, error: 'no_provider', ready: false, reason: 'no provider registered' };
+  const finish = (result) => observeReadiness(capId, result);
+  if (!ps.length) return finish({ ok: false, capability: capId, error: 'no_provider', ready: false, reason: 'no provider registered' });
   const bound = getCapabilityBinding(capId);
-  if (!bound) return { ok: false, capability: capId, error: 'no_binding', ready: false, reason: 'multiple providers, none bound', providers: ps.map((p) => p.provider) };
+  if (!bound) return finish({ ok: false, capability: capId, error: 'no_binding', ready: false, reason: 'multiple providers, none bound', providers: ps.map((p) => p.provider) });
   const p = ps.find((x) => x.provider === bound);
-  if (!p) return { ok: false, capability: capId, error: 'bound_provider_not_registered', ready: false, reason: `bound provider "${bound}" is not registered`, providers: ps.map((x) => x.provider) };
+  if (!p) return finish({ ok: false, capability: capId, error: 'bound_provider_not_registered', ready: false, reason: `bound provider "${bound}" is not registered`, providers: ps.map((x) => x.provider) });
 
   const base = { ok: true, capability: capId, kind: p.kind, provider: p.provider, package: p.package,
     providers: ps.map((x) => x.provider) };
 
   const pkg = getPackage(p.package);
-  if (pkg && pkg.status !== 'loaded') return { ...base, ready: false, reason: `package ${p.package} is ${pkg.status}` };
+  if (pkg && pkg.status !== 'loaded') return finish({ ...base, ready: false, reason: `package ${p.package} is ${pkg.status}` });
 
   if (p.service) {
     const st = await stage.getServiceStatus(p.service);
     if (!st || st.process?.state !== 'running') {
-      return { ...base, service: p.service, ready: false, reason: `service ${p.service} is ${st?.process?.state ?? 'unknown'}` };
+      return finish({ ...base, service: p.service, ready: false, reason: `service ${p.service} is ${st?.process?.state ?? 'unknown'}` });
     }
     base.service = p.service;
     base.service_health = st.health?.state ?? 'unknown';
@@ -92,23 +120,23 @@ export async function describeCapability(capId) {
     let feed;
     try { feed = await resolveFeedConnection(p); }
     catch (e) {
-      return { ...base, ready: false, reason: `feed descriptor failed: ${String(e?.message ?? e)}` };
+      return finish({ ...base, ready: false, reason: `feed descriptor failed: ${String(e?.message ?? e)}` });
     }
     const described = { ...base, ...feed };
-    if (!feed.endpoint) return { ...described, ready: false, reason: 'feed provider has no endpoint' };
+    if (!feed.endpoint) return finish({ ...described, ready: false, reason: 'feed provider has no endpoint' });
     if (typeof p.available === 'function') {
       let available = false;
       try { available = Boolean(await p.available()); } catch { available = false; }
-      if (!available) return { ...described, ready: false, reason: `feed provider ${p.provider} unavailable` };
+      if (!available) return finish({ ...described, ready: false, reason: `feed provider ${p.provider} unavailable` });
     }
-    return { ...described, ready: true };
+    return finish({ ...described, ready: true });
   }
   const action = getAction(p.action);
-  if (!action) return { ...base, ready: false, reason: `action ${p.action} not registered` };
+  if (!action) return finish({ ...base, ready: false, reason: `action ${p.action} not registered` });
   let available = false;
   try { available = Boolean(await action.available()); } catch { available = false; }
-  if (!available) return { ...base, action: p.action, ready: false, reason: `action ${p.action} unavailable` };
-  return { ...base, action: p.action, ready: true };
+  if (!available) return finish({ ...base, action: p.action, ready: false, reason: `action ${p.action} unavailable` });
+  return finish({ ...base, action: p.action, ready: true });
 }
 
 export async function invokeCapability(capId, input) {
