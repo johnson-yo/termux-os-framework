@@ -21,3 +21,12 @@ is left in place so downgrading the Package still finds it.
 A directory under the Installed Root that has `versions/` but no `active.json` is reported as a
 failed Package rather than skipped. Skipping it left the user with something they could neither see,
 remove, nor reinstall without opening a shell to find out why it had vanished.
+
+## `.models` declarations
+
+An installed Package may declare raw model consumers with empty files at
+`.models/<owner>/<repository>`. Core exposes the read-only enumeration through
+`GET /api/packages/model-declarations`; it validates the active Installed Root,
+keeps malformed paths visible as errors, and does not persist a second consumer
+ledger. The declaration is package-local data: a Package update preserves it,
+while Package uninstall removes it with the Package root.

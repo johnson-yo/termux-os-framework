@@ -18,6 +18,26 @@ Core records immutable asset identity, version, target, checksums, and verified 
 - `runtime.mjs`: the provider registry and `fetchOptionalAsset` — variant
   selection plus the on-demand download of an asset that was declared but
   deliberately not installed.
+- `payload.mjs`: the generic, expectation-checked raw payload purge boundary.
+  It may remove only a registered path below the shared Asset Store and never
+  touches a Package's private data or adjacent cache roots.
+- `archive.mjs`: the generic raw Asset archive import boundary. The archive
+  manifest owns package/version/target identity and every file's size and
+  sha256; extraction rejects traversal, symlinks, special files, conflicts,
+  and unverified bytes.
+
+## Raw payload boundaries
+
+Package-facing managers may ask Core to fetch, import, verify, or purge raw
+Asset payloads. Core owns the registry, shared-store path, `.part` transfer,
+hash/size verification, atomic rename, and safe deletion. An archive is a
+`tar.gz` with `termux-os.asset-archive.json` plus `payload/<asset>/<file>`;
+the archive is not a second model or runtime manifest.
+
+The read-only `GET /api/packages/model-declarations` seam enumerates each
+installed Package's `.models/<owner>/<repository>` files. It is a generic
+filesystem contract: malformed roots and entries remain explicit errors,
+and no consumer ledger is persisted by Core.
 
 ## Two independent axes
 

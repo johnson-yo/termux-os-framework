@@ -25,8 +25,11 @@ for file in \
   src/packages/dependency-runtime.mjs \
   src/packages/runtime-contract.mjs \
   src/packages/loader.mjs \
+  src/packages/model-declarations.mjs \
   src/assets/fetch.mjs \
   src/assets/registry.mjs \
+  src/assets/payload.mjs \
+  src/assets/archive.mjs \
   src/assets/runtime.mjs \
   src/assets/resolver.mjs \
   src/capabilities/resolver.mjs \

@@ -168,7 +168,9 @@ src/apps/CLAUDE.md
 src/apps/coordinator.mjs
 src/apps/session.mjs
 src/assets/CLAUDE.md
+src/assets/archive.mjs
 src/assets/fetch.mjs
+src/assets/payload.mjs
 src/assets/registry.mjs
 src/assets/resolver.mjs
 src/assets/runtime.mjs
@@ -210,6 +212,7 @@ src/packages/fixtures/github.termux-os.fixture.valid/web/index.html
 src/packages/git-state.mjs
 src/packages/installed-root.mjs
 src/packages/loader.mjs
+src/packages/model-declarations.mjs
 src/packages/manifest.mjs
 src/packages/operation-lock.mjs
 src/packages/reconcile.mjs

@@ -41,7 +41,7 @@ Framework loads Installed Packages. Development mounts are explicit, temporary s
 - `src/state/`: the state bus — declared facts, one writer each, in memory only
 - `src/stage/`: service definitions, desired state, process identity, health, and logs
 - `src/apps/`: application sessions and capability coordination
-- `src/assets/`: immutable asset registration and resolution metadata
+- `src/assets/`: immutable Asset registration, raw transfer, archive import, safe purge, and resolution metadata
 - `src/system/`: authentication, administration, jobs, access reporting, observations, and update control
 - `src/theatre/`: generic Action registry and sequential scene runner
 - `src/server.mjs`: authenticated HTTP/WebSocket entry point
@@ -85,3 +85,11 @@ With an empty Installed Root, Framework must:
 Audio capture/output and the complete `PCM → RMS → KWS → VAD → ASR` path belong to the Android audio application. Temporary audio stays in that application's private storage. TTS synthesis, PCM playback, device selection, streaming state, and engine/language availability are also application or adapter concerns.
 
 Framework receives text-level events and coordinates services through public contracts. Wake-word scoring, ASR consumers, translation, chat, TTS adapters, hardware bridges, models, and optimized graph assets are independent Extensions.
+
+Raw Asset consumers may declare current use with an empty
+`.models/<owner>/<repository>` file inside their installed Package root. Core
+enumerates those declarations through a read-only endpoint and reports bad
+roots or entries explicitly; it does not persist a consumer ledger. Core also
+owns the generic raw archive import and payload purge boundaries, including
+path containment and SHA-256 verification, while Package-specific managers
+remain responsible for their own catalogs and product presentation.

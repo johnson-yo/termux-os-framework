@@ -106,6 +106,21 @@ answers.
 A device with no matching variant gets `target_mismatch` listing the variants
 that do exist, never a different variant that happens to be present.
 
+### Raw payload import, purge, and consumer declarations
+
+Core also owns the generic raw-payload lifecycle. A `tar.gz` archive with
+`termux-os.asset-archive.json` and `payload/<asset>/<file>` entries is accepted
+only after path, type, size, and sha256 checks. Identical payloads are reused;
+conflicting bytes are rejected. The purge boundary requires the registered
+package/version/target/path expectations and removes only a registered path
+inside the shared Asset Store.
+
+Installed Packages may place empty declaration files at
+`.models/<owner>/<repository>`. `GET /api/packages/model-declarations` returns
+the current declarations and explicit malformed-package/path errors. Core does
+not write a consumer ledger, infer identities from Package names, or interpret
+these declarations as runtime readiness.
+
 ## Licensing
 
 Framework Core is Apache-2.0. Extension Packages are separately distributed works and must declare their own license and third-party notices. Core does not bundle engines, models, vendor SDKs, or Extension source, so their licenses do not change the Core license merely because they communicate through public contracts.

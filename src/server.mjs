@@ -27,6 +27,7 @@ import {
   setPackageStateChangeHandler,
 } from './packages/loader.mjs';
 import { resolveInstalledPackages } from './packages/installed-root.mjs';
+import { listModelDeclarations } from './packages/model-declarations.mjs';
 import { deviceProfile } from './packages/runtime-contract.mjs';
 import {
   initDevRuntime, devWatchStart, devWatchStop, devReload, devStatus, listDevWatchers, isDevWatched, devEvents,
@@ -65,6 +66,8 @@ import {
 } from './system/observation.mjs';
 import { listAssets, describeAsset, getAssetProvider } from './assets/runtime.mjs';
 import { readRegistry as readAssetRegistry, deactivateAsset } from './assets/registry.mjs';
+import { purgeAssetPayload } from './assets/payload.mjs';
+import { importAssetArchive } from './assets/archive.mjs';
 import {
   AUTH_PASSWORD_MIN_LENGTH, AUTH_TOKEN_MIN_LENGTH, defaultAuthFile, ensureAuthFile,
   generateAuthToken, writeAuthFile,
@@ -454,6 +457,35 @@ const readBody = (req) => new Promise((resolve) => {
   let data = '';
   req.on('data', (c) => { data += c; });
   req.on('end', () => { try { resolve(JSON.parse(data || '{}')); } catch { resolve(null); } });
+});
+
+const streamBodyToFile = (req, destination, maxBytes = 4 * 1024 * 1024 * 1024) => new Promise((resolve, reject) => {
+  const output = fs.createWriteStream(destination, { flags: 'wx' });
+  let bytes = 0;
+  let settled = false;
+  const fail = (error) => {
+    if (settled) return;
+    settled = true;
+    output.destroy();
+    reject(error);
+  };
+  req.on('data', (chunk) => {
+    bytes += chunk.length;
+    if (bytes > maxBytes) {
+      fail(Object.assign(new Error('asset archive exceeds upload limit'), { code: 'payload_too_large' }));
+      req.destroy();
+      return;
+    }
+    if (!output.write(chunk)) req.pause();
+  });
+  output.on('drain', () => req.resume());
+  output.on('error', fail);
+  req.on('aborted', () => fail(new Error('asset archive upload aborted')));
+  req.on('error', fail);
+  req.on('end', () => {
+    if (settled) return;
+    output.end(() => { settled = true; resolve({ bytes }); });
+  });
 });
 
 // ============================================================
@@ -1719,6 +1751,9 @@ const server = http.createServer(async (req, res) => {
   // Package 目錄與命名空間 API（021）——列表/詳情歸 Core，/api/packages/<id>/<sub> 轉發給 Package 自己的路由
   if (url === '/api/packages' || url.startsWith('/api/packages/')) {
     if (!authed(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
+    if (url === '/api/packages/model-declarations' && req.method === 'GET') {
+      return json(res, 200, listModelDeclarations());
+    }
     if (url === '/api/packages' && req.method === 'GET') {
       return json(res, 200, { ok: true, framework_version: FRAMEWORK_VERSION, packages: listPackages() });
     }
@@ -1779,6 +1814,24 @@ const server = http.createServer(async (req, res) => {
    */
   if (url === '/api/assets' || url.startsWith('/api/assets/')) {
     if (!authed(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
+    if (url === '/api/assets/import' && req.method === 'POST') {
+      if (!authed(req, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'termux-os-asset-upload-'));
+      const archivePath = path.join(tempRoot, 'upload.tar.gz');
+      try {
+        const upload = await streamBodyToFile(req, archivePath,
+          Number(process.env.ASSET_ARCHIVE_MAX_BYTES) || 4 * 1024 * 1024 * 1024);
+        const result = importAssetArchive(archivePath);
+        return json(res, 200, { ...result, uploaded_bytes: upload.bytes });
+      } catch (error) {
+        const code = String(error?.message ?? error);
+        const status = error?.code === 'payload_too_large' ? 413
+          : /conflict|mismatch|registry_conflict/.test(code) ? 409 : 400;
+        return json(res, status, { ok: false, error: 'asset_archive_import_failed', detail: code });
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    }
     const restoreAsset = url.match(/^\/api\/assets\/(.+)\/restore$/);
     if (restoreAsset && req.method === 'POST') {
       if (!authed(req, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });
@@ -1937,7 +1990,20 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    const dropAsset = url.match(/^\/api\/assets\/(.+)\/payload$/);
+    const purgeAsset = url.match(/^\/api\/assets\/(.+)\/payload$/);
+    if (purgeAsset && req.method === 'DELETE' && parsed.searchParams.get('purge') === '1') {
+      if (!authed(req, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });
+      const assetId = decodeURIComponent(purgeAsset[1]);
+      const body = await readBody(req);
+      const expected = body?.expected && typeof body.expected === 'object' ? body.expected : (body ?? {});
+      const result = purgeAssetPayload(assetId, { expected });
+      const status = result.ok ? 200
+        : ['unknown_asset', 'payload_outside_shared_store', 'payload_shared'].includes(result.error) ? 404
+          : String(result.error).startsWith('expectation_mismatch') || result.error === 'payload_checksum_mismatch' ? 409
+            : result.error === 'payload_delete_failed' ? 500 : 400;
+      return json(res, status, result);
+    }
+    const dropAsset = purgeAsset;
     if (dropAsset && req.method === 'DELETE') {
       if (!authed(req, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });
       const assetId = decodeURIComponent(dropAsset[1]);

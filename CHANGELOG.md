@@ -2,6 +2,16 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.2
+
+- Add the generic read-only installed-Package `.models/<owner>/<repository>`
+  declaration seam at `/api/packages/model-declarations`, preserving explicit
+  invalid-root and invalid-entry errors.
+- Add generic raw Asset archive import and expectation-checked payload purge.
+  Imports validate archive paths/types, package identity, file sizes, and
+  SHA-256 before registering bytes; purge is constrained to registered paths
+  below the shared Asset Store and never touches Package data or caches.
+
 ## 0.3.1
 
 - Core now reconciles desired Stage state from state-bus and capability-readiness
