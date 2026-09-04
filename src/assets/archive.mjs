@@ -141,7 +141,13 @@ export function importAssetArchive(archivePath, { store = sharedStore() } = {}) 
   if (!fs.existsSync(archivePath) || !fs.statSync(archivePath).isFile()) throw new Error('asset_archive_missing');
   const entries = listArchiveEntries(archivePath);
   if (!entries.includes(ASSET_ARCHIVE_MANIFEST)) throw new Error('asset_archive_manifest_missing');
-  const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'termux-os-asset-import-'));
+  // Android commonly puts the shared model store on `/sdcard`, while
+  // os.tmpdir() is inside app-private `/data`.  A cross-filesystem rename
+  // fails with EXDEV, so stage beside the store before moving verified
+  // payload directories into place.
+  const stageParent = path.dirname(path.resolve(store));
+  fs.mkdirSync(stageParent, { recursive: true });
+  const stage = fs.mkdtempSync(path.join(stageParent, '.termux-os-asset-import-'));
   try {
     execFileSync('tar', ['-xzf', archivePath, '-C', stage, '--no-same-owner', '--no-same-permissions'], {
       stdio: 'pipe',

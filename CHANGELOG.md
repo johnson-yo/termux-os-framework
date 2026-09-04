@@ -2,6 +2,12 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.3
+
+- Fix raw Asset archive import on Android shared storage by staging beside the
+  shared store before the verified payload move, avoiding cross-device `EXDEV`
+  failures between app-private `/data` and `/sdcard`.
+
 ## 0.3.2
 
 - Add the generic read-only installed-Package `.models/<owner>/<repository>`
