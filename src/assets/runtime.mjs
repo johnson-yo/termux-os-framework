@@ -77,7 +77,12 @@ export async function fetchOptionalAsset(id, {
   storeDirFor,
   activate,
   profile = null,
-  via = 'registry',
+  /**
+   * ⭐ `auto` ＝ **先直連上游，不通才走 Catalog**（見 `fetch.mjs` 的 [routesFor]）。
+   * ⛔ 之前這裡寫死 `'registry'`，而生產鏈上**沒有任何調用方傳過 via**——
+   *   於是 `direct` 那條路存在於註釋裡，代碼裡從來沒有任何東西走上去過。
+   */
+  via = 'auto',
   registryBase = '',
   onProgress = () => {},
   allowRequired = false,
@@ -107,6 +112,11 @@ export async function fetchOptionalAsset(id, {
   if (via === 'registry' && !registryBase) {
     return { ok: false, error: 'no_registry_base', detail: 'fetching through the catalog needs its base URL' };
   }
+  /**
+   * ⚠ `auto` 沒有 Catalog 地址時退化成**只有直連**，那是可用的但**少了一條退路**。
+   *   ⭐ 這件事必須說出來：否則「為什麼這台機器一斷網就徹底裝不上」要靠讀源碼才知道。
+   */
+  const routeNote = via === 'auto' && !registryBase ? 'direct_only_no_registry_base' : null;
 
   const destDir = storeDirFor(declared);
   const need = pendingBytes(files, destDir);
@@ -119,9 +129,11 @@ export async function fetchOptionalAsset(id, {
   if (!space.ok) {
     return { ok: false, error: 'insufficient_space', need_bytes: need, free_bytes: space.free_bytes };
   }
-  await fetchAssetFiles(files, destDir, { via, registryBase, onProgress, fetchImpl, signal });
+  const fetched = await fetchAssetFiles(files, destDir, { via, registryBase, onProgress, fetchImpl, signal });
   const entry = activate(declared, destDir, Object.fromEntries(files.map((f) => [f.path, f.sha256])));
-  return { ok: true, id, path: destDir, bytes: need, entry };
+  /** ⭐ 「這些字節是誰給的」必須答得出來——包歸檔那條路早就這麼做了（`origin.path`）。 */
+  const routes = [...new Set(fetched.map((f) => f.route ?? (f.reused ? 'reused' : null)).filter(Boolean))];
+  return { ok: true, id, path: destDir, bytes: need, entry, routes, route_note: routeNote };
 }
 export { describeAsset };
 
