@@ -1,8 +1,8 @@
 # termux-os-framework
 
-`termux-os-framework` is a local-first control plane for installing, supervising, updating, and coordinating replaceable components on Android through Termux. It uses Node.js standard-library APIs and ships with no runtime npm dependencies.
+Termux-OS turns an Android phone into a local computer for AI, automation, and other useful services — see [termux-os.com](https://termux-os.com/).
 
-The repository is Framework Core. It is intentionally useful when no Extension Package is installed.
+This repository is its Framework Core: the local-first control plane that installs, supervises, updates, and coordinates the replaceable components providing those features. It uses Node.js standard-library APIs and ships with no runtime npm dependencies. Core is intentionally useful when no Extension Package is installed.
 
 ## Core boundary
 
