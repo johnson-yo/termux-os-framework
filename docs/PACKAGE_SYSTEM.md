@@ -66,7 +66,7 @@ the Package again and creates a fresh runtime state.
 
 ## Models and caches
 
-Model assets remain under `/sdcard/termux-os/models/<package>/<version>/<target>/`. Shared caches remain under `/sdcard/termux-os/caches/`. A Package installer checks compatibility and downloads or provisions an asset only when it is missing or incompatible. Framework version updates do not redownload models.
+Model assets remain under `/sdcard/termux-os/models/<package>/<version>/<target>/`. Shared caches remain under `/sdcard/termux-os/caches/`. An Asset Package declares and registers its Assets; the Package installer may provision required payloads during installation and may skip `optional` payloads. `optional` describes install-time provisioning only. After registration, a replaceable Manager owns payload download, verification, storage, update, and deletion. Framework version updates do not redownload models and do not take ownership of Manager policy.
 
 ### A payload's target is not the Package's target
 
@@ -89,34 +89,37 @@ land in one directory. That is a Framework guarantee rather than a convention:
 an EPContext wrapper references its context binary by relative name, so a
 mismatched pair opens successfully and only then fails inside the runtime.
 
-### Fetching an optional asset after installation
+### Fetching an Asset after installation
 
-Required assets are provisioned at install; that is what "installed" means.
-Assets marked `optional: true` are declared but not fetched, so a Package can
-publish several alternatives — a tier the user has not chosen yet, a context for
-a device this one is not — without every installation paying for all of them.
+Required assets are normally provisioned at install; `optional: true` means the
+installer may leave the payload absent so a Package can publish alternatives
+without every installation paying for all of them. It does not mean that a
+Manager is forbidden to fetch, update, verify, or delete the Asset later.
 
-`POST /api/assets/<id>/fetch`, or `context.assets.fetch(id)` in-process, obtains
-one on demand. The caller supplies only an asset id: the Framework finds the
-Package that declares it, selects the variant matching this device, and resolves
-the source coordinates from that declaration. A caller that could pass a URL or
-a path would make "what is this asset on this machine" a question with two
-answers.
+A Manager may request a registered Asset payload using its own catalog and
+source adapter. It may call Core's generic transfer primitives, which should
+accept an explicit, already-resolved transfer specification and destination
+within the allowed store, or it may implement source access itself. Core must
+not require the caller to be an Asset Package, hide the source behind an
+`optional` gate, or encode a particular upstream such as Hugging Face.
 
 A device with no matching variant gets `target_mismatch` listing the variants
 that do exist, never a different variant that happens to be present.
 
-### Raw payload import, purge, and consumer declarations
+### Raw payload primitives, purge, and consumer declarations
 
-Core also owns the generic raw-payload lifecycle. A `tar.gz` archive with
+Core may provide generic raw-payload primitives. A `tar.gz` archive with
 `termux-os.asset-archive.json` and `payload/<asset>/<file>` entries is accepted
-only after path, type, size, and sha256 checks. Identical payloads are reused;
-conflicting bytes are rejected. The purge boundary requires the registered
-package/version/target/path expectations and removes only a registered path
-inside the shared Asset Store.
+only after path, type, size, and sha256 checks. Identical payloads may be reused;
+conflicting bytes may be rejected as a technical integrity invariant. The
+Manager owns the import/update/delete decision and user confirmation. A purge
+removes only the requested payload path inside the shared Asset Store, preserves
+the Asset declaration/registration, and must not be restricted merely because
+the payload arrived with its Asset Package or because a consumer declaration
+exists.
 
-Installed Packages may place empty declaration files at
-`.models/<owner>/<repository>`. `GET /api/packages/model-declarations` returns
+Installed Package versions may place empty declaration files at
+`.models/<owner>/<repository>` in their active version root. `GET /api/packages/model-declarations` returns
 the current declarations and explicit malformed-package/path errors. Core does
 not write a consumer ledger, infer identities from Package names, or interpret
 these declarations as runtime readiness.

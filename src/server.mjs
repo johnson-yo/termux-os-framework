@@ -65,9 +65,22 @@ import {
   listLogComponents, readLogSlice, startObservation, setObservationRoot, setObservationServices,
 } from './system/observation.mjs';
 import { listAssets, describeAsset, getAssetProvider } from './assets/runtime.mjs';
-import { readRegistry as readAssetRegistry, deactivateAsset } from './assets/registry.mjs';
+import {
+  readRegistry as readAssetRegistry, deactivateAsset, readPayloadLedger, listPayloadRecords,
+  listSelectionRecords, payloadIdFor, payloadObjectDir, sharedStore, setPayloadSelection, clearPayloadSelection,
+} from './assets/registry.mjs';
 import { purgeAssetPayload } from './assets/payload.mjs';
-import { importAssetArchive } from './assets/archive.mjs';
+import { importAssetArchive, importAssetArchiveV2 } from './assets/archive.mjs';
+import { readDeclarationIndex } from './assets/declarations.mjs';
+import { describeAssetV2, listResolvedAssetsV2, resolveAssetV2 } from './assets/resolver.mjs';
+import {
+  createOperation, readOperation, updateOperation, listOperations, findOperationByIdempotency, reconcileOperations,
+} from './assets/transfer/journal.mjs';
+import { stagePullFiles, stageFilePath, writePushStream, assertTransferFiles, verifyStagedFiles, pendingBytes, freeSpace } from './assets/transfer/staging.mjs';
+import { commitStagedPayload } from './assets/transfer/commit.mjs';
+import { deleteImpact, deletePayload, reconcilePayloadDeletions } from './assets/transfer/removal.mjs';
+import { validateTransferUrl } from './assets/transfer/http.mjs';
+import { migrateV1ToV2 } from './assets/migration.mjs';
 import {
   AUTH_PASSWORD_MIN_LENGTH, AUTH_TOKEN_MIN_LENGTH, defaultAuthFile, ensureAuthFile,
   generateAuthToken, writeAuthFile,
@@ -262,6 +275,7 @@ const credentialSnapshot = () => ({
   schema: 'termux-os.framework-credentials.v1',
   source: credentialSource,
   editable: credentialsEditable,
+
   /**
    * 凭证被钉在哪里，以及要动它得改哪两个键。
    *
@@ -459,6 +473,172 @@ const readBody = (req) => new Promise((resolve) => {
   req.on('end', () => { try { resolve(JSON.parse(data || '{}')); } catch { resolve(null); } });
 });
 
+// Asset payload v2 operation inputs containing URLs/temporary headers stay in
+// memory only. The journal stores file metadata and stage identity, so a
+// process restart can never expose a bearer header through the disk state.
+const v2TransferInputs = new Map();
+const v2TransferRuns = new Map();
+const v2TransferControllers = new Map();
+
+const v2OperationStage = (operationId) => path.join(sharedStore(), '.staging', operationId);
+
+const v2SafeHeaders = (headers) => headers && typeof headers === 'object' && !Array.isArray(headers)
+  ? Object.fromEntries(Object.entries(headers).filter(([key, value]) => typeof key === 'string'
+    && typeof value === 'string'))
+  : {};
+
+const v2SafeMetadata = (metadata) => metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+  ? Object.fromEntries(Object.entries(metadata).filter(([key, value]) => typeof key === 'string'
+    && !/token|secret|authorization|cookie|password/i.test(key)
+    && (value === null || ['string', 'number', 'boolean'].includes(typeof value))))
+  : {};
+
+const v2PublicOperation = (operation) => {
+  if (!operation) return null;
+  const { stage_root: _stageRoot, ...publicValue } = operation;
+  return publicValue;
+};
+
+const v2FileIdentity = (files) => assertTransferFiles(files).map((file) =>
+  `${file.path}\u0000${file.size}\u0000${file.sha256}`).join('\u0001');
+
+const v2OperationResult = (res, operation, code = 200) => json(res, code, {
+  ok: true, operation: v2PublicOperation(operation),
+});
+
+const runV2Transfer = async (operationId, { files = null, headers = {} } = {}) => {
+  const existingRun = v2TransferRuns.get(operationId);
+  if (existingRun) return existingRun;
+  const operation = readOperation(operationId);
+  if (!operation) return { ok: false, error: 'unknown_operation' };
+  // Failed and interrupted pulls remain retryable: their `.part` files are
+  // the resume base. Only a completed or explicitly cancelled operation is
+  // terminal at the Core API level.
+  if (['complete', 'cancelled'].includes(operation.state)) return { ok: true, operation };
+  const input = v2TransferInputs.get(operationId) ?? { files, headers: v2SafeHeaders(headers) };
+  if (files?.length) input.files = files;
+  const controller = new AbortController();
+  v2TransferControllers.set(operationId, controller);
+  const run = (async () => {
+    let current = updateOperation(operationId, { state: 'running', error: null });
+    const stageRoot = current.stage_root || v2OperationStage(operationId);
+    try {
+      const specs = assertTransferFiles(input.files ?? current.files);
+      if (v2FileIdentity(specs) !== v2FileIdentity(current.files)) {
+        throw Object.assign(new Error('transfer file manifest does not match the journal'), { code: 'transfer_spec_mismatch' });
+      }
+      const requiredBytes = pendingBytes(specs, stageRoot);
+      const available = freeSpace(stageRoot);
+      if (available.known && requiredBytes > available.free_bytes) {
+        throw Object.assign(new Error(`asset transfer needs ${requiredBytes} bytes, only ${available.free_bytes} are free`), {
+          code: 'insufficient_space', need_bytes: requiredBytes, free_bytes: available.free_bytes,
+        });
+      }
+      const bytesByFile = new Map(specs.map((file) => [file.path, 0]));
+      for (const file of specs) {
+        try {
+          const stat = fs.statSync(stageFilePath(stageRoot, file.path));
+          if (stat.isFile()) bytesByFile.set(file.path, Math.min(file.size, stat.size));
+        } catch { /* no staged prefix yet */ }
+      }
+      const aggregateBytes = () => [...bytesByFile.values()].reduce((sum, bytes) => sum + bytes, 0);
+      // Pull operations require URL material in memory or on this explicit
+      // retry call; it is intentionally absent from the persisted journal.
+      if (current.type !== 'push' && specs.some((file) => typeof file.url !== 'string' || !file.url)) {
+        throw Object.assign(new Error('transfer source URL must be supplied when running this operation'), { code: 'transfer_source_required' });
+      }
+      const progress = (event) => {
+        const bytesDone = Number(event?.bytes);
+        if (event?.path && Number.isFinite(bytesDone)) {
+          const expected = specs.find((file) => file.path === event.path)?.size ?? bytesDone;
+          if (['start', 'retry'].includes(event?.stage) && event?.resumed !== true) bytesByFile.set(event.path, 0);
+          bytesByFile.set(event.path, Math.max(bytesByFile.get(event.path) ?? 0, Math.min(bytesDone, expected)));
+        }
+        const patch = {
+          current_file: event?.path ?? null,
+          bytes_done: aggregateBytes(),
+          stage: event?.stage ?? current.stage,
+          resumed: event?.resumed === true || current.resumed === true,
+          resume_from_bytes: Number.isFinite(Number(event?.resume_from_bytes)) ? Number(event.resume_from_bytes) : current.resume_from_bytes,
+        };
+        current = { ...current, ...patch };
+        // Do not write one JSON file per network chunk; the final state and
+        // coarse progress remain durable while the in-memory API stays live.
+        if (event?.stage === 'done' || event?.stage === 'attempt_failed' || Date.now() - Date.parse(current.updated_at) > 500) {
+          try { current = updateOperation(operationId, patch); } catch { /* final state reports any durable failure */ }
+        }
+      };
+      const staged = current.type === 'push'
+        ? { files: specs, verified: verifyStagedFiles(specs, stageRoot) }
+        : await stagePullFiles(specs, stageRoot, { headers: input.headers, signal: controller.signal, onProgress: progress });
+      if (!staged.verified?.ok) throw Object.assign(new Error(staged.verified?.detail ?? 'staged payload is invalid'), { code: 'staged_payload_invalid' });
+      current = updateOperation(operationId, { state: 'staged', bytes_done: current.bytes_total, stage: 'staged' });
+      current = updateOperation(operationId, { state: 'committing', stage: 'committing' });
+      if (readOperation(operationId)?.state === 'cancelled') {
+        return { ok: false, operation: readOperation(operationId), error: 'cancelled', code: 'cancelled' };
+      }
+      const expectedGeneration = current.expected_generation == null ? null : current.expected_generation;
+      const payloadId = payloadIdFor(specs);
+      // This is the last durable write before staging becomes the immutable
+      // object. It deliberately keeps only neutral file facts: URLs and
+      // temporary headers live in v2TransferInputs and never enter the journal.
+      current = updateOperation(operationId, {
+        commit_intent: {
+          schema: 'termux-os.asset-commit-intent.v2',
+          payload_id: payloadId,
+          layout: 'object',
+          storage_path: payloadObjectDir(payloadId),
+          files: specs.map(({ path: relative, size, sha256, role }) => ({
+            path: relative, size, sha256, ...(role ? { role } : {}),
+          })),
+          selection: current.select ? { asset_id: current.asset_id, variant_id: current.variant_id } : null,
+          metadata: current.metadata,
+          expected_generation: expectedGeneration,
+        },
+      });
+      const committed = commitStagedPayload({
+        files: specs,
+        stageRoot,
+        // `null` means that the caller did not ask for CAS. It must not be
+        // converted to generation zero after the Ledger has advanced.
+        expectedGeneration: expectedGeneration == null ? undefined : expectedGeneration,
+        selection: current.select ? { asset_id: current.asset_id, variant_id: current.variant_id } : null,
+        metadata: current.metadata,
+      });
+      current = updateOperation(operationId, {
+        state: 'complete', stage: 'done', bytes_done: current.bytes_total, result: {
+          payload_id: committed.payload_id, path: committed.path, reused: committed.reused,
+        },
+      });
+      return { ok: true, operation: current };
+      } catch (error) {
+      const currentState = readOperation(operationId);
+      if (currentState?.state === 'cancelled') {
+        return { ok: false, operation: currentState, error: currentState.error ?? 'cancelled', code: 'cancelled' };
+      }
+      const failed = updateOperation(operationId, {
+        state: error?.name === 'AbortError' || controller.signal.aborted ? 'cancelled' : 'failed',
+        error: String(error?.message ?? error),
+        error_code: error?.code ?? null,
+        need_bytes: Number.isFinite(Number(error?.need_bytes)) ? Number(error.need_bytes) : null,
+        free_bytes: Number.isFinite(Number(error?.free_bytes)) ? Number(error.free_bytes) : null,
+      });
+      return { ok: false, operation: failed, error: failed.error, code: failed.error_code };
+    } finally {
+      v2TransferRuns.delete(operationId);
+      v2TransferControllers.delete(operationId);
+      v2TransferInputs.delete(operationId);
+    }
+  })();
+  v2TransferRuns.set(operationId, run);
+  return run;
+};
+
+// A Core restart must expose in-flight work as interrupted, never as a fake
+// completed download. Staging remains available for an explicit resume.
+reconcileOperations();
+reconcilePayloadDeletions();
+
 const streamBodyToFile = (req, destination, maxBytes = 4 * 1024 * 1024 * 1024) => new Promise((resolve, reject) => {
   const output = fs.createWriteStream(destination, { flags: 'wx' });
   let bytes = 0;
@@ -534,6 +714,10 @@ setStateChangeHandler(requestReconcile);
 setPackageStateChangeHandler(requestReconcile);
 setCapabilityStateChangeHandler(requestReconcile);
 await loadPackages({ frameworkVersion: FRAMEWORK_VERSION, config: CFG, configPath: CONFIG_PATH, saveConfig: persistConfiguration, registryBase: PACKAGE_REGISTRY_URL });
+const assetMigration = migrateV1ToV2();
+if (assetMigration?.migrated?.length || assetMigration?.orphaned?.length || assetMigration?.missing?.length) {
+  console.log(`asset payload migration: migrated=${assetMigration.migrated.length} orphaned=${assetMigration.orphaned.length} missing=${assetMigration.missing.length}`);
+}
 
 // 025 §8：Session 只操作 Stage 管的 framework 自有 Service（§8.4 邊界：不碰 Android/Termux/APK/Core）
 const sessionDeps = {
@@ -1801,16 +1985,276 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+
+  /**
+   * Asset payload lifecycle v2. This route is intentionally before the v1
+   * compatibility matcher below. Declarations are derived from Installed
+   * Root manifests; all writes operate on Payload Objects/Selections only.
+   */
+  if (url === '/api/assets/v2' || url.startsWith('/api/assets/v2/')) {
+    const authContext = authenticateRequest(req);
+    if (!authContext) return json(res, 401, { ok: false, error: 'unauthorized' });
+    // Browser Sessions and the legacy system token may inspect v2 facts, but the
+    // low-level mutation seam is a Package-to-Core tool boundary.  During the
+    // migration window an explicitly opted-in installer principal may retain the
+    // old system-token path; normal deployments leave that switch off.
+    let v2Write = authContext.kind === 'package'
+      && hasPermission(authContext, 'write')
+      && authContext.scopes?.includes('assets.write');
+    if (v2Write) {
+      // The Package id is authenticated by Core, but replaceability means the
+      // allowed owner is the current capability binding, never a hard-coded HF
+      // Manager id.  A binding change affects new calls only; journaled work is
+      // reconciled independently.
+      const manager = await describeCapability('termux-os.assets.manager');
+      v2Write = manager?.package === authContext.package_id;
+    }
+    if (authContext.kind === 'token' && process.env.ASSET_V2_ALLOW_SYSTEM_KEY === '1'
+      && hasPermission(authContext, 'write')) v2Write = true;
+    const apiError = (error, fallback = 'asset_operation_failed') => {
+      const code = error?.code ?? fallback;
+      const status = code === 'generation_mismatch' ? 409
+        : code === 'payload_ledger_corrupt' ? 500
+          : code.endsWith('_required') || code.endsWith('_invalid') ? 400 : 409;
+      return json(res, status, { ok: false, error: code, detail: String(error?.message ?? error) });
+    };
+    if (url === '/api/assets/v2' && req.method === 'GET') {
+      const index = readDeclarationIndex();
+      const ledger = readPayloadLedger();
+      if (ledger.error) return json(res, 500, { ok: false, error: 'payload_ledger_corrupt', detail: ledger.error });
+      const assets = listResolvedAssetsV2({ index, ledger });
+      for (const asset of assets) {
+        const provider = getAssetProvider(asset.id);
+        asset.runtime_state = provider ? 'loaded' : 'unloaded';
+        asset.runtime_package = provider?.package ?? null;
+      }
+      return json(res, 200, {
+        ok: true,
+        schema: 'termux-os.asset-inventory.v2',
+        generation: ledger.generation,
+        declarations: index.declarations,
+        declaration_errors: index.errors,
+        assets,
+        payloads: listPayloadRecords(ledger),
+        selections: listSelectionRecords(ledger),
+      });
+    }
+    if (url === '/api/assets/v2/declarations' && req.method === 'GET') {
+      const index = readDeclarationIndex();
+      return json(res, 200, { ok: true, ...index });
+    }
+    if (url === '/api/assets/v2/payloads' && req.method === 'GET') {
+      const ledger = readPayloadLedger();
+      return ledger.error
+        ? json(res, 500, { ok: false, error: 'payload_ledger_corrupt', detail: ledger.error })
+        : json(res, 200, { ok: true, schema: 'termux-os.asset-payload-ledger.v2', generation: ledger.generation,
+          payloads: listPayloadRecords(ledger), selections: listSelectionRecords(ledger) });
+    }
+      const resolution = url.match(/^\/api\/assets\/v2\/resolutions\/(.+)$/);
+      if (resolution && req.method === 'GET') {
+      const assetId = decodeURIComponent(resolution[1]);
+      const index = readDeclarationIndex();
+      const ledger = readPayloadLedger();
+      const resolved = resolveAssetV2(assetId, { index, ledger, verify: parsed.searchParams.get('verify') === '1' });
+      const status = resolved.registration_state === 'unregistered' ? 404
+        : resolved.payload_state === 'ledger_error' ? 500 : 200;
+      return json(res, status, { ok: status >= 200 && status < 300, resolution: resolved });
+    }
+    const operationPathMatch = url.match(/^\/api\/assets\/v2\/operations\/([^/]+)$/);
+    if (operationPathMatch && req.method === 'GET') {
+      const operation = readOperation(decodeURIComponent(operationPathMatch[1]));
+      return operation ? json(res, 200, { ok: true, operation: v2PublicOperation(operation) })
+        : json(res, 404, { ok: false, error: 'unknown_operation' });
+    }
+    const impactMatch = url.match(/^\/api\/assets\/v2\/delete-impact\/(.+)$/);
+      if (impactMatch && req.method === 'GET') {
+        const payloadId = decodeURIComponent(impactMatch[1]);
+        const ledger = readPayloadLedger();
+        if (ledger.error) return json(res, 500, { ok: false, error: 'payload_ledger_corrupt', detail: ledger.error });
+      const index = readDeclarationIndex();
+      const consumerFacts = listModelDeclarations();
+      return json(res, 200, { ok: true, impact: deleteImpact(payloadId, {
+        ledger, declarations: index.declarations, consumers: consumerFacts.declarations,
+        runtime: { loaded: false, source: 'core_observation', errors: consumerFacts.errors },
+      }) });
+    }
+    if (!v2Write) return json(res, 403, { ok: false, error: 'write_permission_required' });
+
+    if (url === '/api/assets/v2/imports' && req.method === 'POST') {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'termux-os-asset-v2-import-'));
+      const archivePath = path.join(tempRoot, 'upload.tar.gz');
+      try {
+        const upload = await streamBodyToFile(req, archivePath,
+          Number(process.env.ASSET_ARCHIVE_MAX_BYTES) || 4 * 1024 * 1024 * 1024);
+        const result = importAssetArchiveV2(archivePath);
+        return json(res, 200, { ...result, uploaded_bytes: upload.bytes });
+      } catch (error) {
+        const code = String(error?.message ?? error);
+        const status = error?.code === 'payload_too_large' ? 413
+          : /conflict|mismatch|corrupt/.test(code) ? 409 : 400;
+        return json(res, status, { ok: false, error: 'asset_archive_import_failed', detail: code });
+      } finally { fs.rmSync(tempRoot, { recursive: true, force: true }); }
+    }
+
+    if (url === '/api/assets/v2/transfers' && req.method === 'POST') {
+      const body = await readBody(req);
+      try {
+        const files = assertTransferFiles(body?.files ?? []);
+        const type = body?.type === 'push' ? 'push' : 'pull';
+        if (type === 'pull') files.forEach((file) => validateTransferUrl(file.url));
+        const idempotencyKey = String(req.headers['idempotency-key'] ?? body?.idempotency_key ?? '');
+        if (!idempotencyKey || idempotencyKey.length > 200 || /[\r\n]/.test(idempotencyKey)) {
+          throw Object.assign(new Error('Idempotency-Key is required for asset transfers'), { code: 'idempotency_key_required' });
+        }
+        const expectedGeneration = body?.expected_generation == null ? undefined : Number(body.expected_generation);
+        if (expectedGeneration !== undefined && !Number.isSafeInteger(expectedGeneration)) throw Object.assign(new Error('expected_generation is invalid'), { code: 'generation_invalid' });
+        const requester = {
+          kind: authContext.kind,
+          package_id: authContext.package_id ?? null,
+          generation: authContext.generation ?? null,
+        };
+        const previous = findOperationByIdempotency(idempotencyKey, requester);
+        if (previous) {
+          const requestedAssetId = typeof body?.asset_id === 'string' ? body.asset_id : null;
+          const requestedVariantId = typeof body?.variant_id === 'string' ? body.variant_id : 'generic';
+          const requestedSelect = body?.select !== false;
+          const sameRequest = previous.type === type
+            && previous.asset_id === requestedAssetId
+            && previous.variant_id === requestedVariantId
+            && previous.select === requestedSelect
+            && (previous.expected_generation ?? null) === (expectedGeneration ?? null)
+            && v2FileIdentity(files) === v2FileIdentity(previous.files);
+          if (!sameRequest) {
+            throw Object.assign(new Error('Idempotency-Key was already used for a different asset operation'), {
+              code: 'idempotency_key_conflict',
+            });
+          }
+          if (type === 'pull') v2TransferInputs.set(previous.operation_id, { files, headers: v2SafeHeaders(body?.headers) });
+          return json(res, 200, { ok: true, operation: v2PublicOperation(previous), deduplicated: true });
+        }
+        const operation = createOperation({
+          type,
+          assetId: typeof body?.asset_id === 'string' ? body.asset_id : null,
+          variantId: typeof body?.variant_id === 'string' ? body.variant_id : 'generic',
+          files,
+          expectedGeneration,
+          stageRoot: null,
+          selection: body?.select !== false,
+          metadata: v2SafeMetadata(body?.metadata),
+          idempotencyKey,
+          requester,
+        });
+        const withStage = updateOperation(operation.operation_id, { stage_root: v2OperationStage(operation.operation_id) });
+        v2TransferInputs.set(operation.operation_id, { files, headers: v2SafeHeaders(body?.headers) });
+        return json(res, 201, { ok: true, operation: v2PublicOperation(withStage) });
+      } catch (error) { return apiError(error, 'transfer_create_failed'); }
+    }
+      const transferRun = url.match(/^\/api\/assets\/v2\/transfers\/([^/]+)\/run$/);
+      if (transferRun && req.method === 'POST') {
+        const body = await readBody(req);
+        const result = await runV2Transfer(decodeURIComponent(transferRun[1]), { files: body?.files, headers: body?.headers });
+      const status = result.error === 'unknown_operation' ? 404 : (result.code ?? result.operation?.error_code) === 'insufficient_space' ? 507 : 409;
+      return result.ok ? json(res, 200, { ok: true, operation: v2PublicOperation(result.operation) })
+        : json(res, status, { ok: false, error: result.code ?? result.error, operation: v2PublicOperation(result.operation) });
+    }
+    const transferFile = url.match(/^\/api\/assets\/v2\/transfers\/([^/]+)\/files\/(\d+)$/);
+    if (transferFile && req.method === 'PUT') {
+      try {
+        const operation = readOperation(decodeURIComponent(transferFile[1]));
+        if (!operation) return json(res, 404, { ok: false, error: 'unknown_operation' });
+        if (operation.type !== 'push') return json(res, 409, { ok: false, error: 'push_operation_required' });
+        if (['complete', 'cancelled'].includes(operation.state)) return json(res, 409, { ok: false, error: 'operation_terminal' });
+        const index = Number(transferFile[2]);
+        const file = operation.files?.[index];
+        if (!file) return json(res, 404, { ok: false, error: 'unknown_transfer_file' });
+        const stageRoot = operation.stage_root || v2OperationStage(operation.operation_id);
+        const range = String(req.headers['content-range'] ?? '').match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+        if (range && range[3] !== '*' && Number(range[3]) !== Number(file.size)) {
+          return json(res, 400, { ok: false, error: 'transfer_content_range_invalid' });
+        }
+        if (range && Number(range[2]) < Number(range[1])) {
+          return json(res, 400, { ok: false, error: 'transfer_content_range_invalid' });
+        }
+        const offset = range ? Number(range[1]) : 0;
+        await writePushStream(req, stageRoot, file, {
+          offset,
+          onProgress: (event) => {
+            try { updateOperation(operation.operation_id, { bytes_done: event.bytes, current_file: event.file, stage: 'running', state: 'running' }); }
+            catch { /* final commit is authoritative */ }
+          },
+        });
+        const verified = verifyStagedFiles(operation.files, stageRoot);
+        const next = updateOperation(operation.operation_id, {
+          state: verified.ok ? 'staged' : 'running', stage: verified.ok ? 'staged' : 'running',
+          bytes_done: verified.ok ? operation.bytes_total : (verified.bytes ?? operation.bytes_done ?? 0),
+        });
+        return json(res, 200, { ok: true, operation: v2PublicOperation(next), file: { index, path: file.path } });
+      } catch (error) { return apiError(error, 'transfer_upload_failed'); }
+    }
+      const transferCommit = url.match(/^\/api\/assets\/v2\/transfers\/([^/]+)\/commit$/);
+      if (transferCommit && req.method === 'POST') {
+      const result = await runV2Transfer(decodeURIComponent(transferCommit[1]));
+      const status = result.error === 'unknown_operation' ? 404 : (result.code ?? result.operation?.error_code) === 'insufficient_space' ? 507 : 409;
+      return result.ok ? json(res, 200, { ok: true, operation: v2PublicOperation(result.operation) })
+        : json(res, status, { ok: false, error: result.code ?? result.error, operation: v2PublicOperation(result.operation) });
+    }
+    const transferCancel = url.match(/^\/api\/assets\/v2\/transfers\/([^/]+)\/cancel$/);
+    if (transferCancel && req.method === 'POST') {
+      const id = decodeURIComponent(transferCancel[1]);
+      const operation = readOperation(id);
+      if (!operation) return json(res, 404, { ok: false, error: 'unknown_operation' });
+      v2TransferControllers.get(id)?.abort(new Error('transfer cancelled by caller'));
+      const next = ['complete', 'failed', 'cancelled'].includes(operation.state)
+        ? operation : updateOperation(id, { state: 'cancelled', error: 'cancelled_by_caller' });
+      return json(res, 200, { ok: true, operation: v2PublicOperation(next) });
+    }
+      const verifyMatch = url.match(/^\/api\/assets\/v2\/payloads\/([^/]+)\/verify$/);
+      if (verifyMatch && req.method === 'POST') {
+        const payloadId = decodeURIComponent(verifyMatch[1]);
+        const ledger = readPayloadLedger();
+      if (ledger.error) return json(res, 500, { ok: false, error: 'payload_ledger_corrupt', detail: ledger.error });
+      const payload = ledger.payloads?.[payloadId];
+      if (!payload) return json(res, 404, { ok: false, error: 'payload_not_found' });
+      const verified = verifyStagedFiles(payload.files, payload.storage_path);
+      return json(res, verified.ok ? 200 : 409, { ok: verified.ok, payload_id: payloadId, verification: verified });
+    }
+      const selectionMatch = url.match(/^\/api\/assets\/v2\/selections\/(.+)$/);
+      if (selectionMatch && req.method === 'PUT') {
+        const body = await readBody(req);
+        try {
+        if (!body || !Object.hasOwn(body, 'payload_id')) throw Object.assign(new Error('payload_id is required (or null to clear)'), { code: 'payload_id_required' });
+        const expectedGeneration = body?.expected_generation == null ? undefined : Number(body.expected_generation);
+        const assetId = decodeURIComponent(selectionMatch[1]);
+        const result = body.payload_id === null
+          ? clearPayloadSelection(assetId, body?.variant_id ?? 'generic', { expectedGeneration })
+          : (typeof body.payload_id === 'string' && body.payload_id
+            ? setPayloadSelection(assetId, body?.variant_id ?? 'generic', body.payload_id, { expectedGeneration })
+            : (() => { throw Object.assign(new Error('payload_id must be a SHA-256 id or null'), { code: 'payload_id_invalid' }); })());
+        return json(res, 200, { ok: true, generation: result.ledger.generation, selection: result.selection ?? null, changed: result.changed !== false });
+        } catch (error) { return apiError(error, 'selection_update_failed'); }
+      }
+    const deleteMatch = url.match(/^\/api\/assets\/v2\/payloads\/([^/]+)\/delete$/);
+    if (deleteMatch && req.method === 'POST') {
+      const body = await readBody(req);
+      try {
+        const result = deletePayload(decodeURIComponent(deleteMatch[1]), {
+          expectedGeneration: body?.expected_generation == null ? undefined : Number(body.expected_generation),
+          detach: Array.isArray(body?.detach) ? body.detach : [],
+        });
+        const status = result.ok ? 200 : result.error === 'payload_not_found' ? 404 : result.error === 'generation_mismatch' ? 409 : 409;
+        return json(res, status, result);
+      } catch (error) { return apiError(error, 'payload_delete_failed'); }
+    }
+    return json(res, 404, { ok: false, error: 'not_found' });
+  }
+
   /**
    * Asset 狀態只讀接口（024 §7.1）——只回已驗證的路徑與狀態，**不回模型內容**。
    * 安裝／激活／卸載仍然只歸 Installer CLI。
    *
-   * 唯一的例外是 `POST /api/assets/<id>/fetch`：**可選**資產的按需取得。
-   * 逻辑模型删除后的恢复走另外一条受限 `POST /restore`，并且只能携带逻辑模型坐标；
-   * 它不是普通资产 API 的“强制下载”开关。
-   * 它不是「另一種安裝」——安裝時就該到位的東西不走這裡（`not_optional` 直接拒），
-   * 它服務的是「裝完之後才做的選擇」：使用者到了要開始聽寫的那一刻才知道自己要哪一檔
-   * ASR，而把三檔都在安裝時下載是 1.8 GB，其中一半永遠用不到。
+   * 唯一保留的 v1 兼容入口是 `POST /api/assets/<id>/fetch`；它只翻譯到舊的
+   * Core transfer adapter。它不再以 optional/required、Package loaded 或 Consumer
+   * 使用情況限制 payload lifecycle；正式 Manager 使用上面的 v2 operation API。
    */
   if (url === '/api/assets' || url.startsWith('/api/assets/')) {
     if (!authed(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
@@ -1884,7 +2328,7 @@ const server = http.createServer(async (req, res) => {
         : r.error === 'already_fetching' ? 409
           : r.error === 'unknown_asset' || r.error === 'provider_not_loaded' ? 404
           : r.error === 'insufficient_space' ? 507
-            : String(r.error).startsWith('target_mismatch') || r.error === 'not_optional' ? 409 : 502;
+            : String(r.error).startsWith('target_mismatch') ? 409 : 502;
       return json(res, status, r);
     }
     /**

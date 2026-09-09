@@ -13,7 +13,9 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { MANIFEST_FILENAME, validateManifest, manifestTargets, matchTarget, TARGET_GENERIC } from '../src/packages/manifest.mjs';
 import { declaredDependencies } from '../src/packages/dependencies.mjs';
-import { checkFreeSpace, fetchAssetFiles, pendingBytes } from '../src/assets/fetch.mjs';
+import { checkFreeSpace } from '../src/assets/fetch.mjs';
+import { stagePullFiles } from '../src/assets/transfer/staging.mjs';
+import { validateTransferUrl } from '../src/assets/transfer/http.mjs';
 import {
   checkBundled, checkExternal, deviceProfile, resolveTarget, archiveName, scanForbiddenPaths, preflight,
   RELEASE_EXCLUDED_NAMES, RELEASE_EXCLUDED_SUFFIXES,
@@ -21,7 +23,11 @@ import {
 // sha256File 用串流版（024）：舊的 readFileSync 版會把 450MB 的 tar 整個吃進記憶體——手機上會 OOM
 import {
   sharedStore, assetVersionDir, sha256File, activateAsset, deactivateAsset, readRegistry,
+  payloadLedgerPath, syncCompatibilityRegistry,
+  readPayloadLedger, recordPayload, clearPayloadSelection, restorePayloadSelections, selectionKey,
 } from '../src/assets/registry.mjs';
+import { declarationVariantId } from '../src/assets/declarations.mjs';
+import { commitStagedPayloads } from '../src/assets/transfer/commit.mjs';
 import { defaultAuthFile, readAuthFile } from '../src/system/auth-file.mjs';
 import { checkPackagePorts, configurePortRegistry } from '../src/system/port-registry.mjs';
 import { packageGitState, packageGitIdentity, describeGitState, GIT_STATE } from '../src/packages/git-state.mjs';
@@ -331,13 +337,36 @@ function frameworkApi() {
     catch { /* Legacy configuration is optional. */ }
   }
   const base = process.env.FRAMEWORK_BASE_URL || 'http://127.0.0.1:8980';
-  const call = async (method, p) => {
+  const call = async (method, p, { body = undefined, headers = {}, timeoutMs = 60000 } = {}) => {
     try {
-      const r = await fetch(`${base}${p}`, { method, headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(60000) });
+      const r = await fetch(`${base}${p}`, { method, headers: { Authorization: `Bearer ${token}`, ...headers,
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeoutMs) });
       return await r.json();
     } catch { return null; } // framework 不在 = null
   };
   return { call, up: async () => { try { return (await fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) })).ok; } catch { return false; } } };
+}
+
+/**
+ * Resolve source coordinates through the currently bound replaceable Manager.
+ * The installer owns the package transaction; the Manager only supplies
+ * explicit transfer specs, so adding ModelScope or a signed source never
+ * creates a Core/installer source branch.
+ */
+async function resolveAssetTransferFiles(asset) {
+  const files = asset?.source?.files ?? [];
+  const result = await frameworkApi().call('POST', '/api/capabilities/termux-os.assets.manager/invoke', {
+    body: { input: { op: 'resolve_transfer', asset_id: asset.id, files } }, timeoutMs: 120_000,
+  });
+  if (!result?.ok || !result.value?.ok || !Array.isArray(result.value.files)) {
+    const detail = result?.value?.detail || result?.value?.error || result?.reason || result?.error
+      || 'Manager capability is unavailable';
+    throw Object.assign(new Error(`asset ${asset.id}: source resolver unavailable — ${detail}`), {
+      code: 'asset_source_resolver_unavailable',
+    });
+  }
+  return result.value;
 }
 
 const sh = (cmd2, args2) => execFileSync(cmd2, args2, { encoding: 'utf8' });
@@ -429,28 +458,40 @@ function writeActive(id, active) {
  */
 const payloadTarget = (asset, packageTargetId) => asset.target?.id ?? packageTargetId;
 
-async function installRemoteAssetPayload(asset, manifest, targetId, options) {
+async function installRemoteAssetPayload(asset, manifest, targetId, options, stagingRoot) {
+  const explicit = (() => {
+    const declared = asset?.source?.files;
+    if (!Array.isArray(declared) || !declared.length) return null;
+    try { return declared.map((file) => ({ ...file, url: validateTransferUrl(file.url) })); }
+    catch { return null; }
+  })();
+  // A manifest may carry a complete source-neutral URL, in which case the
+  // Package installer can use Core directly. Coordinate-only manifests ask
+  // the currently bound Manager to resolve them; this keeps ModelScope and
+  // future signed/SDK sources out of Core and the installer.
+  const resolved = explicit ? { files: explicit } : await resolveAssetTransferFiles(asset);
+  const files = resolved.files;
   const finalDir = path.join(
     assetVersionDir(manifest.id, manifest.version, payloadTarget(asset, targetId)),
     path.basename(asset.payload),
   );
-  const files = asset.source.files;
-  const need = pendingBytes(files, finalDir);
+  const need = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
   const space = checkFreeSpace(path.dirname(finalDir), need);
   if (!space.ok) {
     die(`asset ${asset.id}: needs ${need} bytes, only ${space.free_bytes} available in ${sharedStore()}`);
   }
   if (need > 0) console.log(`asset ${asset.id}: fetching ${need} bytes → ${finalDir}`);
-  const landed = await fetchAssetFiles(files, finalDir, {
-    via: options.via, registryBase: options.registryBase,
+  const stage = path.join(stagingRoot, `payload-${path.basename(asset.payload)}-${Date.now()}`);
+  const staged = await stagePullFiles(files, stage, {
     onProgress: ({ file, stage, bytes, total }) => {
       if (stage === 'done') console.log(`  ${file}: ${bytes} bytes verified`);
       if (stage === 'reused') console.log(`  ${file}: already present, reused`);
     },
   });
   const checksums = Object.fromEntries(files.map((f) => [f.path, f.sha256]));
-  console.log(`asset ${asset.id}: payload installed → ${finalDir}`);
-  return { asset, dir: finalDir, checksums, landed };
+  return { asset, dir: finalDir, checksums, files, stageRoot: stage,
+    v2Metadata: { package_id: manifest.id, version: manifest.version,
+      target: asset.target ?? targetId, provenance: 'package_install' }, landed: staged.landed };
 }
 
 async function installAssetPayloads(stagedPkg, manifest, targetId, options = {}) {
@@ -460,6 +501,7 @@ async function installAssetPayloads(stagedPkg, manifest, targetId, options = {})
   const staging = path.join(store, '.staging', `${manifest.id}-${Date.now()}`);
   const installed = [];
   const profile = deviceProfile();
+  let handedOff = false;
   try {
     for (const a of provides) {
       /**
@@ -487,7 +529,7 @@ async function installAssetPayloads(stagedPkg, manifest, targetId, options = {})
       }
       // 遠程宣告的 payload 不在歸檔裡——它按坐標去取，不必也不該被打進包。
       if (a.source?.files?.length) {
-        installed.push(await installRemoteAssetPayload(a, manifest, targetId, options));
+        installed.push(await installRemoteAssetPayload(a, manifest, targetId, options, staging));
         continue;
       }
       const srcDir = path.join(stagedPkg, a.payload);
@@ -513,39 +555,76 @@ async function installAssetPayloads(stagedPkg, manifest, targetId, options = {})
       }
 
       const finalDir = path.join(assetVersionDir(manifest.id, manifest.version, payloadTarget(a, targetId)), path.basename(a.payload));
-      if (fs.existsSync(finalDir)) {
-        // 已存在：sha 全同=複用（冪等）；有一個不同=拒（不覆蓋，也不假裝成功）
-        const diff = Object.entries(checksums).filter(([rel, want]) => {
-          const p = path.join(finalDir, rel);
-          return !fs.existsSync(p) || sha256File(p) !== want;
-        });
-        if (diff.length) {
-          throw new Error(`asset ${a.id}: ${finalDir} already exists with different content `
-            + `(${diff.map(([r]) => r).join(', ')}); refusing to overwrite /sdcard payload — bump the asset version`);
-        }
-        console.log(`asset ${a.id}: payload already present with identical sha256, reused`);
-      } else {
-        const stage = path.join(staging, path.basename(a.payload));
-        fs.mkdirSync(stage, { recursive: true });
-        for (const f of fs.readdirSync(srcDir)) fs.copyFileSync(path.join(srcDir, f), path.join(stage, f));
-        for (const [rel, want] of Object.entries(checksums)) { // 落盤後再驗一次：/sdcard 是 FUSE，抄壞過
-          if (sha256File(path.join(stage, rel)) !== want) throw new Error(`asset ${a.id}: ${rel} corrupted while copying to shared store`);
-        }
-        fs.mkdirSync(path.dirname(finalDir), { recursive: true });
-        fs.renameSync(stage, finalDir); // 原子上位
-        console.log(`asset ${a.id}: payload installed → ${finalDir}`);
+      const stage = path.join(staging, `payload-${installed.length}-${path.basename(a.payload)}`);
+      fs.mkdirSync(stage, { recursive: true });
+      // The installer still exposes the legacy versioned path during the
+      // migration release, but its bytes now use the same Core primitive as a
+      // Manager transfer: isolated stage, full manifest verification, atomic
+      // rename, and one Payload Ledger/Selection mutation.
+      fs.cpSync(srcDir, stage, { recursive: true, force: false, errorOnExist: false });
+      for (const [rel, want] of Object.entries(checksums)) { // /sdcard/FUSE 可能在抄寫時改變字節
+        if (sha256File(path.join(stage, rel)) !== want) throw new Error(`asset ${a.id}: ${rel} corrupted while copying to shared store`);
       }
-      installed.push({ asset: a, dir: finalDir, checksums });
+      const files = v2FilesFor(a, stage, checksums);
+      installed.push({ asset: a, dir: finalDir, checksums, stageRoot: stage, files,
+        v2Metadata: { package_id: manifest.id, version: manifest.version,
+          target: a.target ?? targetId, provenance: 'package_install' } });
     }
+    handedOff = true;
     return installed;
   } finally {
-    fs.rmSync(path.join(store, '.staging'), { recursive: true, force: true });
+    // The active Installed Root is written after this function returns. Keep
+    // bundled stages alive until registerInstalledAssets can commit them
+    // against the now-visible Declaration Index. Any thrown install cleans up
+    // immediately; the caller removes handed-off stages after registration.
+    if (!handedOff) fs.rmSync(staging, { recursive: true, force: true });
   }
+}
+
+const v2FilesFor = (asset, dir, checksums = {}) => {
+  const names = [...new Set(Object.values(asset.files ?? {}).filter((value) => typeof value === 'string' && value))];
+  return names.map((relative) => {
+    const filePath = path.join(dir, relative);
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) throw new Error(`asset ${asset.id}: file missing for v2 ledger: ${relative}`);
+    return { path: relative, size: fs.statSync(filePath).size, sha256: checksums[relative] ?? sha256File(filePath) };
+  });
+};
+
+/**
+ * Bridge the already-installed bytes into the v2 Ledger. The first bridge
+ * keeps the existing versioned directory in place (`layout=legacy`) so a
+ * package update never copies a 900 MB model merely to change bookkeeping.
+ */
+function recordV2Asset(asset, dir, checksums, manifest, targetId, targetSpec = null) {
+  const files = v2FilesFor(asset, dir, checksums);
+  return recordPayload({
+    files,
+    storagePath: dir,
+    layout: 'legacy',
+    // The Package target and the Asset variant are different namespaces. A
+    // generic Asset inside a targeted Package remains the generic Declaration;
+    // selecting the Package target here makes the v2 bridge fail with a false
+    // "no active Declaration" and rolls back an otherwise valid install.
+    selection: { asset_id: asset.id, variant_id: declarationVariantId(asset) },
+    package_id: manifest.id,
+    version: manifest.version,
+    target: targetSpec ?? asset.target ?? null,
+    provenance: 'package_install',
+  });
 }
 
 /** payload 就位後才登記為 active（登記指向的東西必須真的在） */
 function registerInstalledAssets(installed, manifest, targetId, targetSpec) {
-  for (const { asset, dir, checksums } of installed) {
+  const pending = installed.filter((item) => item.stageRoot && item.files);
+  if (pending.length) {
+    const committed = commitStagedPayloads({ payloads: pending.map((item) => ({
+      files: item.files, stageRoot: item.stageRoot, storagePath: item.dir, layout: 'legacy',
+      selection: { asset_id: item.asset.id, variant_id: declarationVariantId(item.asset) },
+      metadata: item.v2Metadata,
+    })) });
+    for (const [index, item] of pending.entries()) item.v2 = committed.payloads[index];
+  }
+  for (const { asset, dir, checksums, v2 } of installed) {
     activateAsset(asset.id, {
       package_id: manifest.id,
       version: manifest.version,
@@ -556,9 +635,55 @@ function registerInstalledAssets(installed, manifest, targetId, targetSpec) {
       checksums,
       sha256: Object.values(checksums)[0] ?? null,
     });
+    // Bundled payloads already entered the v2 Ledger in the same commit as
+    // their bytes. Remote/legacy bridge results still pass through this
+    // compatibility path until their Manager source resolver is wired in.
+    if (!v2) recordV2Asset(asset, dir, checksums, manifest, targetId, asset.target ?? targetSpec);
     console.log(`asset ${asset.id}: registered active ${manifest.version} [${targetId}]`);
   }
+  // The v1 entry above is only a bridge for old readers. Once a v2 Ledger is
+  // present, restore its projection last so activateAsset() cannot leave a
+  // stale v1 shape that disagrees with the authoritative Selection.
+  const ledger = readPayloadLedger();
+  if (!ledger.error && fs.existsSync(payloadLedgerPath())) syncCompatibilityRegistry(ledger);
 }
+
+const selectionEntriesFor = (...manifests) => {
+  const entries = new Map();
+  for (const manifest of manifests) {
+    for (const asset of manifest?.assets?.provides ?? []) {
+      if (!asset?.id) continue;
+      const variantId = declarationVariantId(asset);
+      entries.set(selectionKey(asset.id, variantId), { asset_id: asset.id, variant_id: variantId });
+    }
+  }
+  return [...entries.values()];
+};
+
+const captureSelectionSnapshot = (ledger, entries) => entries.map((entry) => ({
+  ...entry, selection: ledger.selections?.[selectionKey(entry.asset_id, entry.variant_id)] ?? null,
+}));
+
+/** Restore only this Package's Selection slice after active-root rollback. */
+const restoreSelectionsAfterInstallFailure = (snapshot) => {
+  if (!snapshot.length) return { changed: false };
+  const ledger = readPayloadLedger();
+  if (ledger.error) throw new Error(`cannot restore Asset Selections: ${ledger.error}`);
+  return restorePayloadSelections(snapshot, { expectedGeneration: ledger.generation });
+};
+
+const cleanupAssetStages = (installed) => {
+  for (const item of installed ?? []) if (item.stageRoot) {
+    try {
+      const parent = path.dirname(item.stageRoot);
+      fs.rmSync(item.stageRoot, { recursive: true, force: true });
+      try { fs.rmdirSync(parent); } catch { /* another operation may still use the shared staging parent */ }
+    } catch { /* cleanup is best effort */ }
+  }
+};
+const cleanupAssetStagingParent = () => {
+  try { fs.rmdirSync(path.join(sharedStore(), '.staging')); } catch { /* another operation may still use it */ }
+};
 
 // ============================================================
 // profile（023 §6）／check <tar>／check-installed <id>（§9）
@@ -630,6 +755,14 @@ async function cmdInstall(tarPath, shaPath, args = []) {
   const operationLock = lockPackage(id);
   requireReconciled(id);
   const prevActive = readActive(id);
+  const previousManifest = (() => {
+    if (!prevActive) return null;
+    try {
+      return JSON.parse(fs.readFileSync(path.join(root, id, 'versions', prevActive.active_version, MANIFEST_FILENAME), 'utf8'));
+    } catch { return null; }
+  })();
+  const selectionEntries = selectionEntriesFor(previousManifest, manifest);
+  const selectionSnapshot = captureSelectionSnapshot(readPayloadLedger(), selectionEntries);
   const forceTarget = args.includes('--force-target');
   const allowMissing = args.includes('--allow-missing-external');
 
@@ -752,6 +885,8 @@ async function cmdInstall(tarPath, shaPath, args = []) {
 
     // payload 已就位、active.json 已寫 → 才登記 asset 為 active（登記指向的東西必須真的在）
     registerInstalledAssets(assetsInstalled, manifest, targetId, t.target?.id === TARGET_GENERIC ? null : t.target);
+    cleanupAssetStages(assetsInstalled);
+    cleanupAssetStagingParent();
 
     if (!frameworkRestart()) console.log('note: framework.sh not found, skipped restart (dev machine?)');
     else {
@@ -773,9 +908,17 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     console.log(`installed ${id} ${version} (sha256 ${sha256.slice(0, 12)}…)`);
   } catch (e) {
     // 失敗恢復（§6.4）：staging 清除、active 復原、舊版本回歸、framework 重啟
+    cleanupAssetStages(assetsInstalled);
+    cleanupAssetStagingParent();
     cleanup();
     if (prevActive) {
       writeActive(id, prevActive);
+      try {
+        const restored = restoreSelectionsAfterInstallFailure(selectionSnapshot);
+        if (restored.changed) console.error(`restored Asset Selections for ${id} after install failure`);
+      } catch (restoreError) {
+        console.error(`RECOVERY PROBLEM: Asset Selection restore failed for ${id}: ${restoreError.message}`);
+      }
       // 只有真的重啟了 framework 才值得等它把包載回來。沒有 framework.sh（開發機/未 bootstrap）時
       // 硬等 = 白白 30 秒輪詢一個不存在的服務，然後報「RECOVERY PROBLEM」嚇人——恢復其實好好的
       const restarted = frameworkRestart();
@@ -785,6 +928,12 @@ async function cmdInstall(tarPath, shaPath, args = []) {
       console.error(`install failed, restored ${id} ${prevActive.active_version} (${how})`);
     } else {
       fs.rmSync(pkgDir, { recursive: true, force: true });
+      try {
+        const restored = restoreSelectionsAfterInstallFailure(selectionSnapshot);
+        if (restored.changed) console.error(`cleared partial Asset Selections for ${id} after install failure`);
+      } catch (restoreError) {
+        console.error(`RECOVERY PROBLEM: Asset Selection cleanup failed for ${id}: ${restoreError.message}`);
+      }
       frameworkRestart();
       console.error(`install failed, no previous version — ${id} removed`);
     }
@@ -1121,8 +1270,11 @@ async function cmdUninstall(id) {
   // 024 §6.3：只摘 active 登記，**payload 一律保留**（無 purge）——大模型重裝一次要幾分鐘，
   // 而且 /sdcard 上的東西不歸安裝器處置。使用方會如實看到 missing_asset，不會退回某個不明模型
   for (const a of manifest?.assets?.provides ?? []) {
+    try { clearPayloadSelection(a.id, declarationVariantId(a)); } catch { /* v2 bridge may not exist yet */ }
     if (deactivateAsset(a.id)) console.log(`asset ${a.id}: deactivated (shared payload kept on disk)`);
   }
+  const ledger = readPayloadLedger();
+  if (!ledger.error && fs.existsSync(payloadLedgerPath())) syncCompatibilityRegistry(ledger);
   fs.rmSync(path.join(root, id), { recursive: true, force: true }); // active.json + 全部版本
   if (frameworkRestart()) {
     const w = await waitPackageStatus(id, false);
@@ -1145,10 +1297,13 @@ async function cmdRollback(id) {
   if (!prev) die(`${id} has no previous version to roll back to`);
   const prevDir = path.join(root, id, 'versions', prev);
   if (!fs.existsSync(prevDir)) die(`previous version directory missing: versions/${prev}`);
-  let manifest = null;
-  try { manifest = JSON.parse(fs.readFileSync(path.join(root, id, 'versions', active.active_version, MANIFEST_FILENAME), 'utf8')); }
+  let currentManifest = null;
+  try { currentManifest = JSON.parse(fs.readFileSync(path.join(root, id, 'versions', active.active_version, MANIFEST_FILENAME), 'utf8')); }
   catch { /* 當前版本壞了正是 rollback 的理由 */ }
-  if (manifest) await stopOwnedServices(manifest);
+  if (currentManifest) await stopOwnedServices(currentManifest);
+  let prevManifest = null;
+  try { prevManifest = JSON.parse(fs.readFileSync(path.join(prevDir, MANIFEST_FILENAME), 'utf8')); } catch { /* 舊版壞了 */ }
+  const rollbackSelections = selectionEntriesFor(currentManifest, prevManifest);
   // 023：target 隨版本一起互換；hashes 鍵含 target（舊 active.json 無 target = generic）
   const prevTarget = active.previous_target ?? TARGET_GENERIC;
   writeActive(id, {
@@ -1160,9 +1315,15 @@ async function cmdRollback(id) {
     archive_sha256: active.hashes?.[`${prev}@${prevTarget}`] ?? active.hashes?.[prev] ?? null,
     installed_at: new Date().toISOString(),
   });
+  // A rollback may remove an Asset variant or leave its old bytes absent. Clear
+  // the whole affected Selection slice first; the loop below reselects only
+  // old payloads that are actually present and verified.
+  try {
+    restorePayloadSelections(rollbackSelections.map((entry) => ({ ...entry, selection: null })), {
+      expectedGeneration: readPayloadLedger().generation,
+    });
+  } catch (error) { die(`rollback Asset Selection reconciliation failed: ${error.message}`); }
   // 024 §6.2：Asset 的 rollback = **只切登記指針**，不複製、不重解壓大檔（payload 各版本都還在）
-  let prevManifest = null;
-  try { prevManifest = JSON.parse(fs.readFileSync(path.join(prevDir, MANIFEST_FILENAME), 'utf8')); } catch { /* 舊版壞了 */ }
   for (const a of prevManifest?.assets?.provides ?? []) {
     const dir = path.join(assetVersionDir(id, prev, prevTarget), path.basename(a.payload));
     if (!fs.existsSync(dir)) { console.error(`WARNING: asset ${a.id}: payload for ${prev} not found at ${dir}`); continue; }
@@ -1177,8 +1338,12 @@ async function cmdRollback(id) {
       target_spec: prevManifest?.targets?.find((t) => t.id === prevTarget) ?? null,
       path: dir, files: a.files ?? {}, checksums, sha256: Object.values(checksums)[0] ?? null,
     });
+    try { recordV2Asset(a, dir, checksums, prevManifest, prevTarget, prevManifest?.targets?.find((t) => t.id === prevTarget) ?? null); }
+    catch (error) { console.error(`WARNING: asset ${a.id}: v2 selection bridge failed: ${String(error?.message ?? error)}`); }
     console.log(`asset ${a.id}: registry now points at ${prev} (no bytes copied)`);
   }
+  const ledger = readPayloadLedger();
+  if (!ledger.error && fs.existsSync(payloadLedgerPath())) syncCompatibilityRegistry(ledger);
 
   if (frameworkRestart()) {
     const w = await waitPackageStatus(id, true);

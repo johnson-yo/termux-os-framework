@@ -3,7 +3,8 @@
 `src/` is Framework Core and may use only Node.js standard-library APIs.
 
 - `apps/`: generic application sessions and coordination
-- `assets/`: immutable asset metadata and resolution
+- `assets/`: generic Asset registration metadata and policy-free transfer/storage/
+  verification primitives; no Manager or product lifecycle policy
 - `capabilities/`: provider discovery and binding
 - `packages/`: manifests, Installed Root, runtime contracts, and Dev Runtime
 - `stage/`: generic service supervision

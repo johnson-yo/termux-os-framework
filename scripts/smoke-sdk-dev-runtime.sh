@@ -108,10 +108,33 @@ tar tzf "$TAR" | grep -q RELEASE_NOTES.md && ok "RELEASE_NOTES 隨包凍結" || 
 #    裝上去自然判 dev——而不是另一個 package type / channel。
 DIRTY_TAR="$WORK/dirty/$ID-0.1.0.tar.gz"
 echo "// dirty" >> "$GW/package.mjs"
+# Regression coverage for local development assets: an untracked declaration
+# directory must survive the dirty copy, and a tracked deletion must not be
+# resurrected from the depth-1 clone's baseline.
+printf 'tracked fixture\n' > "$GW/dirty-tracked.txt"
+git -C "$GW" add dirty-tracked.txt && git -C "$GW" commit -qm "test: add dirty asset fixture"
+rm -f "$GW/dirty-tracked.txt"
+mkdir -p "$GW/.models/smoke-owner"
+printf 'raw-package-consumer: smoke\n' > "$GW/.models/smoke-owner/smoke-repository"
 tf "dirty 來源默認拒絕 release" $SDK release $ID
 t "--allow-dirty 產出本地開發產物" $SDK release $ID --allow-dirty --artifact-dir "$WORK/dirty"
 tar tzf "$DIRTY_TAR" | grep -q "/\.git/" && ok "dirty 產物仍是同一種包（帶 .git）" || bad "dirty 產物格式"
+tar tzf "$DIRTY_TAR" | grep -q "/\.models/smoke-owner/smoke-repository$" \
+  && ok "dirty 產物保留未追蹤 declaration 目錄" || bad "dirty declaration 目錄"
+if tar tzf "$DIRTY_TAR" | grep -q "/dirty-tracked.txt$"; then
+  bad "dirty 產物錯誤復活已刪除 tracked 文件"
+else
+  ok "dirty 產物保留 tracked deletion"
+fi
 git -C "$GW" checkout -- package.mjs
+# The dirty-builder regression above intentionally creates a committed deletion
+# and an untracked declaration directory. Restore the temporary source tree
+# before the remainder of this smoke: the later dev-sync assertions are about
+# a clean released Package, not about the builder fixture.
+rm -rf "$GW/.models"
+git -C "$GW" add -A
+git -C "$GW" commit -qm "test: restore clean source after dirty asset fixture"
+$SDK release $ID >/dev/null 2>&1 || { bad "重新生成干净 release"; }
 
 echo "--- 3. status（Framework 不可達）---"
 $SDK status $ID --json | jq "assert 'unknown' in d['drift'] and not d['reachable']" \

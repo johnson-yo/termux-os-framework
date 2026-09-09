@@ -10,6 +10,14 @@ Core owns Package lifecycle, Capability routing, service supervision, applicatio
 
 Core must not bundle or implement audio processing, speech engines, TTS engines, language models, translation engines, model assets, vendor runtimes, device-specific applications, or product workflows. Those belong in independent Extension Package or application repositories.
 
+Core must also remain independent from replaceable Asset Managers. An Asset Package
+may register and install an Asset declaration; a Manager Package owns the product
+catalog and the Asset payload lifecycle (download, resume, verification, storage,
+update, and deletion). Core may expose policy-free technical primitives for those
+operations, but must not decide whether a Manager may perform them based on
+`optional`, provider/package load state, consumer declarations, or source-specific
+policy. Payload deletion must not implicitly unregister the Asset declaration.
+
 Core must start successfully with zero installed Packages and report an empty Package and service inventory.
 
 ## Read order

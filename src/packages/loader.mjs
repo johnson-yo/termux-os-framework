@@ -19,7 +19,7 @@ import { activateAsset, assetVersionDir } from '../assets/registry.mjs';
 import { registerAction, getAction, unregisterAction } from '../theatre/runtime.mjs';
 import { getState, listStates, registerState, setState, unregisterPackageStates } from '../state/registry.mjs';
 import {
-  registerAssetProvider, listAssets, unregisterAssetProvider, getAssetProvider, fetchOptionalAsset,
+  registerAssetProvider, listAssets, unregisterAssetProvider, getAssetProvider, fetchAssetPayload,
   resolveAsset as resolveAssetById, describeAsset as describeAssetById,
 } from '../assets/runtime.mjs';
 // 循環 import（resolver 反向 import 本檔的 listCapabilityProviders/getPackage）——只在 context 方法
@@ -30,6 +30,7 @@ import { restartService } from '../stage/manager.mjs';
 import { getPackagePorts, registerPackagePorts, prunePackagePorts } from '../system/port-registry.mjs';
 import { isPackageEnabled } from '../system/package-settings.mjs';
 import { nodeExecutable } from '../system/node-runtime.mjs';
+import { issuePackageToken, revokePackageToken } from '../system/auth.mjs';
 
 // ============================================================
 // Registry（模塊級單例；self-test 用獨立掃描根避免污染正式登記）
@@ -263,7 +264,6 @@ export async function fetchAssetOnDemand(assetId, {
   // 沒給就用載入時記下的那一個；⛔ 不預設一個公網地址——Catalog 地址是部署決定，
   // 在這裡編一個出來會讓「它到底去哪裡取」變成一個要讀源碼才知道的問題。
   registryBase = loadedRegistryBase,
-  allowRequired = false,
   ...rest
 } = {}) {
   const provider = getAssetProvider(assetId);
@@ -297,12 +297,11 @@ export async function fetchAssetOnDemand(assetId, {
     onProgress({ ...event, ...(observed ?? {}) });
   };
   try {
-    const result = await fetchOptionalAsset(assetId, {
+    const result = await fetchAssetPayload(assetId, {
     ...rest,
     packageManifest: manifest,
     onProgress: report,
     registryBase,
-    allowRequired,
     signal: controller.signal,
     storeDirFor: (declared) => path.join(
       assetVersionDir(manifest.id, manifest.version, declared.target?.id ?? packageTarget),
@@ -376,11 +375,11 @@ export async function reconcileAssetFetch(assetId, { staleAfterMs = 120_000 } = 
 }
 
 /**
- * 逻辑模型删除后的恢复专用入口。必需资产只有在带有逻辑模型坐标的受限路由中
- * 才能走这里；普通 Package context.assets.fetch 仍然只能取 optional 资产。
+ * v1 compatibility alias. Payload lifecycle policy is not encoded here;
+ * Manager v2 owns download/update/delete decisions.
  */
 export async function restoreAssetOnDemand(assetId, opts = {}) {
-  return fetchAssetOnDemand(assetId, { ...opts, allowRequired: true });
+  return fetchAssetOnDemand(assetId, opts);
 }
 
 /** 這台機器該用哪一份載荷宣告——狀態頁與 CLI 用來說明「有幾檔、你是哪一檔」。 */
@@ -450,6 +449,7 @@ export async function unregisterPackage(id) {
   for (const assetId of r.registered.assets) unregisterAssetProvider(assetId);
   for (const cap of r.registered.integrations ?? []) integrationProvides.delete(cap);
   for (const aid of r.registered.artifactContracts ?? []) artifactContracts.delete(aid);
+  revokePackageToken(r.packageToken);
   routes.delete(id);
   websocketRoutes.delete(id);
   packages.delete(id);
@@ -586,8 +586,7 @@ function makeContext(record, config, configPath, overrides = null, saveConfig = 
       resolve: (assetId, opts) => resolveAssetById(assetId, opts),
       describe: (assetId, opts) => describeAssetById(assetId, opts),
       list: (opts) => listAssets(opts),
-      // 不把逻辑模型恢复的 allowRequired 口子暴露给 Package；恢复只能走 Framework
-      // 的受限 HTTP 路由，并由上层先完成停用。
+      // v1 compatibility fetch only; Package lifecycle policy stays outside Core.
       fetch: (assetId, opts = {}) => fetchAssetOnDemand(assetId, {
         onProgress: opts.onProgress,
       }),
@@ -664,9 +663,14 @@ function makeContext(record, config, configPath, overrides = null, saveConfig = 
           app: def.app ? ns(def.app) : null,
           command: def.command === process.execPath ? nodeExecutable() : def.command,
           package: id,
+          package_root: record.dir,
+          // Stage uses the declared port and package root to prove ownership of
+          // a listener left behind by a previous Package generation.
+          ports: packagePorts,
           env: {
             ...(def.env ?? {}),
             TERMUX_OS_SYSTEM_KEY: String(config?.auth?.admin_token ?? ''),
+            TERMUX_OS_PACKAGE_TOKEN: String(record.packageToken ?? ''),
             TERMUX_OS_FRAMEWORK_URL: `http://127.0.0.1:${Number(config?.server?.port) || 8980}`,
             TERMUX_OS_PACKAGE_ID: id,
             ...portEnv,
@@ -777,6 +781,7 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
 
   const record = {
     id, packageId, dir, packageRoot, manifest, source, install, status: 'loaded', error: null,
+    packageToken: issuePackageToken({ packageId: id, generation: `${source}:${Date.now()}` }),
     webRoot: path.join(dir, path.dirname(manifest.entrypoints.webui)),
     registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], states: [], cleanups: [] },
   };
@@ -839,6 +844,8 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
     record.registered.cleanups = [];
     record.status = 'failed';
     record.error = `register failed: ${String(e?.message ?? e)}`;
+    revokePackageToken(record.packageToken);
+    record.packageToken = null;
     // A failed Package must not reserve a port that no running Package owns.
     try { registerPackagePorts(id, []); } catch { /* preserve the original load error */ }
     packages.set(id, record);

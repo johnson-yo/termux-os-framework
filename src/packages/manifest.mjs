@@ -6,7 +6,6 @@
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
 
-import { isKnownAssetHost } from '../assets/fetch.mjs';
 import { CONSTRAINT_SYNTAX, parseConstraint } from './version.mjs';
 
 export const MANIFEST_FILENAME = 'termux-os.package.json';
@@ -37,6 +36,7 @@ const PROBE_TYPES = new Set(['command', 'file', 'python_import', 'framework_acti
 const TARGET_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 const QNN_RE = /^\d+\.\d+$/;
 const HTP_RE = /^v\d{2}$/;
+const SOURCE_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 
 /**
  * probe 兩種寫法歸一：字符串 = framework_action 簡寫（023 §3 示例的 "android.app.status"），
@@ -206,18 +206,22 @@ function validateAssetSource(e, where, asset) {
       if (seen.has(f.path)) e(`${at}.path is declared twice: ${f.path}`);
       seen.add(f.path);
     }
-    if (!/^[\w.-]+\/[\w.-]+$/.test(String(f.repo ?? ''))) e(`${at}.repo must be "owner/name"`);
-    /**
-     * ⚠ `host` 可省略（＝ `huggingface`）：既有的每一份 manifest 都沒有這一欄，
-     *   ⛔ 加它不許讓任何已發布的包失效。
-     * ⛔ 但寫了就必須是認識的那幾個——一個拼錯的主機名會在**設備上要下載時**才炸，
-     *   而那時候看起來像「這個資產壞了」而不是「manifest 寫錯了」。
-     */
-    if (f.host !== undefined && !isKnownAssetHost(f.host)) {
-      e(`${at}.host must be one of: huggingface, github`);
+    // `host` is an opaque source-adapter id. Core and the Package manifest
+    // validator must not enumerate upstream brands; a replacement Manager may
+    // register another adapter without a Framework release. A complete URL is
+    // also valid for sources that need no coordinate resolver.
+    if (f.host !== undefined && (typeof f.host !== 'string' || !SOURCE_ID_RE.test(f.host))) {
+      e(`${at}.host must be a non-empty source adapter id`);
     }
-    if (!/^[0-9a-f]{40}$/.test(String(f.revision ?? ''))) {
-      e(`${at}.revision must be a full 40-character commit sha (a branch moves)`);
+    if (f.url !== undefined && (typeof f.url !== 'string' || !/^https?:\/\/[^\s]+$/i.test(f.url))) {
+      e(`${at}.url must be an absolute HTTP(S) URL`);
+    }
+    const hasExplicitUrl = typeof f.url === 'string' && /^https?:\/\/[^\s]+$/i.test(f.url);
+    if (!hasExplicitUrl && !/^[\w.-]+\/[\w.-]+$/.test(String(f.repo ?? ''))) {
+      e(`${at}.repo must be "owner/name" when url is not supplied`);
+    }
+    if (!hasExplicitUrl && !/^[0-9a-f]{40}$/.test(String(f.revision ?? ''))) {
+      e(`${at}.revision must be a full 40-character commit sha when url is not supplied (a branch moves)`);
     }
     if (f.remote_path !== undefined && !relPathOk(f.remote_path)) {
       e(`${at}.remote_path must be a relative path inside the source repository`);
@@ -864,11 +868,7 @@ if (process.argv.includes('--self-test')
   // ⛔ 角色指向一個 BOM 裡沒有的檔案，要在這裡炸，不是到設備上才炸。
   t('a role that points at a file the BOM never declares is refused',
     !validateManifest(remoteAsset({ files: { model: 'typo.onnx' } })).ok);
-  /**
-   * ⭐ 來源主機是 BOM 的一部分。省略＝ `huggingface`，因為**已發布的每一份 manifest
-   *   都沒有這一欄**，⛔ 加它不許讓任何一個包失效。
-   * ⛔ 但拼錯的主機名要在這裡炸：留到設備上下載時才炸，看起來像「資產壞了」。
-   */
+  /** Source adapter ids are opaque; their meaning belongs to the Manager. */
   t('a source file may name its host, and omitting it stays valid',
     validateManifest(remoteAsset({ source: { files: [
       { path: 'm.onnx', repo: 'o/r', revision: 'a'.repeat(40), size: 1, sha256: 'b'.repeat(64), host: 'github' },
@@ -876,10 +876,16 @@ if (process.argv.includes('--self-test')
     && validateManifest(remoteAsset({ source: { files: [
       { path: 'm.onnx', repo: 'o/r', revision: 'a'.repeat(40), size: 1, sha256: 'b'.repeat(64) },
     ] } })).ok);
-  t('a host nobody can fetch from is refused here, not on the device',
-    !validateManifest(remoteAsset({ source: { files: [
+  t('a source adapter unknown to this Core is still structurally valid',
+    validateManifest(remoteAsset({ source: { files: [
       { path: 'm.onnx', repo: 'o/r', revision: 'a'.repeat(40), size: 1, sha256: 'b'.repeat(64), host: 'gitlab' },
     ] } })).ok);
+  t('a complete explicit URL may replace source coordinates', validateManifest(remoteAsset({ source: { files: [
+    { path: 'm.onnx', url: 'https://source.example/object', size: 1, sha256: 'b'.repeat(64) },
+  ] } })).ok);
+  t('a malformed source adapter id or URL is refused structurally',
+    !validateManifest(remoteAsset({ source: { files: [{ path: 'm.onnx', repo: 'o/r', revision: 'a'.repeat(40), size: 1, sha256: 'b'.repeat(64), host: 'bad source' }] } })).ok
+    && !validateManifest(remoteAsset({ source: { files: [{ path: 'm.onnx', url: 'ftp://source.example/object', size: 1, sha256: 'b'.repeat(64) }] } })).ok);
   t('the same file declared twice is refused',
     !validateManifest(remoteAsset({ source: { files: [
       { path: 'm.onnx', repo: 'o/r', revision: 'a'.repeat(40), size: 1, sha256: 'b'.repeat(64) },

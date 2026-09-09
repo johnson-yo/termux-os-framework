@@ -1,6 +1,6 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
- * [INPUT]: Installed Package roots and the read-only `.models/<owner>/<repository>` declaration contract.
+ * [INPUT]: Installed Package version roots and the read-only `.models/<owner>/<repository>` declaration contract.
  * [OUTPUT]: Explicit model-consumer declarations with per-Package validation status.
  * [POS]: src/packages/model-declarations.mjs in termux-os-framework.
  * [PROTOCOL]: This is a generic Package seam; it contains no model-specific registry or runtime policy.
@@ -28,7 +28,9 @@ const isSafeDirEntry = (entry) => entry?.isDirectory?.() === true || entry?.isFi
  * explicit error so callers never confuse "not declared" with "could not read".
  */
 export function readPackageModelDeclarations(packageRecord) {
-  const packageRoot = packageRecord?.packageRoot;
+  // packageRoot is the cross-version Installed Root used for persistent config.
+  // Declarations are release content and must follow the active version instead.
+  const packageRoot = packageRecord?.versionRoot ?? packageRecord?.dir ?? packageRecord?.packageRoot;
   const packageId = packageRecord?.id ?? null;
   if (typeof packageRoot !== 'string' || !packageRoot) {
     return { package_id: packageId, present: false, declarations: [], errors: [{ error: 'package_root_missing' }] };
@@ -131,18 +133,19 @@ if (process.argv.includes('--self-test')
   const test = (name, condition) => { console.log(`${condition ? 'PASS' : 'FAIL'} ${name}`); if (!condition) fails++; };
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'model-declarations-'));
   const packageRoot = path.join(root, 'pkg.example');
-  fs.mkdirSync(path.join(packageRoot, 'versions', '1.0.0'), { recursive: true });
+  const versionRoot = path.join(packageRoot, 'versions', '1.0.0');
+  fs.mkdirSync(versionRoot, { recursive: true });
   fs.writeFileSync(path.join(packageRoot, 'active.json'), JSON.stringify({
     schema: 'termux-os.package-active.v1', id: 'pkg.example', active_version: '1.0.0',
   }));
-  fs.mkdirSync(path.join(packageRoot, '.models', 'owner'), { recursive: true });
-  fs.writeFileSync(path.join(packageRoot, '.models', 'owner', 'repository'), '');
+  fs.mkdirSync(path.join(versionRoot, '.models', 'owner'), { recursive: true });
+  fs.writeFileSync(path.join(versionRoot, '.models', 'owner', 'repository'), '');
   const result = listModelDeclarations(root);
   test('valid declaration is enumerated', result.declarations.length === 1
     && result.declarations[0].identity === 'owner/repository');
   test('declaration is tied to its Package', result.declarations[0].package_id === 'pkg.example');
-  fs.mkdirSync(path.join(packageRoot, '.models', 'owner', 'bad'), { recursive: true });
-  fs.writeFileSync(path.join(packageRoot, '.models', 'owner', 'bad', 'entry'), '');
+  fs.mkdirSync(path.join(versionRoot, '.models', 'owner', 'bad'), { recursive: true });
+  fs.writeFileSync(path.join(versionRoot, '.models', 'owner', 'bad', 'entry'), '');
   const invalid = listModelDeclarations(root);
   test('bad nested path is visible as an error', invalid.packages[0].errors.some((e) => e.error === 'invalid_repository_declaration'));
   fs.rmSync(root, { recursive: true, force: true });

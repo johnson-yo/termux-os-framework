@@ -27,11 +27,19 @@ for file in \
   src/packages/loader.mjs \
   src/packages/model-declarations.mjs \
   src/assets/fetch.mjs \
+  src/assets/declarations.mjs \
+  src/assets/migration.mjs \
   src/assets/registry.mjs \
   src/assets/payload.mjs \
   src/assets/archive.mjs \
   src/assets/runtime.mjs \
   src/assets/resolver.mjs \
+  src/assets/transfer/http.mjs \
+  src/assets/transfer/staging.mjs \
+  src/assets/transfer/lock.mjs \
+  src/assets/transfer/journal.mjs \
+  src/assets/transfer/commit.mjs \
+  src/assets/transfer/removal.mjs \
   src/capabilities/resolver.mjs \
   src/apps/session.mjs \
   src/stage/manager.mjs \
@@ -67,6 +75,7 @@ for script in \
   scripts/smoke-framework-installer.sh; do
   bash "$script"
 done
+node scripts/smoke-asset-payload-v2.mjs
 
 node scripts/extract-ui-strings.mjs --check
 node scripts/check-publication.mjs

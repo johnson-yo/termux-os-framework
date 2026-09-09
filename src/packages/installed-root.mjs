@@ -57,7 +57,9 @@ export function resolveInstalledPackages(root = installedRoot()) {
       continue;
     }
     // packageRoot 跨版本存在，versionDir 不是：Package 自己的設定要放在前者之下才活得過升級。
-    entries.push({ id, dir: versionDir, packageRoot: dir, active });
+    // versionRoot 是目前真正被載入的發行內容；像 .models 這類隨版本發佈的
+    // 宣告不能從跨版本的 packageRoot 讀，否則更新後會讀到舊版本或空目錄。
+    entries.push({ id, dir: versionDir, versionRoot: versionDir, packageRoot: dir, active });
   }
   return { entries, errors };
 }

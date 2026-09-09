@@ -86,10 +86,33 @@ git -C "$STAGE" branch --quiet --set-upstream-to "origin/$BRANCH" 2>/dev/null ||
 # 未提交的修改在 --allow-dirty 下要進 artifact，否則本地 dev 產物與工作樹不符。
 if [ -n "$DIRTY" ]; then
   say "copying uncommitted changes into the artifact"
+  # `git status --porcelain -z` reports an untracked directory as one entry
+  # (`?? .models/`).  Copying only regular files silently dropped that whole
+  # subtree from dirty local assets.  Copy every changed path, including
+  # directories, into the staged clone.
   ( cd "$SOURCE" && git status --porcelain -z | while IFS= read -r -d '' entry; do
       f="${entry:3}"
-      [ -f "$f" ] && { mkdir -p "$STAGE/$(dirname "$f")"; cp -a "$f" "$STAGE/$f"; }
+      f="${f%/}"
+      [ -n "$f" ] || continue
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      mkdir -p "$STAGE/$(dirname "$f")"
+      rm -rf "$STAGE/$f"
+      cp -a "$f" "$STAGE/$f"
     done )
+
+  # A depth-1 clone starts from the last committed tree, so a locally deleted
+  # tracked file would otherwise come back into the artifact.  Apply staged
+  # and unstaged deletions explicitly; this also makes a dirty asset match the
+  # source tree rather than the clone's baseline.
+  while IFS= read -r deleted; do
+    [ -n "$deleted" ] || continue
+    rm -f "$STAGE/$deleted"
+  done < <(
+    {
+      git -C "$SOURCE" diff --name-only --diff-filter=D
+      git -C "$SOURCE" diff --cached --name-only --diff-filter=D
+    } | sort -u
+  )
 fi
 
 # 憑據與 CI 本機痕跡不進包。

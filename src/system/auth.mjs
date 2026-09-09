@@ -14,6 +14,10 @@ const COOKIE = 'tos_session';
 const SESSION_SCHEMA = 'termux-os.browser-sessions.v1';
 const sessions = new Map();
 const failures = new Map();
+// Package service credentials are deliberately process-memory only.  They identify the
+// currently loaded Package generation to Core; they are not a replacement for Android UID
+// isolation (Package services normally share the Termux UID).
+const packageTokens = new Map(); // sha256(token) -> { package_id, generation, scopes, issued_at }
 
 let config = {
   password: '',
@@ -56,6 +60,7 @@ const auditFailure = (remote, reason) => {
 // Cookie values are bearer credentials. The only persistent copy stays in Termux private Home, and a
 // password fingerprint makes an administrator password rotation invalidate every restored Session.
 const authFingerprint = (password) => crypto.createHash('sha256').update(password).digest('hex');
+const packageTokenFingerprint = (token) => crypto.createHash('sha256').update(String(token ?? '')).digest('hex');
 
 const validStoredSession = (item, now = Date.now()) => item
   && typeof item.id === 'string' && item.id.length >= 32
@@ -130,7 +135,39 @@ export function configureBrowserAuth(opts = {}) {
   };
   sessions.clear();
   failures.clear();
+  packageTokens.clear();
   restoreSessions();
+}
+
+/**
+ * Issue a short-lived-in-practice, revocable credential for one loaded Package generation.
+ * The token itself never enters a persistent config/session file or an HTTP response from Core.
+ */
+export function issuePackageToken({ packageId, generation = Date.now(), scopes = ['assets.read', 'assets.write'] } = {}) {
+  if (!packageId || typeof packageId !== 'string') throw new Error('packageId is required');
+  const token = crypto.randomBytes(32).toString('base64url');
+  packageTokens.set(packageTokenFingerprint(token), {
+    package_id: packageId,
+    generation: String(generation),
+    scopes: [...new Set((Array.isArray(scopes) ? scopes : []).filter((scope) => typeof scope === 'string'))],
+    issued_at: new Date().toISOString(),
+  });
+  return token;
+}
+
+/** Revoke one Package generation credential during unload/reload. */
+export function revokePackageToken(token) {
+  if (!token) return false;
+  return packageTokens.delete(packageTokenFingerprint(token));
+}
+
+/** Revoke all credentials belonging to a Package id (defensive reload cleanup). */
+export function revokePackageTokensForPackage(packageId) {
+  let removed = 0;
+  for (const [fingerprint, item] of packageTokens) {
+    if (item.package_id === packageId) { packageTokens.delete(fingerprint); removed++; }
+  }
+  return removed;
 }
 
 /** Rotate credentials in-process after the private credential store is updated. */
@@ -200,6 +237,11 @@ export function openLocalSession() {
 export function authenticateRequest(req) {
   prune();
   const bearer = String(req.headers.authorization ?? '').match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
+  const packageIdentity = bearer ? packageTokens.get(packageTokenFingerprint(bearer)) : null;
+  if (packageIdentity) {
+    return { kind: 'package', package_id: packageIdentity.package_id, generation: packageIdentity.generation,
+      scopes: [...packageIdentity.scopes], permissions: ['read', 'write'] };
+  }
   if (bearer && equalSecret(bearer, config.apiToken)) {
     return { kind: 'token', permissions: ['read', 'write'] };
   }
@@ -278,6 +320,14 @@ if (process.argv.includes('--self-test')
     t('csrf required and accepted', !csrfValid({ headers: {} }, restored)
       && csrfValid({ headers: { 'x-csrf-token': fresh.session.csrf } }, restored));
     t('bearer remains independent', authenticateRequest({ headers: { authorization: 'Bearer api-token' } })?.kind === 'token');
+    const packageToken = issuePackageToken({ packageId: 'github.example.manager', generation: 'test-generation' });
+    const packageContext = authenticateRequest({ headers: { authorization: `Bearer ${packageToken}` } });
+    t('Package token authenticates with identity and scope', packageContext?.kind === 'package'
+      && packageContext.package_id === 'github.example.manager'
+      && packageContext.generation === 'test-generation'
+      && packageContext.scopes.includes('assets.write'));
+    t('revoked Package token is rejected', revokePackageToken(packageToken)
+      && authenticateRequest({ headers: { authorization: `Bearer ${packageToken}` } }) === null);
     t('logout invalidates session', logoutBrowser(restored)
       && authenticateRequest({ headers: { cookie: `${COOKIE}=${fresh.session.id}` } }) === null);
     fs.rmSync(dir, { recursive: true, force: true });

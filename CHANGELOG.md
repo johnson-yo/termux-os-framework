@@ -2,6 +2,18 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.4
+
+- Add the Asset payload lifecycle v2 substrate: declaration-derived resolution,
+  immutable payload objects, explicit selections, resumable verified transfers,
+  atomic commit, deletion impact planning, and restart-safe operation journals.
+- Keep the Core boundary policy-free. A replaceable Manager may use the
+  low-level path, transfer, integrity, and storage primitives without Core
+  blocking download, update, verification, or deletion based on provider or
+  consumer state.
+- Migrate legacy v1 payload records conservatively, preserving usable bytes and
+  recording missing or orphaned state instead of inventing readiness.
+
 ## 0.3.3
 
 - Fix raw Asset archive import on Android shared storage by staging beside the

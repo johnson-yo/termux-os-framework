@@ -24,9 +24,19 @@ remove, nor reinstall without opening a shell to find out why it had vanished.
 
 ## `.models` declarations
 
-An installed Package may declare raw model consumers with empty files at
-`.models/<owner>/<repository>`. Core exposes the read-only enumeration through
+An installed Package version may declare raw model consumers with empty files at
+`.models/<owner>/<repository>` in the active version root. Core exposes the read-only enumeration through
 `GET /api/packages/model-declarations`; it validates the active Installed Root,
 keeps malformed paths visible as errors, and does not persist a second consumer
 ledger. The declaration is package-local data: a Package update preserves it,
 while Package uninstall removes it with the Package root.
+
+## Asset payload boundary
+
+An Asset Package owns Asset declaration, registration, and package-install
+provisioning. A replaceable Manager Package owns the payload lifecycle after
+registration: source selection, download/resume, verification, storage, update,
+delete confirmation, and deletion. Core may provide generic path, transfer,
+integrity, and atomic-storage primitives, but it must not turn `optional`,
+provider load state, or `.models` declarations into a lifecycle permission check.
+Deleting payload bytes must be separate from unregistering the Asset declaration.

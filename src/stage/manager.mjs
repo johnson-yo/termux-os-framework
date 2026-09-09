@@ -8,6 +8,7 @@
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { services, getServiceDef } from './catalog.mjs';
 import { nodeExecutable } from '../system/node-runtime.mjs';
@@ -46,10 +47,173 @@ const procStat = (pid) => {
 const procCommand = (pid) => {
   try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')[0]; } catch { return null; }
 };
+const procArgs = (pid) => {
+  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean).slice(1); } catch { return []; }
+};
+const procCwd = (pid) => {
+  try { return fs.readlinkSync(`/proc/${pid}/cwd`); } catch { return null; }
+};
+const procPackageId = (pid) => {
+  try {
+    const env = fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0');
+    const entry = env.find((item) => item.startsWith('TERMUX_OS_PACKAGE_ID='));
+    return entry ? entry.slice('TERMUX_OS_PACKAGE_ID='.length) : null;
+  } catch { return null; }
+};
+const procDetails = (pid) => {
+  const stat = procStat(pid);
+  if (!stat) return null;
+  return {
+    pid: Number(pid),
+    pgid: stat.pgid,
+    proc_start_ticks: stat.startTicks,
+    command: procCommand(pid),
+    args: procArgs(pid),
+    cwd: procCwd(pid),
+    package_id: procPackageId(pid),
+  };
+};
 const pidValid = (meta) => {
   if (!meta?.pid) return false;
-  const st = procStat(meta.pid);
-  return !!st && st.startTicks === meta.proc_start_ticks && procCommand(meta.pid) === meta.command;
+  const current = procDetails(meta.pid);
+  return !!current
+    && current.proc_start_ticks === meta.proc_start_ticks
+    && current.command === meta.command
+    && (!meta.cwd || current.cwd === meta.cwd)
+    && (!Array.isArray(meta.args) || meta.args.every((arg, index) => current.args[index] === arg));
+};
+
+const canonicalPath = (value) => {
+  if (!value) return null;
+  try { return fs.realpathSync(value); } catch { return path.resolve(String(value)); }
+};
+
+const commandMatches = (actual, wanted) => {
+  if (!actual || !wanted) return false;
+  if (actual === wanted) return true;
+  const actualReal = canonicalPath(actual);
+  const wantedReal = canonicalPath(wanted);
+  if (actualReal && wantedReal && actualReal === wantedReal) return true;
+  return path.basename(actual) === path.basename(wanted);
+};
+
+/**
+ * A process is owned only when command and leading args agree, plus either the exact
+ * runtime cwd or the package identity. The latter is needed during package activation:
+ * an old, still-running version necessarily has a different `/versions/<version>` cwd,
+ * but its injected package identity is the same service identity. Unknown processes
+ * without that identity remain outside the ownership boundary.
+ */
+export const processMatchesService = (processInfo, def) => {
+  if (!processInfo || !def) return false;
+  const cwdMatches = canonicalPath(processInfo.cwd) === canonicalPath(def.cwd);
+  const packageMatches = !!def.package && processInfo.package_id === def.package;
+  if (!cwdMatches && !packageMatches) return false;
+  if (!commandMatches(processInfo.command, def.command)) return false;
+  const wantedArgs = Array.isArray(def.args) ? def.args : [];
+  return wantedArgs.every((arg, index) => processInfo.args?.[index] === arg);
+};
+
+const listProcessDetails = () => {
+  let entries = [];
+  try { entries = fs.readdirSync('/proc').filter((entry) => /^\d+$/.test(entry)); } catch { return []; }
+  return entries.map((entry) => procDetails(Number(entry))).filter(Boolean);
+};
+
+const serviceProcesses = (def) => listProcessDetails().filter((item) => processMatchesService(item, def));
+
+const declaredPorts = (def) => (def?.ports ?? [])
+  .map((item) => ({ ...item, port: Number(item?.port) }))
+  .filter((item) => Number.isInteger(item.port) && item.port > 0);
+
+const probePort = (port, host = '127.0.0.1', timeoutMs = 250) => new Promise((resolve) => {
+  const socket = net.createConnection({ host, port });
+  let settled = false;
+  const finish = (open, error = null) => {
+    if (settled) return;
+    settled = true;
+    socket.destroy();
+    resolve({ open, error });
+  };
+  socket.once('connect', () => finish(true));
+  socket.once('error', (error) => finish(false, error?.code ?? String(error?.message ?? error)));
+  socket.setTimeout(timeoutMs, () => finish(false, 'timeout'));
+});
+
+const portFacts = async (def) => {
+  const facts = [];
+  for (const declaration of declaredPorts(def)) {
+    const result = await probePort(declaration.port);
+    facts.push({ id: declaration.id ?? null, port: declaration.port, open: result.open, error: result.error });
+  }
+  return facts;
+};
+
+const waitPorts = async (def, wantedOpen, timeoutMs) => {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  let facts = await portFacts(def);
+  while (Date.now() < deadline && facts.some((item) => item.open !== wantedOpen)) {
+    await sleep(100);
+    facts = await portFacts(def);
+  }
+  return { ok: facts.every((item) => item.open === wantedOpen), facts };
+};
+
+const processGroup = (pgid) => listProcessDetails().filter((item) => item.pgid === pgid);
+
+const terminateOwnedProcess = async (def, processInfo, timeoutMs) => {
+  if (!processMatchesService(processInfo, def)) {
+    return { ok: false, error: 'process_identity_changed', pid: processInfo?.pid ?? null };
+  }
+  const members = processGroup(processInfo.pgid);
+  const safeGroup = members.length > 0 && members.every((item) => processMatchesService(item, def));
+  const signalTarget = safeGroup ? -processInfo.pgid : processInfo.pid;
+  try { process.kill(signalTarget, 'SIGTERM'); } catch { /* It may have exited between the scan and signal. */ }
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  let remaining = serviceProcesses(def);
+  let originalAlive = procStat(processInfo.pid)?.startTicks === processInfo.proc_start_ticks;
+  while ((remaining.length > 0 || originalAlive) && Date.now() < deadline) {
+    await sleep(100);
+    remaining = serviceProcesses(def);
+    originalAlive = procStat(processInfo.pid)?.startTicks === processInfo.proc_start_ticks;
+  }
+  if (remaining.length > 0 || originalAlive) {
+    // Bounded escalation is still identity-scoped; an unknown process is never signalled.
+    for (const item of remaining) {
+      if (processMatchesService(item, def)) {
+        try { process.kill(item.pid, 'SIGKILL'); } catch { /* already gone */ }
+      }
+    }
+    const original = procDetails(processInfo.pid);
+    if (original && original.proc_start_ticks === processInfo.proc_start_ticks
+      && processMatchesService(original, def)) {
+      try { process.kill(original.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    await sleep(150);
+    remaining = serviceProcesses(def);
+    originalAlive = procStat(processInfo.pid)?.startTicks === processInfo.proc_start_ticks;
+  }
+  return { ok: remaining.length === 0 && !originalAlive, pid: processInfo.pid, safe_group: safeGroup,
+    remaining: remaining.map((item) => item.pid), original_alive: originalAlive };
+};
+
+const reconcileServiceOwnership = async (def, { extra = [] } = {}) => {
+  const byPid = new Map(serviceProcesses(def).map((item) => [item.pid, item]));
+  for (const item of extra) {
+    if (processMatchesService(item, def)) byPid.set(item.pid, item);
+  }
+  const owned = [...byPid.values()];
+  const reaped = [];
+  for (const processInfo of owned) {
+    const result = await terminateOwnedProcess(def, processInfo, def.stop_timeout_ms ?? 5000);
+    reaped.push({ pid: processInfo.pid, ...result });
+    if (!result.ok) return { ok: false, error: 'old_process_not_stopped', reaped };
+  }
+  const released = await waitPorts(def, false, def.stop_timeout_ms ?? 5000);
+  if (!released.ok) {
+    return { ok: false, error: 'port_conflict', conflict: { owner: 'unknown', ports: released.facts }, reaped };
+  }
+  return { ok: true, reaped, ports: released.facts };
 };
 
 // 進程自行退出時把事實寫回 metadata（不自動重啟，018 §6.6 刻意限制）
@@ -240,7 +404,10 @@ export async function startService(id) {
   if (!def) return { ok: false, error: 'unknown_service' };
   setServiceDesiredState(id, 'running');
   const meta = readMeta(id);
-  if (pidValid(meta)) return { ok: true, changed: false, ...(await getServiceStatus(id)) };
+  const metaProcess = pidValid(meta) ? procDetails(meta.pid) : null;
+  if (metaProcess && processMatchesService(metaProcess, def)) {
+    return { ok: true, changed: false, ...(await getServiceStatus(id)) };
+  }
   /**
    * 依賴門禁。⚠ 放在 `pidValid` 之後：已經在跑的服務不重新過門，否則一次探針抖動
    * 就會讓「查一下狀態」變成「把它關掉」。
@@ -249,6 +416,16 @@ export async function startService(id) {
   if (!gate.ok) {
     clearMeta(id);
     return { ok: false, ...gate };
+  }
+  /**
+   * Metadata is not the ownership boundary: a Framework crash can leave a
+   * perfectly healthy Package process with no metadata. Reconcile only a
+   * process whose cwd, command, and args prove it is this service. An open
+   * listener with no such proof is an unknown conflict and is never killed.
+   */
+  const ownership = await reconcileServiceOwnership(def);
+  if (!ownership.ok) {
+    return { ok: false, ...ownership };
   }
   if (meta) clearMeta(id); // exited/stale 記錄讓位給新一輪
   fs.mkdirSync(STAGE_DIR, { recursive: true });
@@ -290,11 +467,15 @@ export async function startService(id) {
     started_at: new Date().toISOString(),
     proc_start_ticks: procStat(child.pid)?.startTicks ?? '',
     command: def.command,
+    args: [...(def.args ?? [])],
+    cwd: def.cwd,
+    package: def.package ?? null,
+    ports: declaredPorts(def).map((port) => ({ id: port.id ?? null, port: port.port })),
   });
   attachExitRecorder(id, child);
   child.unref();
   await sleep(400); // 短暫確認沒有立即退出（立即退出會被 exit recorder 記成 exited）
-  const result = { ok: true, changed: true, ...(await getServiceStatus(id)) };
+  const result = { ok: true, changed: true, ownership, ...(await getServiceStatus(id)) };
   // A newly running provider can unblock another desired service. Only a confirmed running process
   // emits this event; spawn errors and later crashes never become an automatic restart supervisor.
   if (result.process?.state === 'running') requestDesiredReconcile(`service_ready:${id}`);
@@ -306,16 +487,16 @@ export async function stopService(id, { preserveDesired = false } = {}) {
   if (!def) return { ok: false, error: 'unknown_service' };
   if (!preserveDesired) setServiceDesiredState(id, 'stopped'); // 用戶 Stop；Quiesce 走 preserveDesired
   const meta = readMeta(id);
-  if (!pidValid(meta)) return { ok: true, changed: false, ...(await getServiceStatus(id)) }; // 冪等
-  try { process.kill(-meta.pgid, 'SIGTERM'); } catch { /* 進程組剛消失 */ }
-  const deadline = Date.now() + (def.stop_timeout_ms ?? 5000);
-  while (Date.now() < deadline && pidValid(meta)) await sleep(150);
-  if (pidValid(meta)) {
-    try { process.kill(-meta.pgid, 'SIGKILL'); } catch { /* 同上 */ }
-    await sleep(200);
+  const owned = serviceProcesses(def);
+  const metaProcess = pidValid(meta) ? procDetails(meta.pid) : null;
+  const metaOwned = metaProcess && processMatchesService(metaProcess, def);
+  if (!metaOwned && owned.length === 0) {
+    return { ok: true, changed: false, ...(await getServiceStatus(id)) }; // idempotent
   }
+  const stopped = await reconcileServiceOwnership(def, { extra: metaProcess ? [metaProcess] : [] });
+  if (!stopped.ok) return { ok: false, ...stopped, ...(await getServiceStatus(id)) };
   clearMeta(id);
-  return { ok: true, changed: true, ...(await getServiceStatus(id)) };
+  return { ok: true, changed: true, ownership: stopped, ...(await getServiceStatus(id)) };
 }
 
 export async function restartService(id) {
@@ -381,6 +562,7 @@ if (process.argv.includes('--self-test')
     cwd: ROOT,
     env: { PORT: '8991' },
     health: { type: 'http', url: 'http://127.0.0.1:8991/health', timeout_ms: 1500 },
+    ports: [{ id: 'http', port: 8991 }],
     stop_timeout_ms: 5000,
   });
   await stopService(ID); // 清場
@@ -408,6 +590,17 @@ if (process.argv.includes('--self-test')
   const s5 = await stopService(ID);
   t('duplicate stop is idempotent', s5.ok && !s5.changed);
 
+  // Package activation changes the version directory. The package identity is the
+  // deliberate bridge across that directory change; a foreign identity is rejected.
+  const packageDef = { package: 'github.termux-os.service.stage-fixture', command: nodeExecutable(),
+    args: ['src/stage/fixture.mjs'], cwd: '/tmp/new-version' };
+  const oldVersionProcess = { package_id: packageDef.package, command: nodeExecutable(),
+    args: ['src/stage/fixture.mjs'], cwd: '/tmp/old-version' };
+  const foreignProcess = { package_id: 'github.example.foreign', command: nodeExecutable(),
+    args: ['src/stage/fixture.mjs'], cwd: '/tmp/old-version' };
+  t('package identity bridges version-directory activation', processMatchesService(oldVersionProcess, packageDef));
+  t('foreign package identity is not adopted', !processMatchesService(foreignProcess, packageDef));
+
   // stale PID：無關進程 + 偽造 metadata → 不發 signal、清 metadata、無關進程存活
   const bystander = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
   writeMeta(ID, { service_id: ID, pid: bystander.pid, pgid: bystander.pid, proc_start_ticks: '1', command: nodeExecutable() });
@@ -415,6 +608,37 @@ if (process.argv.includes('--self-test')
   const bystanderAlive = !!procStat(bystander.pid);
   t('stale pid rejected', s6.ok && !s6.changed && bystanderAlive && !readMeta(ID));
   try { process.kill(bystander.pid, 'SIGKILL'); } catch {}
+
+  // A Framework crash can leave the Package listener alive while its stage
+  // metadata is gone. The restart path must prove identity before replacing it.
+  const orphanStart = await startService(ID);
+  const orphanPid = orphanStart.process?.pid;
+  clearMeta(ID);
+  const orphanReplaced = await startService(ID);
+  t('metadata-free same-identity process is replaced before bind',
+    orphanReplaced.ok && orphanReplaced.process?.state === 'running'
+      && orphanReplaced.process.pid !== orphanPid
+      && orphanReplaced.ownership?.reaped?.some((item) => item.pid === orphanPid)
+      && !procStat(orphanPid));
+  await stopService(ID);
+
+  // An unrelated listener must remain untouched and be reported as unknown.
+  const conflict = spawn(process.execPath, ['-e',
+    "require('node:http').createServer((req,res)=>res.end('foreign')).listen(8991,'127.0.0.1')",
+  ], { cwd: '/tmp', detached: true, stdio: 'ignore' });
+  let conflictUp = false;
+  for (let i = 0; i < 30 && !conflictUp; i += 1) {
+    try {
+      const response = await fetch('http://127.0.0.1:8991/health', { signal: AbortSignal.timeout(100) });
+      conflictUp = response.ok;
+    } catch { await sleep(50); }
+  }
+  const conflictResult = await startService(ID);
+  t('unknown port owner is reported and never signalled',
+    conflictUp && !conflictResult.ok && conflictResult.error === 'port_conflict'
+      && conflictResult.conflict?.owner === 'unknown' && procStat(conflict.pid));
+  try { process.kill(-conflict.pid, 'SIGTERM'); } catch {}
+  await sleep(150);
 
   const s7 = await startService(ID);
   process.kill(s7.process.pid, 'SIGKILL');

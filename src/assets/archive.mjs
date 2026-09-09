@@ -11,6 +11,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { activateAsset, readRegistry, sharedStore, sha256File } from './registry.mjs';
+import { payloadIdFor } from './registry.mjs';
+import { commitStagedPayloads } from './transfer/commit.mjs';
 
 export const ASSET_ARCHIVE_SCHEMA = 'termux-os.asset-archive.v1';
 export const ASSET_ARCHIVE_MANIFEST = 'termux-os.asset-archive.json';
@@ -231,6 +233,72 @@ export function importAssetArchive(archivePath, { store = sharedStore() } = {}) 
     };
   } finally {
     fs.rmSync(stage, { recursive: true, force: true });
+  }
+}
+
+/**
+ * v2 archive import. It verifies the same archive boundary as v1 but creates
+ * only Payload Objects; active Package declarations and Selections remain
+ * independent facts for a Manager to reconcile later.
+ */
+export function importAssetArchiveV2(archivePath, { store = sharedStore() } = {}) {
+  if (path.resolve(store) !== path.resolve(sharedStore())) throw new Error('asset_archive_store_mismatch');
+  if (typeof archivePath !== 'string' || !archivePath) throw new Error('asset_archive_path_required');
+  if (!fs.existsSync(archivePath) || !fs.statSync(archivePath).isFile()) throw new Error('asset_archive_missing');
+  const entries = listArchiveEntries(archivePath);
+  if (!entries.includes(ASSET_ARCHIVE_MANIFEST)) throw new Error('asset_archive_manifest_missing');
+  const stageParent = path.dirname(path.resolve(store));
+  fs.mkdirSync(stageParent, { recursive: true });
+  const stage = fs.mkdtempSync(path.join(stageParent, '.termux-os-asset-import-v2-'));
+  const operationRoot = path.join(store, '.staging', `archive-${Date.now()}-${process.pid}`);
+  try {
+    execFileSync('tar', ['-xzf', archivePath, '-C', stage, '--no-same-owner', '--no-same-permissions'], { stdio: 'pipe' });
+    const metadata = JSON.parse(fs.readFileSync(path.join(stage, ASSET_ARCHIVE_MANIFEST), 'utf8'));
+    const assets = normalizeAssets(metadata);
+    const expected = expectedArchiveFiles(assets);
+    const actualFiles = walkFiles(stage);
+    for (const file of actualFiles) {
+      if (file !== ASSET_ARCHIVE_MANIFEST && !file.startsWith('payload/')) throw new Error(`asset_archive_unexpected_file:${file}`);
+      if (file.startsWith('payload/') && !expected.has(file)) throw new Error(`asset_archive_unexpected_file:${file}`);
+    }
+    for (const asset of assets) {
+      for (const file of asset.files) {
+        const source = archiveFilePath(stage, asset, file);
+        if (!fs.existsSync(source) || !fs.statSync(source).isFile()) throw new Error(`asset_archive_file_missing:${asset.id}:${file.path}`);
+        const stat = fs.statSync(source);
+        if (stat.size !== file.size || sha256File(source) !== file.sha256) throw new Error(`asset_archive_file_mismatch:${asset.id}:${file.path}`);
+      }
+    }
+    fs.mkdirSync(operationRoot, { recursive: true, mode: 0o700 });
+    const pending = [];
+    for (const [index, asset] of assets.entries()) {
+      const files = asset.files.map((file) => ({ path: file.path, size: file.size, sha256: file.sha256, role: file.role }));
+      const payloadId = payloadIdFor(files);
+      const payloadStage = path.join(operationRoot, String(index));
+      fs.mkdirSync(payloadStage, { recursive: true, mode: 0o700 });
+      for (const file of files) {
+        const target = path.join(payloadStage, ...file.path.split('/'));
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.copyFileSync(archiveFilePath(stage, asset, file), target);
+      }
+      pending.push({
+        files,
+        stageRoot: payloadStage,
+        metadata: { source_kind: 'asset_archive', archive_package_id: metadata.package_id, archive_version: metadata.version, archive_target: asset.target },
+        selection: null,
+      });
+    }
+    const committed = commitStagedPayloads({ payloads: pending });
+    const imported = assets.map((asset, index) => ({
+      id: asset.id,
+      payload_id: committed.payloads[index].payload_id,
+      path: committed.payloads[index].path,
+      reused: committed.payloads[index].reused,
+    }));
+    return { ok: true, schema: 'termux-os.asset-archive-v2', package_id: metadata.package_id, version: metadata.version, target: metadata.target ?? 'generic', assets: imported };
+  } finally {
+    fs.rmSync(stage, { recursive: true, force: true });
+    fs.rmSync(operationRoot, { recursive: true, force: true });
   }
 }
 

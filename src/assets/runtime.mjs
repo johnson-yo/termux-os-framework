@@ -60,19 +60,16 @@ export function listAssets(opts = {}) {
 export const resolveAsset = (id, opts = {}) => resolveFromRegistry(id, opts);
 
 /**
- * 按需取一個**可選**資產。
+ * Legacy payload fetch compatibility adapter.
  *
  * ⭐ 坐標全部來自宣告它的那個 Package 的 Manifest——調用方只給一個 id，不給 URL。
  * 讓調用方傳路徑會讓「這台機器上的這個資產到底是什麼」變成一個沒人答得出的問題。
  *
- * ⛔ 默认只有 `optional: true` 的資產走這條路。必需資產在安裝時就該到位；
- * 允許一般调用方事後補取會讓「裝好了」這個狀態失去意義。
- *
- * `allowRequired` 只由 Framework 的「逻辑模型恢复」受限入口传入。它不是
- * Package context 的通用开关：恢复前必须由上层完成停用，并携带逻辑模型语义，
- * 让“删掉后恢复”与“任意包偷偷补齐必需资产”保持可区分。
+ * This is retained only as a v1 source-compatibility adapter. It does not
+ * decide whether an Asset is optional, loaded, or suitable for a product
+ * workflow; the v2 Manager owns those lifecycle decisions.
  */
-export async function fetchOptionalAsset(id, {
+export async function fetchAssetPayload(id, {
   packageManifest,
   storeDirFor,
   activate,
@@ -85,7 +82,6 @@ export async function fetchOptionalAsset(id, {
   via = 'auto',
   registryBase = '',
   onProgress = () => {},
-  allowRequired = false,
   fetchImpl = fetch,
   signal = undefined,
 } = {}) {
@@ -97,9 +93,6 @@ export async function fetchOptionalAsset(id, {
   const picked = selectAssetDeclaration(packageManifest, id, profile ?? deviceProfile());
   if (!picked.ok) return { ok: false, error: picked.error, detail: picked.detail, candidates: picked.candidates };
   const declared = picked.declaration;
-  if (declared.optional !== true && !allowRequired) {
-    return { ok: false, error: 'not_optional', detail: `${id} is installed with its package, not fetched on demand` };
-  }
   const files = declared.source?.files ?? [];
   if (!files.length) return { ok: false, error: 'no_remote_source', detail: `${id} has no source.files to fetch` };
   /**
@@ -200,7 +193,7 @@ if (process.argv.includes('--self-test')
   });
 
   let activated = null;
-  const fetched = await fetchOptionalAsset('model.ctx', {
+  const fetched = await fetchAssetPayload('model.ctx', {
     packageManifest: manifest,
     profile: v73,
     storeDirFor: (d) => path.join(store, d.target.id, d.payload),
@@ -214,7 +207,7 @@ if (process.argv.includes('--self-test')
     fs.existsSync(path.join(store, 'android-arm64-v73-qnn247/ctx-v73/m.bin'))
     && !fs.existsSync(path.join(store, 'android-arm64-v79-qnn247')));
 
-  const noMatch = await fetchOptionalAsset('model.ctx', {
+  const noMatch = await fetchAssetPayload('model.ctx', {
     packageManifest: manifest,
     profile: { os: 'android', arch: 'arm64', htp: 'v75', qnn: '2.47' },
     storeDirFor: () => store,
@@ -226,7 +219,7 @@ if (process.argv.includes('--self-test')
   t('the mismatch says what the device is, so the next step is knowable',
     /htp: target wants "v73", device has "v75"/.test(noMatch.detail));
 
-  const notDeclared = await fetchOptionalAsset('model.ghost', {
+  const notDeclared = await fetchAssetPayload('model.ghost', {
     packageManifest: manifest, profile: v73, storeDirFor: () => store, activate: () => null,
   });
   t('"no variant for this device" and "no such asset" stay different answers',
@@ -238,19 +231,19 @@ if (process.argv.includes('--self-test')
    * 而已就位的檔案因 sha 相符被直接複用、一次 URL 都不構造——
    * 於是第一次驗收（字節已預置）全綠，下載路徑一次都沒走過。
    */
-  const noBase = await fetchOptionalAsset('model.ctx', {
+  const noBase = await fetchAssetPayload('model.ctx', {
     packageManifest: manifest, profile: v73, storeDirFor: () => path.join(tmp, 'nobase'),
     activate: () => null, via: 'registry', registryBase: '',
   });
   t('fetching through the catalog without its address fails now, not mid-download',
     noBase.ok === false && noBase.error === 'no_registry_base');
 
-  const required = await fetchOptionalAsset('model.req', {
+  const required = await fetchAssetPayload('model.req', {
     packageManifest: { assets: { provides: [{ id: 'model.req', kind: 'model', payload: 'r', files: {} }] } },
     profile: v73, storeDirFor: () => store, activate: () => null,
   });
-  t('a required asset is still refused on demand — installed means installed',
-    required.error === 'not_optional');
+  t('required is not a lifecycle gate in the legacy adapter',
+    required.error === 'no_remote_source');
 
   fs.rmSync(tmp, { recursive: true, force: true });
   process.exit(fails ? 1 : 0);

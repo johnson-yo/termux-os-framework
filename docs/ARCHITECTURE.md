@@ -41,7 +41,8 @@ Framework loads Installed Packages. Development mounts are explicit, temporary s
 - `src/state/`: the state bus — declared facts, one writer each, in memory only
 - `src/stage/`: service definitions, desired state, process identity, health, and logs
 - `src/apps/`: application sessions and capability coordination
-- `src/assets/`: immutable Asset registration, raw transfer, archive import, safe purge, and resolution metadata
+- `src/assets/`: generic Asset registration metadata, policy-free transfer/storage/
+  verification primitives, archive safety, and resolution metadata
 - `src/system/`: authentication, administration, jobs, access reporting, observations, and update control
 - `src/theatre/`: generic Action registry and sequential scene runner
 - `src/server.mjs`: authenticated HTTP/WebSocket entry point
@@ -87,9 +88,13 @@ Audio capture/output and the complete `PCM → RMS → KWS → VAD → ASR` path
 Framework receives text-level events and coordinates services through public contracts. Wake-word scoring, ASR consumers, translation, chat, TTS adapters, hardware bridges, models, and optimized graph assets are independent Extensions.
 
 Raw Asset consumers may declare current use with an empty
-`.models/<owner>/<repository>` file inside their installed Package root. Core
+`.models/<owner>/<repository>` file inside their active installed Package version root. Core
 enumerates those declarations through a read-only endpoint and reports bad
-roots or entries explicitly; it does not persist a consumer ledger. Core also
-owns the generic raw archive import and payload purge boundaries, including
-path containment and SHA-256 verification, while Package-specific managers
-remain responsible for their own catalogs and product presentation.
+roots or entries explicitly; it does not persist a consumer ledger. An Asset
+Package owns Asset declaration/registration and package-install provisioning;
+an independently replaceable Manager owns its catalog and the payload lifecycle
+after registration. Core may offer policy-free transfer, archive, path,
+integrity, atomic-storage, and deletion primitives, including containment and
+SHA-256 checks, but it must not decide whether a Manager may download, update,
+verify, or delete based on `optional`, provider/package load state, or consumer
+declarations. Removing payload bytes must not unregister the Asset declaration.

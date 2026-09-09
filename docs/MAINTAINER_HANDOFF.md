@@ -11,13 +11,14 @@ Status: Framework Core independence, public-boundary cleanup, independent instal
 - Registry active Framework versions: `0.2.2` and `0.2.1`; current public catalog counter: `27`
 - Published `0.2.2` GitHub source archive: 295738 bytes, SHA-256 `561c2d4c1a98e759d27f5f6b1c4eba92b99fd8c1ac34918866f847ee6fdc5401`
 - `/check` and `/download` on `https://package.termux-os.com` return the same size/SHA; a leading `v` version is rejected with HTTP 400.
-- The pre-rewrite bundle is retained privately at `/mnt/2tb/termux-os/tmp/framework-public-history-pre-rewrite.bundle`; no public ref points to the old identity commits.
+- A pre-rewrite history bundle is retained outside the public repository; no public ref points to the old identity commits.
 
 The public tree is controlled by `scripts/public-files.txt`. `npm run public:export` creates the tree and `npm run public:check` requires an exact allowlist match. The local maintainer handoff, private evidence, and SDK `.sdk` state remain outside the public tree. `.deployignore` is public because the isolated update smoke tests use it; it contains only build/runtime exclusion patterns and no credentials or private paths.
 
 ## Device update evidence
 
-On zflip5 (`192.168.30.49:34202`), the complete update path was exercised:
+On the zflip5 test device (its network address is intentionally omitted), the
+complete update path was exercised:
 
 `0.2.0 → Registry WebUI update → 0.2.2 → WebUI same-build boundary update`
 
