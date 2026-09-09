@@ -5,7 +5,7 @@ Core records generic Asset declarations, immutable payload facts, selections, an
 ## Members
 
 - `declarations.mjs`: derives the current Declaration Index from active Installed Root manifests and Dev Mounts. It does not persist duplicate registration state or touch payload bytes.
-- `registry.mjs`: stores the v2 Payload Ledger and Selection map, with generation/CAS and a short-lived v1 compatibility projection. Payload Object identity is a SHA-256 of its canonical file manifest.
+- `registry.mjs`: stores the v2 Payload Ledger and Selection map, with generation/CAS and a short-lived v1 compatibility projection. Payload Object identity is a SHA-256 of its canonical path/size/SHA-256 file manifest; per-caller file roles are metadata and do not create a second object.
 - `migration.mjs`: imports v1 path facts into v2 as legacy Payload Objects without moving or deleting model bytes.
 - `resolver.mjs`: combines Declaration + Selection + Payload into a usable state. `required/optional`, provider loaded state, and consumer declarations are not lifecycle permissions.
 - `fetch.mjs`: v1 compatibility transfer code. New callers use `transfer/http.mjs` and `transfer/staging.mjs`, which consume an explicit URL/stream and never construct a source-brand URL.

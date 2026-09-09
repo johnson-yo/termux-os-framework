@@ -2,6 +2,13 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.8
+
+- Reuse a content-addressed Asset payload when a Package and its Manager
+  describe the same verified bytes with different per-file roles. Roles are
+  caller metadata, not payload identity; the first stored role remains stable
+  in the compatibility projection.
+
 ## 0.3.7
 
 - Speed up sufficiently large fresh Asset transfers with bounded parallel HTTP

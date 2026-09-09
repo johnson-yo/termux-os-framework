@@ -270,7 +270,14 @@ export function recordPayloads(records = [], { expectedGeneration = undefined } 
     const id = payloadId ?? payloadIdFor(normalizedFiles);
     if (id !== payloadIdFor(normalizedFiles)) throw operationError('payload_id_mismatch', 'payload_id does not match file manifest');
     const existing = ledger.payloads[id];
-    if (existing && canonicalJson(existing.files) !== canonicalJson(normalizedFiles)) {
+    // `role` describes how a caller names a verified file; it is not part of
+    // the payload identity (see canonicalFileManifest/payloadIdFor).  A
+    // Package install can therefore rediscover the same bytes with a
+    // different role than the Manager used for its transfer.  Comparing the
+    // full normalized records here made that legitimate reuse fail with a
+    // false identity conflict.
+    if (existing && canonicalJson(canonicalFileManifest(existing.files))
+      !== canonicalJson(canonicalFileManifest(normalizedFiles))) {
       throw operationError('payload_identity_conflict', `payload ${id} already has a different file manifest`);
     }
     if (selection) validateSelection(selection, normalizedFiles);
@@ -281,7 +288,10 @@ export function recordPayloads(records = [], { expectedGeneration = undefined } 
     ledger.payloads[id] = existing ?? payloadRecord({ payloadId: id, files: normalizedFiles, storagePath, layout, ...extra });
     if (existing) ledger.payloads[id] = {
       ...existing, ...extra, state: 'ready',
-      storage_path: existing.storage_path ?? storagePath ?? payloadObjectDir(id), files: normalizedFiles,
+      // Keep the first ledger file metadata.  The object is immutable and its
+      // role is caller metadata; replacing it on a reuse would make a
+      // Manager's compatibility projection depend on install order.
+      storage_path: existing.storage_path ?? storagePath ?? payloadObjectDir(id), files: existing.files,
     };
     delete ledger.tombstones[id];
     if (item.selection) {
@@ -502,16 +512,23 @@ if (process.argv.includes('--self-test')
   fs.writeFileSync(registryPath(), 'not json at all');
   t('corrupt registry surfaces an explicit error', Object.keys(readRegistry().assets).length === 0 && !!readRegistry().error);
 
-  fs.mkdirSync(path.dirname(payloadLedgerPath()), { recursive: true });
-  fs.writeFileSync(payloadLedgerPath(), `{"schema":"${PAYLOAD_LEDGER_SCHEMA}"}`);
-  t('v2 ledger with missing state maps is corrupt, not empty', readPayloadLedger().error?.includes('payload ledger must contain') === true);
-
   const f = path.join(tmp, 'f.bin');
   fs.writeFileSync(f, 'hello');
   t('sha256File matches known digest',
     sha256File(f) === '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824');
   t('assetVersionDir is immutable-versioned',
     assetVersionDir('pkg', '0.1.0', 'tgt') === path.join(tmp, 'store/pkg/0.1.0/tgt'));
+
+  const roleNeutral = { path: 'f.bin', size: 5, sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824' };
+  const roleFirst = recordPayload({ files: [{ ...roleNeutral, role: 'generic' }] });
+  const roleReuse = recordPayload({ files: [{ ...roleNeutral, role: 'htp_source' }] });
+  t('role metadata does not create a false payload identity conflict',
+    roleFirst.payload.payload_id === roleReuse.payload.payload_id
+      && roleReuse.payload.files[0].role === 'generic');
+
+  fs.mkdirSync(path.dirname(payloadLedgerPath()), { recursive: true });
+  fs.writeFileSync(payloadLedgerPath(), `{"schema":"${PAYLOAD_LEDGER_SCHEMA}"}`);
+  t('v2 ledger with missing state maps is corrupt, not empty', readPayloadLedger().error?.includes('payload ledger must contain') === true);
 
   fs.rmSync(tmp, { recursive: true, force: true });
   process.exit(fails ? 1 : 0);
