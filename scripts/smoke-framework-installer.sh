@@ -61,8 +61,52 @@ SHA256="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
 # to stop; otherwise a cross-domain signal denial makes it uninstallable.
 mkdir -p "$WORK/legacy-source"
 cp -a "$ROOT/tmp/public-tree" "$WORK/legacy-source/framework"
-git -C "$ROOT" show 3ae494a:scripts/framework.sh > "$WORK/legacy-source/framework/scripts/framework.sh"
-chmod +x "$WORK/legacy-source/framework/scripts/framework.sh"
+node - "$WORK/legacy-source/framework/scripts/framework.sh" <<'NODE'
+const fs = require('node:fs');
+const file = process.argv[2];
+fs.writeFileSync(file, `#!/bin/sh
+if [ -z "\${BASH_VERSION:-}" ]; then
+  if command -v bash >/dev/null 2>&1; then exec bash "$0" "$@"; fi
+  exit 127
+fi
+set -u
+RUNTIME="\${FRAMEWORK_RUNTIME:-$HOME/.termux-os/framework}"
+PERSIST="\${FRAMEWORK_PERSIST:-/sdcard/termux-os/framework}"
+CONF="\${FRAMEWORK_CONFIG:-$PERSIST/conf/framework.v1.json}"
+AUTH_FILE="\${FRAMEWORK_AUTH_FILE:-$HOME/.termux-os/secrets/framework-auth.v1.json}"
+PORT="\${FRAMEWORK_PORT:-8980}"
+BASE="\${FRAMEWORK_BASE_URL:-http://127.0.0.1:$PORT}"
+PIDFILE="$RUNTIME/framework.pid"
+LOGFILE="$RUNTIME/framework.log"
+port_up() { curl -sf -m 2 "$BASE/health" >/dev/null 2>&1; }
+cmd_bootstrap() { mkdir -p "$RUNTIME" "$PERSIST/conf" "$PERSIST/backups" "$PERSIST/history"; }
+cmd_start() {
+  port_up && return 1
+  cd "$RUNTIME" || return 1
+  HOST="\${FRAMEWORK_HOST:-}" PORT="$PORT" CONFIG="$CONF" FRAMEWORK_RUNTIME="$RUNTIME" \\
+    FRAMEWORK_PERSIST="$PERSIST" FRAMEWORK_CONFIG="$CONF" FRAMEWORK_PORT="$PORT" \\
+    FRAMEWORK_BASE_URL="$BASE" FRAMEWORK_AUTH_FILE="$AUTH_FILE" \\
+    PACKAGES_INSTALLED_DIR="\${PACKAGES_INSTALLED_DIR:-$HOME/.termux-os/packages}" \\
+    STAGE_DESIRED_PATH="$PERSIST/conf/stage.v1.json" \\
+    nohup node src/server.mjs >"$LOGFILE" 2>&1 &
+  echo $! > "$PIDFILE"
+  for _ in $(seq 1 60); do port_up && return 0; sleep 0.1; done
+  return 1
+}
+cmd_stop() {
+  [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null || true
+  for _ in $(seq 1 30); do port_up || { rm -f "$PIDFILE"; return 0; }; sleep 0.1; done
+  return 1
+}
+cmd_restart() { cmd_stop && cmd_start; }
+cmd_health() { port_up; }
+case "\${1:-}" in
+  bootstrap|start|stop|restart|health) "cmd_$1" ;;
+  *) exit 1 ;;
+esac
+`);
+fs.chmodSync(file, 0o700);
+NODE
 node - "$WORK/legacy-source/framework/src/server.mjs" <<'NODE'
 const fs = require('node:fs');
 const file = process.argv[2];
