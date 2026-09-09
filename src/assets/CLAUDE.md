@@ -28,13 +28,13 @@ The store directory comes from the payload's target. Two variants sharing one di
 
 ## Where the bytes come from
 
-Source selection and upstream-specific URL construction belong to the calling Manager or Asset Package. Core transfer primitives consume an explicit, already-resolved source request or byte stream plus expected file metadata. Core must not encode Hugging Face, ModelScope, GitHub, or any other source as built-in policy. A Manager may choose direct, a catalog proxy, or another adapter and then ask Core to perform generic streaming, resume, verification, and atomic storage.
+Source selection and upstream-specific URL construction belong to the calling Manager or Asset Package. Core transfer primitives consume an explicit, already-resolved source request or byte stream plus expected file metadata. Core must not encode Hugging Face, ModelScope, GitHub, or any other source as built-in policy. A Manager may choose direct, a catalog proxy, or another adapter and then ask Core to perform generic streaming, resume, verification, and atomic storage. For sufficiently large fresh files, the generic HTTP primitive may use a bounded set of explicit byte ranges; this is a transport optimization, not source or package policy.
 
 Only reaching response headers is time-boxed. Bounding the whole transfer would make large assets impossible: reachability and transfer are different timeouts.
 
 ## Why `.part` outlives a failure
 
-A `.part` file is the resume base, so it survives an interrupted transfer. It can never be mistaken for the finished asset because only a complete verified file is renamed. A prefix proven wrong is discarded, and a server that answers a Range request with 200 is treated as a restart rather than appended.
+A `.part` file is the resume base for the single-stream path, so it survives an interrupted transfer. It can never be mistaken for the finished asset because only a complete verified file is renamed. A prefix proven wrong is discarded, and a server that answers a Range request with 200 is treated as a restart rather than appended. Parallel fresh ranges are written into a preallocated staging file and are committed only after the complete file is hashed and verified; a failed parallel batch is discarded and retried from zero because it has no safe contiguous resume prefix.
 
 ## What never happens here
 

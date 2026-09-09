@@ -5,7 +5,7 @@ Callers provide an explicit URL or an input stream, expected relative file
 paths, sizes, and SHA-256 values. These modules do not know Hugging Face,
 ModelScope, GitHub, Package optionality, provider readiness, or consumer use.
 
-- `http.mjs` handles response-head timeout, Range resume, streaming, and hash.
+- `http.mjs` handles response-head timeout, bounded fresh-file Range parallelism, Range resume, streaming, and hash.
 - `staging.mjs` validates relative paths, writes `.part` files, and verifies a
   complete staged file set.
 - `journal.mjs` persists restartable operation facts without credentials.

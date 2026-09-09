@@ -2,6 +2,15 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.7
+
+- Speed up sufficiently large fresh Asset transfers with bounded parallel HTTP
+  Range requests, while retaining the existing single-stream resume path.
+- Validate every returned range and the assembled file before atomic commit;
+  sources that do not support Range fall back to the verified single stream.
+- Keep the optimization policy-free: callers still provide the explicit URL and
+  file metadata, and Core does not select a source or gate a Manager operation.
+
 ## 0.3.6
 
 - Let a verified candidate installer take control before stopping a legacy
