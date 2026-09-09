@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # [INPUT]: Registry coordinates or a verified local GitHub source archive.
-# [OUTPUT]: Safe source extraction, Framework runtime deployment, start/stop, and recovery helpers.
+# [OUTPUT]: Safe source extraction, candidate-controller handoff, Framework deployment, start/stop, and recovery helpers.
 # [POS]: Shared implementation for install.sh, upgrade.sh, and uninstall.sh.
 # [PROTOCOL]: Keep storage, verification, and recovery behavior synchronized with the installer docs.
 
@@ -256,6 +256,16 @@ install_controller() {
   chmod 700 "$FRAMEWORK_CONTROL"
 }
 
+restore_controller() {
+  local backup="$1"
+  if [ -f "$backup" ]; then
+    cp "$backup" "$FRAMEWORK_CONTROL"
+    chmod 700 "$FRAMEWORK_CONTROL" 2>/dev/null || true
+  else
+    rm -f "$FRAMEWORK_CONTROL"
+  fi
+}
+
 write_install_state() {
   local previous="$1" version="$2"
   mkdir -p "$(dirname "$FRAMEWORK_INSTALL_STATE")"
@@ -302,14 +312,34 @@ deploy_candidate() {
   mkdir -p "$(dirname "$FRAMEWORK_RUNTIME")" "$FRAMEWORK_PERSIST/conf" "$FRAMEWORK_PERSIST/backups" "$FRAMEWORK_PERSIST/history"
   INSTALL_WAS_RUNNING=0
   running && INSTALL_WAS_RUNNING=1
-  if [ "$INSTALL_WAS_RUNNING" = 1 ] || [ -f "$FRAMEWORK_CONTROL" ]; then run_controller stop >/dev/null 2>&1 || die "could not stop the current Framework"; fi
   stamp="$(date +%Y%m%d-%H%M%S)-$$"
   backup="$(dirname "$FRAMEWORK_RUNTIME")/.framework-previous-$stamp"
   control_backup="$FRAMEWORK_WORK_ROOT/framework.sh.previous"
+  rm -f "$control_backup"
   if [ -f "$FRAMEWORK_CONTROL" ]; then cp "$FRAMEWORK_CONTROL" "$control_backup"; fi
-  if [ -d "$FRAMEWORK_RUNTIME" ]; then mv "$FRAMEWORK_RUNTIME" "$backup"; fi
+  # The old runtime may run in Android's runas_app SELinux domain while this
+  # installer runs as untrusted_app. Its old controller cannot signal Core,
+  # and the candidate runtime has not been activated yet. Install only the
+  # verified candidate controller first: it can use the old authenticated
+  # restart endpoint as a one-shot same-domain stop handoff. Runtime bytes are
+  # untouched until that stop has definitely converged.
+  if ! install_controller "$INSTALL_CANDIDATE/scripts/framework.sh"; then
+    restore_controller "$control_backup"
+    die "could not stage the candidate Framework controller"
+  fi
+  if [ "$INSTALL_WAS_RUNNING" = 1 ] || [ -f "$FRAMEWORK_CONTROL" ]; then
+    if ! run_controller stop >/dev/null 2>&1; then
+      restore_controller "$control_backup"
+      die "could not stop the current Framework"
+    fi
+  fi
+  if [ -d "$FRAMEWORK_RUNTIME" ] && ! mv "$FRAMEWORK_RUNTIME" "$backup"; then
+    restore_controller "$control_backup"
+    die "could not preserve the current Framework runtime"
+  fi
   if ! mv "$INSTALL_CANDIDATE" "$FRAMEWORK_RUNTIME"; then
     [ -d "$backup" ] && mv "$backup" "$FRAMEWORK_RUNTIME"
+    restore_controller "$control_backup"
     die "could not activate Framework runtime"
   fi
   preserve_runtime_state "$backup" "$FRAMEWORK_RUNTIME"
@@ -326,6 +356,7 @@ deploy_candidate() {
     die "Framework health check failed; previous runtime was restored"
   fi
   write_install_state "$backup" "$version"
+  rm -f "$control_backup"
   say "Framework $version installed"
 }
 

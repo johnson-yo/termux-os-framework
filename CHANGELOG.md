@@ -2,6 +2,18 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.6
+
+- Let a verified candidate installer take control before stopping a legacy
+  runtime. When Android denies cross-domain signals and the old Core predates
+  authenticated self-shutdown, a one-shot authenticated restart handoff runs
+  stop inside Core's own SELinux domain; failures restore the prior controller
+  before any runtime bytes are switched.
+- Bind the Core HTTP control plane without waiting for desired Package Works or
+  stale sessions to finish restoration. Slow Package startup now converges in
+  the background instead of exceeding the controller window and turning a
+  healthy update into a false failure.
+
 ## 0.3.5
 
 - Make Framework stop and upgrade independent of Android SELinux signal

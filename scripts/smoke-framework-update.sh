@@ -9,7 +9,7 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$ROOT/tmp"
-TMP="$(mktemp -d "$ROOT/tmp/framework-update-smoke.XXXXXX")"
+TMP="${SMOKE_KEEP_WORK:-$(mktemp -d "$ROOT/tmp/framework-update-smoke.XXXXXX")}"
 HOME_FAKE="$TMP/home"
 RUNTIME="$HOME_FAKE/.termux-os/framework"
 PERSIST="$TMP/persist"
@@ -40,6 +40,7 @@ api() {
 
 cleanup() {
   run_control stop >/dev/null 2>&1 || true
+  [ -n "${SMOKE_KEEP_WORK:-}" ] && return 0
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -101,6 +102,12 @@ INTERRUPTED="$TMP/candidates/interrupted-build/framework-interrupted-build.tar.g
 echo "--- 1. 舊版本啟動與完整性 ---"
 run_control bootstrap >/dev/null
 if run_control start >/dev/null; then ok "old runtime started"; else bad "old runtime started"; fi
+if node -e 'const s=require("fs").readFileSync(process.argv[1],"utf8");process.exit(!/const\s+restored\s*=\s*await\s+stage\.restoreDesiredServices/.test(s)&&/server\.listen[\s\S]*?setImmediate\(beginStartupRestore\)/.test(s)?0:1)' \
+  "$RUNTIME/src/server.mjs"; then
+  ok "Package Work restoration cannot block Core listen"
+else
+  bad "Package Work restoration still blocks Core listen"
+fi
 if api /api/admin/integrity | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const d=JSON.parse(s);
   process.exit(d.ok&&d.schema==="termux-os.framework-integrity.v1"&&d.features?.admin_integrity===1?0:1)})'; then
   ok "integrity endpoint";
@@ -113,9 +120,16 @@ if curl -sf "$BASE_URL/api/features" | node -e 'let s="";process.stdin.on("data"
 else
   bad "feature negotiation endpoint"
 fi
-if api /api/stage/services | node -e '
-  let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const d=JSON.parse(s);
-  const x=d.services.find(v=>v.id==="example-counter");process.exit(x?.desired==="running"&&x?.process?.state==="running"?0:1)})'; then
+RESTORED=0
+for _ in $(seq 1 100); do
+  if api /api/stage/services | node -e '
+    let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const d=JSON.parse(s);
+    const x=d.services.find(v=>v.id==="example-counter");process.exit(x?.desired==="running"&&x?.process?.state==="running"?0:1)})'; then
+    RESTORED=1; break
+  fi
+  sleep 0.1
+done
+if [ "$RESTORED" = 1 ]; then
   ok "Desired Service initial restore"
 else
   bad "Desired Service initial restore"
@@ -139,9 +153,16 @@ need test "$(sha256sum "$PERSIST/conf/framework.v1.json" "$PERSIST/conf/stage.v1
 need grep -q user-data-must-stay "$PERSIST/data/sentinel.txt"
 need grep -q asset-must-stay "$ASSETS/sentinel.bin"
 need test "$(sha256sum "$RUNTIME/.runtime/observations/observations.v1.json" | awk '{print $1}')" = "$OBSERVATIONS_SHA_BEFORE"
-if api /api/stage/services | node -e '
-  let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const d=JSON.parse(s);
-  const x=d.services.find(v=>v.id==="example-counter");process.exit(x?.desired==="running"&&x?.process?.state==="running"?0:1)})'; then
+RESTORED=0
+for _ in $(seq 1 100); do
+  if api /api/stage/services | node -e '
+    let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const d=JSON.parse(s);
+    const x=d.services.find(v=>v.id==="example-counter");process.exit(x?.desired==="running"&&x?.process?.state==="running"?0:1)})'; then
+    RESTORED=1; break
+  fi
+  sleep 0.1
+done
+if [ "$RESTORED" = 1 ]; then
   ok "Desired Service restored after update"
 else
   bad "Desired Service restored after update"

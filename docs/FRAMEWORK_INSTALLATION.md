@@ -74,8 +74,19 @@ or caches.
 Stop and upgrade do not assume that matching Android UIDs imply signal
 permission. The controller first requests authenticated Core self-shutdown;
 direct process signals remain only as a compatibility fallback for older
-runtimes. This keeps CLI and update-worker control reliable when Android places
-them in different SELinux process domains.
+runtimes. The independent installer stages the hash-verified candidate
+controller before stopping the old runtime. If a legacy Core predates the
+self-shutdown route, that controller uses the legacy authenticated restart
+route for a one-shot stop inside Core's own SELinux domain. Runtime bytes are
+not switched until the stop converges, and any failure restores the previous
+controller. This keeps CLI and update-worker control reliable when Android
+places them in different SELinux process domains.
+
+Core binds its control-plane listener without waiting for desired Package Works
+to finish restoring. Update health therefore proves that the new Core is
+reachable; Package process and health endpoints independently show restoration
+as it converges. A slow Package can no longer consume the controller's startup
+window and cause a healthy candidate to be rolled back.
 
 The browser Admin update action uses a bounded three-stage source path after
 the catalog has been refreshed:

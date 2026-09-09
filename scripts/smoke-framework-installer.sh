@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # [INPUT]: The local public export and an isolated temporary Framework home.
-# [OUTPUT]: A pass/fail smoke for fresh install, same-version replacement, state preservation, and uninstall.
+# [OUTPUT]: A pass/fail smoke for fresh install, legacy cross-domain upgrade, state preservation, and uninstall.
 # [POS]: scripts/smoke-framework-installer.sh in termux-os-framework.
 # [PROTOCOL]: Keep destructive test paths inside the temporary workspace.
 
@@ -15,6 +15,7 @@ RUNTIME="$HOME_FAKE/.termux-os/framework"
 PERSIST="$WORK/persist"
 CONTROL="$HOME_FAKE/framework.sh"
 ARCHIVE="$WORK/framework-source.tar.gz"
+LEGACY_ARCHIVE="$WORK/framework-legacy-source.tar.gz"
 PORT=$((24500 + $$ % 1000))
 BASE="http://127.0.0.1:$PORT"
 PASS=0
@@ -54,14 +55,41 @@ cp -a "$ROOT/tmp/public-tree" "$WORK/source/framework"
 tar -czf "$ARCHIVE" -C "$WORK/source" framework
 SHA256="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
 
+# Reproduce the exact upgrade trap fixed by this release: the live Core has no
+# authenticated shutdown route, and its installed controller has no handoff.
+# The candidate installer must gain control before asking that legacy runtime
+# to stop; otherwise a cross-domain signal denial makes it uninstallable.
+mkdir -p "$WORK/legacy-source"
+cp -a "$ROOT/tmp/public-tree" "$WORK/legacy-source/framework"
+git -C "$ROOT" show 3ae494a:scripts/framework.sh > "$WORK/legacy-source/framework/scripts/framework.sh"
+chmod +x "$WORK/legacy-source/framework/scripts/framework.sh"
+node - "$WORK/legacy-source/framework/src/server.mjs" <<'NODE'
+const fs = require('node:fs');
+const file = process.argv[2];
+const source = fs.readFileSync(file, 'utf8');
+const needle = "url === '/api/admin/shutdown'";
+if (!source.includes(needle)) throw new Error('shutdown route fixture anchor is missing');
+fs.writeFileSync(file, source.replace(needle, "url === '/api/admin/legacy-shutdown'"));
+NODE
+tar -czf "$LEGACY_ARCHIVE" -C "$WORK/legacy-source" framework
+LEGACY_SHA256="$(sha256sum "$LEGACY_ARCHIVE" | awk '{print $1}')"
+
 echo "=== Framework installer smoke (isolated) ==="
 if run_installer "$ROOT/scripts/install.sh" --archive "$ARCHIVE" --version "v$FRAMEWORK_VERSION" --sha256 "$SHA256" >/dev/null 2>&1; then
   bad "leading-v Framework version is rejected"
 else
   ok "leading-v Framework version is rejected"
 fi
-run_installer "$ROOT/scripts/install.sh" --archive "$ARCHIVE" --version "$FRAMEWORK_VERSION" --sha256 "$SHA256"
+run_installer "$ROOT/scripts/install.sh" --archive "$LEGACY_ARCHIVE" --version "$FRAMEWORK_VERSION" --sha256 "$LEGACY_SHA256"
 if curl -sf "$BASE/health" >/dev/null; then ok "fresh install starts and is healthy"; else bad "fresh install health"; fi
+LEGACY_SHUTDOWN_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $(node -p "require('$HOME_FAKE/.termux-os/secrets/framework-auth.v1.json').admin_token")" \
+  "$BASE/api/admin/shutdown")"
+if [ "$LEGACY_SHUTDOWN_CODE" != 202 ]; then
+  ok "legacy fixture has no authenticated shutdown route"
+else
+  bad "legacy fixture shutdown route returned $LEGACY_SHUTDOWN_CODE"
+fi
 
 mkdir -p "$RUNTIME/.runtime/observations" "$PERSIST/conf" "$PERSIST/data" "$WORK/packages" "$WORK/models"
 printf '{"schema":"termux-os.observations.v1","observations":[{"id":"installer-sentinel"}]}\n' > "$RUNTIME/.runtime/observations/observations.v1.json"
@@ -77,6 +105,11 @@ if run_installer_without_signal_permission "$ROOT/scripts/upgrade.sh" \
   ok "upgrade succeeds without cross-domain signal permission"
 else
   bad "upgrade succeeds without cross-domain signal permission"
+fi
+if cmp -s "$CONTROL" "$ROOT/tmp/public-tree/scripts/framework.sh"; then
+  ok "candidate controller replaces the legacy controller before future updates"
+else
+  bad "candidate controller was not retained"
 fi
 if [ "$(sha256sum "$RUNTIME/.runtime/observations/observations.v1.json" | awk '{print $1}')" = "$OBS_SHA" ] \
   && [ -f "$PERSIST/conf/user.conf" ] && [ -f "$PERSIST/data/user.txt" ] \

@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
 # [INPUT]: Runtime inputs documented by this file, its public API, and adjacent documentation.
-# [OUTPUT]: Framework lifecycle, private credential recovery, and Termux network-ready runtime control.
+# [OUTPUT]: Framework lifecycle, cross-domain legacy stop handoff, private credential recovery, and Termux network-ready runtime control.
 # [POS]: scripts/framework.sh in termux-os-framework.
 # [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
 
@@ -44,6 +44,7 @@ PIDFILE="$RUNTIME/framework.pid"
 LOGFILE="$RUNTIME/framework.log"
 UPDATE_DIR="$PERSIST/updates"
 STAGE_ROOT="$(dirname "$RUNTIME")/.framework-update-staging"
+STOP_HANDOFF="$HOME/.termux-os/framework-stop-handoff.v1"
 
 say() { echo "[framework] $*"; }
 err() { echo "[framework] ERROR: $*" >&2; }
@@ -188,6 +189,63 @@ request_self_shutdown() {
     "$BASE_URL/api/admin/shutdown" >/dev/null 2>&1
 }
 
+# Runtimes released before authenticated self-shutdown can still ask their
+# external controller to restart. A candidate installer temporarily installs
+# this controller first, then this one-shot handoff makes that old endpoint
+# spawn `stop` inside Core's own SELinux domain. The marker is private, bound to
+# the exact live PID/build, atomically claimed, and never changes runtime truth.
+write_stop_handoff() {
+  local pid build tmp
+  [ -f "$PIDFILE" ] || return 1
+  pid="$(tr -d '\r\n' < "$PIDFILE")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  build="$(current_build)"
+  [ "$build" != unknown ] || return 1
+  mkdir -p "$(dirname "$STOP_HANDOFF")"
+  tmp="$STOP_HANDOFF.tmp.$$"
+  printf '%s\n%s\n' "$pid" "$build" > "$tmp" || return 1
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$STOP_HANDOFF"
+}
+
+claim_stop_handoff() {
+  local claim pid build expected_pid expected_build
+  local -a handoff=()
+  [ -f "$STOP_HANDOFF" ] || return 1
+  claim="$STOP_HANDOFF.claim.$$"
+  mv "$STOP_HANDOFF" "$claim" 2>/dev/null || return 1
+  mapfile -t handoff < "$claim"
+  rm -f "$claim"
+  pid="${handoff[0]:-}"
+  build="${handoff[1]:-}"
+  expected_pid="$(tr -d '\r\n' < "$PIDFILE" 2>/dev/null || true)"
+  expected_build="$(current_build)"
+  [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" = "$expected_pid" ] && [ "$build" = "$expected_build" ]
+}
+
+request_legacy_stop_handoff() {
+  local token code
+  port_up || return 1
+  token="$(admin_token)"
+  [ -n "$token" ] || return 1
+  write_stop_handoff || return 1
+  code="$(curl -s -o /dev/null -w '%{http_code}' -m 5 -X POST \
+    -H "Authorization: Bearer $token" "$BASE_URL/api/admin/restart" 2>/dev/null || true)"
+  if [ "$code" != 202 ]; then
+    rm -f "$STOP_HANDOFF"
+    return 1
+  fi
+  for _ in $(seq 1 60); do
+    if ! port_up; then
+      rm -f "$STOP_HANDOFF" "$STOP_HANDOFF".claim.*
+      return 0
+    fi
+    sleep 0.25
+  done
+  rm -f "$STOP_HANDOFF" "$STOP_HANDOFF".claim.*
+  return 1
+}
+
 stop_runtime() {
   local pid cwd
   stop_services
@@ -208,6 +266,11 @@ stop_runtime() {
     [ "$cwd" = "$RUNTIME" ] && kill "$pid" 2>/dev/null || true
   done
   for _ in $(seq 1 20); do port_up || break; sleep 0.25; done
+  if port_up && request_legacy_stop_handoff; then
+    rm -f "$PIDFILE"
+    say "stopped through legacy Core handoff"
+    return 0
+  fi
   if port_up; then
     err "端口 $PORT 仍被佔用，stop 失敗"
     return 1
@@ -913,7 +976,10 @@ cmd_rollback() {
 }
 
 case "${1:-}" in
-  bootstrap|start|stop|restart|status|logs|health|credentials|backup|rollback)
+  restart)
+    if claim_stop_handoff; then cmd_stop; else cmd_restart; fi
+    ;;
+  bootstrap|start|stop|status|logs|health|credentials|backup|rollback)
     "cmd_$1" "${@:2}"
     ;;
   reset-password) cmd_reset_password "${@:2}" ;;

@@ -24,6 +24,12 @@ Versioned contracts
 Independent Extension Packages and companion applications
 ```
 
+Core HTTP availability is independent from Package Work restoration. Startup
+first loads Package declarations and reconciles surviving process identity,
+then begins desired-service and stale-session recovery asynchronously while the
+HTTP control plane binds. Each Package service continues to expose its own
+process and health truth; a slow or broken Work cannot make Core look absent.
+
 ## Runtime truth
 
 Source code is never runtime truth.

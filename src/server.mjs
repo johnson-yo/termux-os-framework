@@ -1,8 +1,8 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
  * [INPUT]: Runtime inputs documented by this file, its public API, and adjacent documentation.
- * [OUTPUT]: Authenticated HTTP/WebSocket routes, Package Registry details, explicit local-install safety confirmation,
- *           and Package HTML compatibility that preserves marked external-provider credential fields.
+ * [OUTPUT]: Promptly available authenticated HTTP/WebSocket control routes, asynchronous startup reconciliation,
+ *           Package Registry details, local-install safety, and Package HTML compatibility.
  * [POS]: src/server.mjs in termux-os-framework.
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
@@ -706,9 +706,15 @@ initDevRuntime({ frameworkRoot: ROOT, frameworkVersion: FRAMEWORK_VERSION, confi
  * 這裡是唯一知道兩邊都已就緒的地方。
  */
 stage.setServiceStartGate((def) => serviceDependencyGate(def, { log: console.log }));
+let controlPlaneListening = false;
+let startupReconcileQueued = 0;
 const requestReconcile = (event) => {
   const kind = String(event?.kind ?? 'state_change');
   const subject = event?.name ?? event?.package_id ?? event?.capability ?? event?.service ?? '';
+  if (!controlPlaneListening) {
+    startupReconcileQueued += 1;
+    return Promise.resolve([]);
+  }
   return stage.requestDesiredReconcile(subject ? `${kind}:${subject}` : kind);
 };
 setStateChangeHandler(requestReconcile);
@@ -747,9 +753,31 @@ const reconciled = stage.reconcileRuntimeState();
 if (reconciled.adopted.length || reconciled.cleared.length) {
   console.log(`stage reconcile: adopted=${JSON.stringify(reconciled.adopted)} cleared=${JSON.stringify(reconciled.cleared)}`);
 }
-// restore 必須在 reconcile 之後：收編倖存進程 → 與 runtime event 使用同一個 desired reconcile（020 §12.3）
-const restored = await stage.restoreDesiredServices();
-if (restored.length) console.log(`stage restore: ${JSON.stringify(restored.map((r) => ({ id: r.id, ok: r.ok })))}`);
+// Package registration emits readiness events, but none may start Package Work
+// until Core is actually listening. One startup pass sees the complete latest
+// truth, so queued registration events need no second queue or replay loop.
+const startupReconciliation = { state: 'scheduled', restored: [], recovered: [], error: null };
+async function restoreStartupState() {
+  startupReconciliation.state = 'restoring_services';
+  startupReconciliation.restored = await stage.restoreDesiredServices();
+  if (startupReconciliation.restored.length) {
+    console.log(`stage restore: ${JSON.stringify(startupReconciliation.restored.map((r) => ({ id: r.id, ok: r.ok })))}`);
+  }
+  startupReconciliation.state = 'recovering_sessions';
+  startupReconciliation.recovered = await recoverStaleSessions(sessionDeps);
+  if (startupReconciliation.recovered.length) {
+    console.log(`app sessions recovered: ${JSON.stringify(startupReconciliation.recovered)}`);
+  }
+  startupReconciliation.state = 'complete';
+}
+
+function beginStartupRestore() {
+  restoreStartupState().catch((error) => {
+    startupReconciliation.state = 'failed';
+    startupReconciliation.error = String(error?.message ?? error);
+    console.error(`startup reconciliation failed: ${String(error?.stack ?? error)}`);
+  });
+}
 
 async function restartRunningPackageServices() {
   const statuses = await stage.listServices();
@@ -930,8 +958,14 @@ function integrityReport() {
       loaded: pkgs.filter((p) => p.status === 'loaded').length,
       failed: pkgs.filter((p) => p.status === 'failed').map((p) => p.id) },
     services: { ok: true, registered: stageServices.length },
-    desired_restore: { ok: restored.every((r) => r.ok !== false),
-      failures: restored.filter((r) => r.ok === false).map((r) => ({ id: r.id, error: r.error ?? null })) },
+    desired_restore: {
+      ok: startupReconciliation.state !== 'failed',
+      state: startupReconciliation.state,
+      queued_events: startupReconcileQueued,
+      failures: startupReconciliation.restored.filter((r) => r.ok === false)
+        .map((r) => ({ id: r.id, error: r.error ?? null })),
+      error: startupReconciliation.error,
+    },
     runtime_truth: { ok: pkgs.every((p) => p.status !== 'loaded' || p.runtime !== null) },
     persistent_config: { ok: fs.existsSync(CONFIG_PATH), file: path.basename(CONFIG_PATH) },
     framework_build: { ok: deployId() !== 'unknown', deploy_id: deployId(), version: FRAMEWORK_VERSION },
@@ -1050,10 +1084,6 @@ async function overviewReport() {
     attention,
   };
 }
-
-// 025 §8.5：上次沒收乾淨的 Session（App 崩了/framework 掛了）——被 quiesce 的 Service 不能一直停著
-const recovered = await recoverStaleSessions(sessionDeps);
-if (recovered.length) console.log(`app sessions recovered: ${JSON.stringify(recovered)}`);
 
 const STAGE_CTL = /^\/api\/stage\/services\/([\w.@-]+)\/(start|stop|restart)$/;
 const STAGE_LOGS = /^\/api\/stage\/services\/([\w.@-]+)\/logs$/;
@@ -2837,5 +2867,7 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(PORT, HOST, () => {
+  controlPlaneListening = true;
   console.log(`termux-os-framework listening on http://${HOST}:${PORT} (config: ${CONFIG_PATH})`);
+  setImmediate(beginStartupRestore);
 });
