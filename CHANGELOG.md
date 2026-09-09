@@ -2,6 +2,15 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.5
+
+- Make Framework stop and upgrade independent of Android SELinux signal
+  ownership. The authenticated controller asks the running Core to shut itself
+  down before using process signals as a legacy fallback.
+- Report a matching authenticated runtime as alive when `kill -0` is denied,
+  avoiding false "not running" status for a Core launched by an update worker
+  in a different Android process domain.
+
 ## 0.3.4
 
 - Add the Asset payload lifecycle v2 substrate: declaration-derived resolution,

@@ -71,6 +71,12 @@ models, and caches. `--purge` additionally removes Framework configuration,
 credentials, and install state, but never removes Installed Packages, models,
 or caches.
 
+Stop and upgrade do not assume that matching Android UIDs imply signal
+permission. The controller first requests authenticated Core self-shutdown;
+direct process signals remain only as a compatibility fallback for older
+runtimes. This keeps CLI and update-worker control reliable when Android places
+them in different SELinux process domains.
+
 The browser Admin update action uses a bounded three-stage source path after
 the catalog has been refreshed:
 

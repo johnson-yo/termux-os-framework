@@ -49,7 +49,6 @@ say() { echo "[framework] $*"; }
 err() { echo "[framework] ERROR: $*" >&2; }
 die() { err "$*"; exit 1; }
 
-alive() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 port_up() { curl -sf -m 2 "$BASE_URL/health" >/dev/null 2>&1; }
 current_build() { cat "$RUNTIME/.deploy-id" 2>/dev/null || echo unknown; }
 admin_token() {
@@ -78,6 +77,33 @@ auth_value() {
     ' "$AUTH_FILE" "$key" 2>/dev/null || true)"
   fi
   printf '%s' "$value"
+}
+
+# Android may keep two processes with the same application UID in different
+# SELinux domains. In that case `kill -0` is denied even though this exact
+# Framework is healthy. Fall back to authenticated runtime identity instead of
+# reporting a false "not running" state.
+runtime_identity_up() {
+  local token expected body
+  port_up || return 1
+  token="$(admin_token)"
+  expected="$(current_build)"
+  [ -n "$token" ] && [ "$expected" != unknown ] || return 1
+  body="$(curl -sf -m 4 -H "Authorization: Bearer $token" "$BASE_URL/api/admin/status")" || return 1
+  EXPECTED_BUILD="$expected" node -e '
+    let s=""; process.stdin.on("data", c => s += c).on("end", () => { try {
+      const d = JSON.parse(s);
+      process.exit(d.ok && d.deploy_id === process.env.EXPECTED_BUILD ? 0 : 1);
+    } catch { process.exit(1); } });
+  ' <<<"$body"
+}
+
+alive() {
+  local pid
+  [ -f "$PIDFILE" ] || return 1
+  pid="$(tr -d '\r\n' < "$PIDFILE")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || runtime_identity_up
 }
 
 ensure_auth() {
@@ -151,9 +177,30 @@ stop_services() {
     "$BASE_URL/api/stage/stop-all" >/dev/null 2>&1 || true
 }
 
+# Prefer asking the authenticated Core to terminate itself. Signal permission
+# is not a reliable ownership test on Android: an update worker and an SSH
+# shell can share the Termux UID while SELinux still denies kill(2).
+request_self_shutdown() {
+  local token
+  token="$(admin_token)"
+  [ -n "$token" ] || return 1
+  curl -sf -m 5 -X POST -H "Authorization: Bearer $token" \
+    "$BASE_URL/api/admin/shutdown" >/dev/null 2>&1
+}
+
 stop_runtime() {
   local pid cwd
   stop_services
+  if port_up && request_self_shutdown; then
+    for _ in $(seq 1 20); do
+      if ! port_up; then
+        rm -f "$PIDFILE"
+        say "stopped"
+        return 0
+      fi
+      sleep 0.25
+    done
+  fi
   [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null || true
   # 兼容 030 前 npm wrapper PID：只清 cwd 真正在本 runtime 的 server，禁止全局 pkill 誤殺別的 fixture。
   for pid in $(pgrep -f 'node src/server\.mjs' 2>/dev/null || true); do

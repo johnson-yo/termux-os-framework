@@ -30,6 +30,13 @@ run_installer() {
     PACKAGES_INSTALLED_DIR="$WORK/packages" FRAMEWORK_WORK_ROOT="$WORK/work" \
     bash "$@"
 }
+run_installer_without_signal_permission() {
+  (
+    kill() { return 1; }
+    export -f kill
+    run_installer "$@"
+  )
+}
 cleanup() {
   if [ -f "$CONTROL" ]; then
     HOME="$HOME_FAKE" FRAMEWORK_RUNTIME="$RUNTIME" FRAMEWORK_PERSIST="$PERSIST" \
@@ -65,7 +72,12 @@ printf 'package-state\n' > "$WORK/packages/active.json"
 printf 'model-state\n' > "$WORK/models/model.marker"
 OBS_SHA="$(sha256sum "$RUNTIME/.runtime/observations/observations.v1.json" | awk '{print $1}')"
 
-run_installer "$ROOT/scripts/upgrade.sh" --archive "$ARCHIVE" --version "$FRAMEWORK_VERSION" --sha256 "$SHA256" --force
+if run_installer_without_signal_permission "$ROOT/scripts/upgrade.sh" \
+  --archive "$ARCHIVE" --version "$FRAMEWORK_VERSION" --sha256 "$SHA256" --force; then
+  ok "upgrade succeeds without cross-domain signal permission"
+else
+  bad "upgrade succeeds without cross-domain signal permission"
+fi
 if [ "$(sha256sum "$RUNTIME/.runtime/observations/observations.v1.json" | awk '{print $1}')" = "$OBS_SHA" ] \
   && [ -f "$PERSIST/conf/user.conf" ] && [ -f "$PERSIST/data/user.txt" ] \
   && [ -f "$WORK/packages/active.json" ] && [ -f "$WORK/models/model.marker" ]; then

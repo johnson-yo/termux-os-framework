@@ -56,3 +56,21 @@ for route in /api/audio/activity /api/asr/status /api/translate/status; do
 done
 
 echo "PASS empty Core: 0 Packages, 0 services, no product media routes"
+
+BAD_SHUTDOWN_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H 'Authorization: Bearer definitely-wrong' "$BASE/api/admin/shutdown")
+[ "$BAD_SHUTDOWN_CODE" = 401 ] || { echo "FAIL unauthenticated shutdown returned $BAD_SHUTDOWN_CODE" >&2; exit 1; }
+SHUTDOWN_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TOKEN" "$BASE/api/admin/shutdown")
+[ "$SHUTDOWN_CODE" = 202 ] || { echo "FAIL authenticated shutdown returned $SHUTDOWN_CODE" >&2; exit 1; }
+for _ in $(seq 1 30); do
+  kill -0 "$PID" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$PID" 2>/dev/null || curl -sf -m 1 "$BASE/health" >/dev/null 2>&1; then
+  echo "FAIL authenticated Core self-shutdown did not converge" >&2
+  exit 1
+fi
+wait "$PID" 2>/dev/null || true
+PID=""
+echo "PASS authenticated Core self-shutdown"

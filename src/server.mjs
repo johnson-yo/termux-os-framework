@@ -211,6 +211,7 @@ const FRAMEWORK_VERSION = FRAMEWORK_VERSION_RAW;
 const FEATURE_SCHEMA = 'termux-os.framework-features.v1';
 const FEATURES = Object.freeze({
   admin_integrity: 1,
+  admin_shutdown: 1,
   dev_runtime: 1,
   runtime_truth: 1,
   browser_session: 1,
@@ -1084,6 +1085,7 @@ const stageRoute = async (req, res, url, query) => {
 // ============================================================
 // 路由
 // ============================================================
+let shutdownScheduled = false;
 const server = http.createServer(async (req, res) => {
   const parsed = new URL(req.url, 'http://x');
   // 工作區實例的 id 是 `<包id>@<slug>`，瀏覽器用 encodeURIComponent 送出時 `@` 變成 `%40`，
@@ -1192,6 +1194,33 @@ const server = http.createServer(async (req, res) => {
     if (!auth) return json(res, 401, { ok: false, error: 'unauthorized' });
     if (!hasPermission(auth, 'write')) return json(res, 403, { ok: false, error: 'write_permission_required' });
     if (!csrfValid(req, auth)) return json(res, 403, { ok: false, error: 'csrf_failed' });
+  }
+
+  // A controller may share the Termux UID with Core while Android SELinux puts
+  // it in another process domain and denies kill(2). Authenticated self-shutdown
+  // makes stop/update depend on Framework ownership, not signal permission.
+  if (url === '/api/admin/shutdown' && req.method === 'POST') {
+    const accepted = !shutdownScheduled;
+    shutdownScheduled = true;
+    if (accepted) {
+      res.once('finish', () => {
+        const begin = setTimeout(() => {
+          const forced = setTimeout(() => process.exit(0), 2000);
+          forced.unref();
+          server.close(() => {
+            clearTimeout(forced);
+            process.exit(0);
+          });
+        }, 20);
+        begin.unref();
+      });
+    }
+    return json(res, 202, {
+      ok: true,
+      schema: 'termux-os.framework-shutdown.v1',
+      state: accepted ? 'accepted' : 'already_scheduled',
+      deploy_id: deployId(),
+    }, { 'Cache-Control': 'no-store' });
   }
 
   // 030 Section 4：WebUI 只上传、确认、启动/轮询外部 job；真正生命周期仍唯一进入
