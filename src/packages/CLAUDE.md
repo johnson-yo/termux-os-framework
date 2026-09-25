@@ -24,7 +24,10 @@ remove, nor reinstall without opening a shell to find out why it had vanished.
 
 Dependency resolution has two callers with different authority. Runtime and
 normal Registry-assisted preflight may use the cached catalog to describe a
-possible supply. Local archive installation uses the local-only resolver: it
+possible supply. Both probe Capabilities on the device first: only a required
+Capability with no provider here is supplied from the catalog, an optional one
+is listed with its provider but never installed, and `install_order` /
+`download_bytes` are derived from `supply` alone. Local archive installation uses the local-only resolver: it
 reports the installed Package/Capability/Asset facts, never manufactures a
 remote supply plan, and blocks on any required dependency that is not already
 ready on the device.

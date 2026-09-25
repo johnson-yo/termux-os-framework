@@ -802,7 +802,25 @@ async function startPackageUpgrade(item) {
 }
 
 /** Start Dev Runtime on the installed active worktree; never create a second source copy. */
+/**
+ * ⚠ 进入开发模式必须先确认。它不是一个查看动作：从这一刻起，已安装目录里的任何改动
+ * 都会被热重载进运行中的服务，Framework 更新也会被挡住，直到停止开发。按钮与「更新」
+ * 「回滚」挨在一排，一次误点就能让一个正常使用的包悄悄进入另一种运行方式。
+ */
 async function startPackageDev(item) {
+  const accepted = await confirmAction({
+    title: `进入开发模式 · ${packageAdminName(item)}`,
+    label: '进入开发模式',
+    details: [
+      ['Package ID', item.id],
+      ['当前版本', item.version],
+      ['监视目录', item.installed_dir ?? 'n/a'],
+      ['影响', '目录内的改动会立即热重载进运行中的服务；Framework 更新在停止开发前不可用。'],
+      ['退出', '在这张卡片上点「停止开发」。已装版本与数据不受影响。'],
+    ],
+    acknowledgement: '我知道这是开发者功能，普通使用不需要它。',
+  });
+  if (!accepted) return;
   try {
     await apiData('/api/dev/packages', {
       method: 'POST',
@@ -811,6 +829,16 @@ async function startPackageDev(item) {
     packageNotice = { kind: 'good', text: `已开始监视 ${item.id} 的唯一 active worktree；主机代码请用 SDK dev sync 推送。` };
   } catch (error) {
     packageNotice = { kind: 'bad', text: `启动 Dev Runtime：${error.message ?? error}` };
+  }
+  return loadPackageManager();
+}
+
+async function stopPackageDev(item) {
+  try {
+    await apiData(`/api/dev/packages/${encodeURIComponent(item.id)}/stop`, { method: 'POST', body: '{}' });
+    packageNotice = { kind: 'good', text: `已停止开发模式：${item.id}。` };
+  } catch (error) {
+    packageNotice = { kind: 'bad', text: `停止开发模式：${error.message ?? error}` };
   }
   return loadPackageManager();
 }
@@ -871,29 +899,54 @@ const bytesLabel = (n) => {
 function dependencyRows(plan) {
   if (!plan?.nodes?.length) return [];
   const rows = [['依赖', `${plan.nodes.length} 项 · ${plan.installable ? '可安装' : '不可安装'}`]];
+  const willInstall = new Set(plan.install_order ?? []);
   for (const node of plan.nodes) {
     const kind = DEP_KIND_LABEL[node.kind] ?? node.kind;
     const need = node.required ? '必需' : '可选';
-    const state = DEP_STATE_LABEL[node.state] ?? node.state;
-    const parts = [`${state}`];
-    if (node.installed_version) parts.push(`已装 ${node.installed_version}`);
-    if (node.version) parts.push(`要求 ${node.version}`);
-    if (node.download) {
-      parts.push(`将安装 ${node.download.version}`);
-      const size = bytesLabel(node.download.size);
-      if (size) parts.push(size);
-      // 来源与校验状态：装的东西从哪来、有没有可比对的哈希，是同一个问题的两半。
-      if (node.download.repository) parts.push(node.download.repository);
-      parts.push(node.download.sha256 ? 'SHA-256 已登记' : '⚠ 无 SHA-256');
-    } else if (node.state !== 'ready' && node.required) {
-      parts.push(plan.dependency_mode === 'local_only' ? '⚠ 本机未就绪' : '⚠ Catalog 里没有');
-    }
+    const parts = [DEP_STATE_LABEL[node.state] ?? node.state, ...dependencyDetail(node, plan, willInstall)];
     rows.push([`${kind} · ${need}`, `${node.id} — ${parts.join(' · ')}`]);
   }
   if (plan.install_order?.length) rows.push(['安装顺序', plan.install_order.join(' → ')]);
   const total = bytesLabel(plan.download_bytes);
   if (total) rows.push(['需要下载', total]);
   return rows;
+}
+
+/**
+ * 一行依赖要说清的只有两件事：它现在是什么状态，这次安装会不会动它。
+ *
+ * ⚠ 「会不会动它」只看 `install_order`——那是安装路径真正执行的清单。Capability 的
+ * 提供方挂在 `node.providers` 上而不是 `node.download`；只看后者会把一个马上就要
+ * 随安装补上的 Adapter 报成「Catalog 里没有」，与同一张表里的安装顺序自相矛盾。
+ */
+function dependencyDetail(node, plan, willInstall) {
+  const parts = [];
+  if (node.installed_version) parts.push(`已装 ${node.installed_version}`);
+  if (node.version) parts.push(`要求 ${node.version}`);
+  if (node.state === 'ready') return parts;
+  const source = node.download ?? (node.providers?.length === 1 ? node.providers[0] : null);
+  if (source && willInstall.has(source.package_id)) {
+    parts.push(node.download ? `将安装 ${source.version}` : `将安装提供方 ${source.package_id} ${source.version}`);
+    const size = bytesLabel(source.size);
+    if (size) parts.push(size);
+    // 来源与校验状态：装的东西从哪来、有没有可比对的哈希，是同一个问题的两半。
+    if (source.repository) parts.push(source.repository);
+    parts.push(source.sha256 ? 'SHA-256 已登记' : '⚠ 无 SHA-256');
+    return parts;
+  }
+  if (node.needs_choice) {
+    parts.push(`有多个提供方（${node.providers.map((p) => p.package_id).join('、')}），请先手动安装其一`);
+    return parts;
+  }
+  if (!node.required) {
+    if (node.state !== 'missing') parts.push('当前不可用，不影响安装');
+    else parts.push(source ? `不自动安装，可另行安装 ${source.package_id}` : '不自动安装，缺少时相关功能不可用');
+    return parts;
+  }
+  if (node.state !== 'missing') parts.push('⚠ 已安装但尚未就绪');
+  else if (plan.dependency_mode === 'local_only') parts.push('⚠ 本机未就绪');
+  else parts.push(node.kind === 'package' ? '⚠ Catalog 里没有' : '⚠ 没有已知的提供方');
+  return parts;
 }
 
 async function installUpload(upload) {
@@ -1068,8 +1121,9 @@ function renderPackageCard(item) {
   actions.append(packageSettingLink(item));
   actions.append(actionButton('更新', 'primary',
     () => startPackageUpgrade(item), !canWrite() || !upgrade));
-  actions.append(actionButton('开发', '',
-    () => startPackageDev(item), !canWrite() || !item.installed_dir));
+  actions.append(item.dev_watching
+    ? actionButton('停止开发', 'primary', () => stopPackageDev(item), !canWrite())
+    : actionButton('开发', '', () => startPackageDev(item), !canWrite() || !item.installed_dir));
   actions.append(actionButton('回滚', '',
     () => startInstalledAction(item, 'rollback'), !canWrite() || !item.previous_version));
   actions.append(actionButton('卸载', 'danger-text',

@@ -149,19 +149,28 @@ export async function dependencyTree(rootManifest, manifestFor = () => null) {
  * ⭐ 聲明來自打包子進程（它認識這個歸檔），狀態只有這裡知道（Capability 註冊表
  * 活在本進程記憶體裡）。兩邊各答自己真的知道的那一半。
  *
- * ⚠ Capability 在預檢時**刻意不探**：安裝前提供方多半還沒起來，探它只會得到一個
- * 誠實但無用的 missing。它歸啟動門禁管，那時候答案才有意義。
+ * ⭐ Capability **要探**，與本地模式同一個探針。先前這裡刻意不探（理由是「安裝前提供方
+ * 多半還沒起來」），於是本機早已裝好、正在運行的提供方也被當成 missing：確認頁要求
+ * 重新下載它，可選的提供方也被排進下載隊列。探針只回答事實——真的沒有提供方時它
+ * 照樣是 missing，Catalog 仍會補上；有提供方但暫時不健康，那是啟動門禁的事，
+ * 不是「再裝一遍」的理由。
  */
-export function resolveDeclaredDependencies(declared, {
+export async function resolveDeclaredDependencies(declared, {
   catalog = () => null,
   providers = () => [],
+  capabilityProbe = capabilityFacts,
 } = {}) {
+  const capabilityCache = new Map();
+  for (const node of declared ?? []) {
+    if (node.kind !== DEP_KIND.CAPABILITY || capabilityCache.has(node.id)) continue;
+    capabilityCache.set(node.id, await capabilityProbe(node.id));
+  }
   const plan = installPlan(declared, {
     catalog,
     probes: {
       [DEP_KIND.PACKAGE]: (id) => packageFacts(id),
       [DEP_KIND.ASSET]: (id) => assetFacts(id),
-      [DEP_KIND.CAPABILITY]: () => null,
+      [DEP_KIND.CAPABILITY]: (id) => capabilityCache.get(id) ?? null,
     },
   });
 
@@ -194,7 +203,9 @@ export function resolveDeclaredDependencies(declared, {
     if (node.kind !== DEP_KIND.CAPABILITY) continue;
     const candidates = providers(node.id, DEP_KIND.CAPABILITY);
     if (!candidates.length) continue;
+    // 可選的也列出提供方——確認頁要說得出「可由誰提供」；但與 Package 同理，只列不裝。
     node.providers = candidates;
+    if (node.required === false) continue;
     if (candidates.length === 1) supply.push(candidates[0]);
     else node.needs_choice = true;
   }
@@ -216,15 +227,15 @@ export function resolveDeclaredDependencies(declared, {
     seen.add(item.package_id);
     return true;
   });
-  if (!additions.length) return plan;
+  /**
+   * ⭐ 下載量與安裝順序**只從 supply 算**：supply 是安裝路徑唯一照著執行的清單。
+   * 先前它們從「所有帶下載坐標的節點」算，於是可選依賴也出現在確認頁的安裝順序
+   * 與下載量裡，而實際上一個都不會裝——確認頁說的和做的不是同一件事。
+   */
   return {
     ...plan,
-    // 缺的能力現在補得上，所以它不再是「裝不了」的理由。
-    installable: plan.installable
-      && !(plan.missing_from_catalog ?? []).some((node) => node.kind === DEP_KIND.PACKAGE),
-    download_bytes: (plan.download_bytes ?? 0)
-      + additions.reduce((sum, item) => sum + (item.size ?? 0), 0),
-    install_order: [...(plan.install_order ?? []), ...additions.map((item) => item.package_id)],
+    download_bytes: additions.reduce((sum, item) => sum + (item.size ?? 0), 0),
+    install_order: additions.map((item) => item.package_id),
     supply: additions,
   };
 }
@@ -337,7 +348,8 @@ if (process.argv.includes('--self-test')
     { kind: DEP_KIND.PACKAGE, id: 'pkg.optional', version: '>=1.0.0', required: false },
     { kind: DEP_KIND.CAPABILITY, id: 'cap.one', required: true },
   ];
-  const plan = resolveDeclaredDependencies(declared, { catalog, providers });
+  const absent = async () => ({ installed: false });
+  const plan = await resolveDeclaredDependencies(declared, { catalog, providers, capabilityProbe: absent });
   const supplied = (plan.supply ?? []).map((item) => item.package_id).sort();
 
   /**
@@ -351,13 +363,57 @@ if (process.argv.includes('--self-test')
   t('an optional dependency is listed but never installed for you',
     !supplied.includes('pkg.optional'));
 
-  const noCoords = resolveDeclaredDependencies(
+  const noCoords = await resolveDeclaredDependencies(
     [{ kind: DEP_KIND.PACKAGE, id: 'ghost.pkg', required: true }],
-    { catalog: () => null, providers: () => [] },
+    { catalog: () => null, providers: () => [], capabilityProbe: absent },
   );
   t('a required package the catalog cannot supply blocks the install instead of being skipped',
     noCoords.installable === false
     && (noCoords.missing_from_catalog ?? []).some((n) => n.id === 'ghost.pkg'));
+
+  /**
+   * ⭐ 這三條抓的是 S25 上真實出現過的確認頁：App 與模型管理器都已裝好在跑，
+   * 確認頁卻說 App API「Catalog 里没有」、要重新下載 Adapter，還把可選的
+   * Manager 也排進了下載隊列。
+   */
+  const readyCap = async (id) => (id === 'cap.one'
+    ? { installed: true, configured: true, reachable: true, healthy: true, provider_id: 'pkg.provider' }
+    : { installed: false });
+  const installedPlan = await resolveDeclaredDependencies(
+    [{ kind: DEP_KIND.CAPABILITY, id: 'cap.one', required: true }],
+    { catalog, providers, capabilityProbe: readyCap },
+  );
+  t('a Capability whose provider is already running here is ready, not re-downloaded',
+    installedPlan.nodes[0]?.state === DEP_STATE.READY
+    && (installedPlan.supply ?? []).length === 0
+    && (installedPlan.install_order ?? []).length === 0
+    && !installedPlan.download_bytes);
+
+  const optionalPlan = await resolveDeclaredDependencies(
+    [{ kind: DEP_KIND.CAPABILITY, id: 'cap.one', required: false }],
+    { catalog, providers, capabilityProbe: absent },
+  );
+  t('an optional Capability names its provider but is never installed for you',
+    optionalPlan.nodes[0]?.state === DEP_STATE.MISSING
+    && optionalPlan.nodes[0]?.providers?.some((p) => p.package_id === 'pkg.provider')
+    && (optionalPlan.supply ?? []).length === 0
+    && optionalPlan.installable === true);
+
+  const requiredMissing = await resolveDeclaredDependencies(
+    [{ kind: DEP_KIND.CAPABILITY, id: 'cap.one', required: true }],
+    { catalog, providers, capabilityProbe: absent },
+  );
+  t('a required Capability that is truly absent is still supplied from the catalog',
+    (requiredMissing.supply ?? []).some((item) => item.package_id === 'pkg.provider')
+    && requiredMissing.install_order.includes('pkg.provider'));
+
+  const optionalPackage = await resolveDeclaredDependencies(
+    [{ kind: DEP_KIND.PACKAGE, id: 'pkg.optional', required: false }],
+    { catalog, providers, capabilityProbe: absent },
+  );
+  t('an optional package never appears in the install order or the download size',
+    optionalPackage.install_order.length === 0 && optionalPackage.download_bytes === 0
+    && optionalPackage.nodes[0]?.download?.package_id === 'pkg.optional');
 
   const localOnly = await resolveDeclaredDependenciesLocal([
     { kind: DEP_KIND.PACKAGE, id: 'ghost.local.pkg', required: true },

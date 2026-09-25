@@ -45,8 +45,8 @@ remaining non-regular entry, and writes a SHA-256 sidecar:
 
 ```sh
 node scripts/build-framework-archive.mjs \
-  --version 0.3.9 \
-  --output tmp/framework-0.3.9-local.tar.gz
+  --version 0.3.10 \
+  --output tmp/framework-0.3.10-local.tar.gz
 ```
 
 The installer creates the private runtime under `~/.termux-os/framework/` and

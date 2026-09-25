@@ -156,6 +156,11 @@ uploaded from the browser is local-only and the dialog must state that it will
 not contact the Registry; its unverified-SHA checkbox is the archive trust
 acknowledgement, not a network permission. Registry dependency supplementation
 is shown only for a Registry-sourced or explicitly Registry-mode candidate.
+Each dependency row states its state and whether this install touches it, read
+from `install_order`; a Capability names its provider from `node.providers`
+rather than being reported as missing from the catalog. Entering Package
+development mode requires an acknowledged confirmation, and a watched Package's
+card offers a stop-development action in place of the development action.
 If the current Package reports a dirty worktree, show a second, independent
 choice: one option agrees to a complete backup before replacement, and the
 other explicitly agrees to discard the local worktree without a backup. The

@@ -1319,7 +1319,7 @@ const server = http.createServer(async (req, res) => {
     if (!declared.length) return null;
     const plan = mode === 'local_only'
       ? await resolveDeclaredDependenciesLocal(declared)
-      : resolveDeclaredDependencies(declared,
+      : await resolveDeclaredDependencies(declared,
         { catalog: packageRegistryFindByPackageId, providers: packageRegistryFindProviders });
     return { ...plan, dependency_mode: mode };
   };
@@ -1648,6 +1648,8 @@ const server = http.createServer(async (req, res) => {
         ...item,
         // Core resolves the exact installable archive; the WebUI must not repeat catalog policy.
         registry_update: packageRegistryInfo({ packageId: item.id, currentVersion: item.version }),
+        // The card must show that a Package is being watched and offer the way out.
+        dev_watching: isDevWatched(item.id),
       }));
       return json(res, 200, {
         ok: true,

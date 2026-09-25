@@ -2,6 +2,19 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.10
+
+- Probe Capabilities during Registry-assisted install preflight. A provider
+  that is already installed and running is no longer reported as missing,
+  downloaded again, or labelled "not in the catalog" on the confirmation page.
+- Never install an optional Capability provider automatically. Optional
+  dependencies are listed with their provider, and the install order and
+  download size now describe only what the install will actually fetch.
+- Show a Capability's provider on the confirmation page instead of falling
+  back to a missing-from-catalog warning.
+- Require an explicit confirmation before a Package enters development mode,
+  and offer "stop development" on the Package card while it is watched.
+
 ## 0.3.9
 
 - Keep browser-uploaded Package archives local-only by default. An explicit
