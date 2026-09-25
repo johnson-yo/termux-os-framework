@@ -269,7 +269,8 @@ export function migrateV1ToV2({ index = null } = {}) {
     if (entry?.previous) registerEntry(assetId, entry.previous, { isPrevious: true });
   }
   const written = changed
-    ? writePayloadLedger(next, { expectedGeneration: current.generation })
+    // No projection here: this runs at startup, inside the update window (see writeSelectionProjection).
+    ? writePayloadLedger(next, { expectedGeneration: current.generation, project: false })
     : current;
   if (legacyExists || changed) syncCompatibilityRegistry(written);
   report.generation = written.generation;

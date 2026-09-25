@@ -1831,8 +1831,15 @@ const server = http.createServer(async (req, res) => {
          */
         if (m[2] === 'uninstall') {
           const byPackage = reverseDependencies(item.id);
-          const assetIds = (getPackage(item.id)?.manifest?.assets?.provides ?? [])
-            .map((asset) => asset?.id).filter(Boolean);
+          /**
+           * ⭐ 另一個已裝的包也提供同一個 Asset id 時，卸這個不會讓任何人失去它——
+           * 把一個 Asset 從一個包搬到另一個包，正是靠「先裝新的、再卸舊的」完成的。
+           */
+          const providedElsewhere = (assetId) => listPackages().some((other) => other.id !== item.id
+            && (getPackage(other.id)?.manifest?.assets?.provides ?? []).some((asset) => asset?.id === assetId));
+          const assetIds = [...new Set((getPackage(item.id)?.manifest?.assets?.provides ?? [])
+            .map((asset) => asset?.id).filter(Boolean))]
+            .filter((assetId) => !providedElsewhere(assetId));
           const byAsset = assetIds.flatMap((assetId) => reverseDependencies(assetId, { kind: 'asset' })
             .map((user) => ({ ...user, via_asset: assetId })));
           const users = [...byPackage, ...byAsset];

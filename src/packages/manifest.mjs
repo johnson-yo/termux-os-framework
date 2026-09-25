@@ -29,6 +29,39 @@ const relPathOk = (p) => typeof p === 'string' && p.length > 0
 // 023：Runtime Contract 與 Target（皆為可選；不聲明=legacy/generic，見 §3.2）
 // ============================================================
 export const TARGET_GENERIC = 'generic';
+/**
+ * `assets.provides[].target: "device"` — this Asset has one variant per device target, and the
+ * list of targets is owned by the catalog, not by this manifest.
+ *
+ * ⭐ Why: enumerating targets in the manifest made every new DSP architecture a Package release,
+ * and every release moved the payload directory, so each device re-downloaded bytes it already
+ * had. With `device`, the declaration expands to exactly this device's target at read time; a
+ * Manager finds the files for that target in its catalog. Adding a target is an upload plus
+ * catalog rows, and nothing already installed changes.
+ */
+export const DEVICE_TARGET = 'device';
+
+/** The target spec of this device, or null when any dimension is unknown. */
+export function deviceTargetSpec(profile) {
+  const dims = ['os', 'arch', 'htp', 'qnn'].map((key) => String(profile?.[key] ?? 'unknown').toLowerCase());
+  if (dims.some((value) => !value || value === 'unknown')) return null;
+  const [os, arch, htp, qnn] = dims;
+  return { id: `${os}-${arch}-${htp}-qnn${qnn.replace(/\./g, '')}`, os, arch, htp, qnn };
+}
+
+/**
+ * Expand a `device` target into this device's concrete target. Every reader of an Asset
+ * declaration goes through this one function, so no caller can treat the literal string as a
+ * target id. An unknown device expands to a spec that cannot match, which surfaces as an
+ * explicit "no variant for this device" rather than a wrong pick.
+ */
+export function resolveAssetTarget(asset, profile) {
+  if (asset?.target !== DEVICE_TARGET) return asset;
+  const spec = deviceTargetSpec(profile) ?? {
+    id: 'device-unknown', os: profile?.os ?? 'unknown', arch: profile?.arch ?? 'unknown', htp: 'unknown', qnn: 'unknown',
+  };
+  return { ...asset, target: spec, target_mode: DEVICE_TARGET };
+}
 export const RUNTIME_LEGACY = 'legacy';
 
 const BUNDLED_TYPES = new Set(['executable', 'shared_library', 'file']);
@@ -288,8 +321,14 @@ function validateAssets(e, assets) {
        * 「有一份載荷聲稱自己在哪都行」，而它與某個硬件專屬版本同名——那時候該給誰
        * 沒有答案，只有先後順序，而先後順序不是答案。
        */
-      if (a.target !== undefined) validateTargetSpec(e, `${where}.target`, a.target);
-      validateAssetSource(e, where, a);
+      if (a.target === DEVICE_TARGET) {
+        // Its files come from the catalog for whichever device reads it; pinning files here
+        // would make them valid for one target only, which is what `device` exists to avoid.
+        if (a.source !== undefined) e(`${where}.source must be omitted when target is "${DEVICE_TARGET}"`);
+      } else {
+        if (a.target !== undefined) validateTargetSpec(e, `${where}.target`, a.target);
+        validateAssetSource(e, where, a);
+      }
     });
     const byId = new Map();
     for (const a of provides) {
@@ -299,6 +338,10 @@ function validateAssets(e, assets) {
     }
     for (const [id, variants] of byId) {
       if (variants.length === 1) continue;
+      if (variants.some((v) => v.target === DEVICE_TARGET)) {
+        e(`assets.provides[].id "${id}" uses target "${DEVICE_TARGET}" and must be declared once`);
+        continue;
+      }
       if (variants.some((v) => v.target === undefined)) {
         e(`assets.provides[].id "${id}" is declared ${variants.length} times; `
           + 'every one of them must declare its own target, or they are indistinguishable');
@@ -510,7 +553,8 @@ export function manifestTargets(m) {
  * @returns {{ ok: true, declaration }|{ ok: false, error, detail, candidates }}
  */
 export function selectAssetDeclaration(manifest, id, profile) {
-  const variants = (manifest?.assets?.provides ?? []).filter((a) => a?.id === id);
+  const variants = (manifest?.assets?.provides ?? []).filter((a) => a?.id === id)
+    .map((a) => resolveAssetTarget(a, profile));
   if (!variants.length) {
     return { ok: false, error: 'unknown_asset', detail: `${id} is not declared by this package`, candidates: [] };
   }
@@ -754,6 +798,32 @@ if (process.argv.includes('--self-test')
       assets: { provides: [{ ...ctxVariant('v73'), target: { id: 'v73', os: 'android', arch: 'arm64', htp: 'nope' } }] } }).ok);
 
   const devV73 = { os: 'android', arch: 'arm64', htp: 'v73', qnn: '2.47' };
+
+  // --- target:"device"：機型清單歸目錄，包只宣告一次 ---
+  const perDevice = {
+    ...base, ...assetProvide,
+    components: { ...base.components, assets: ['model.sensevoice'] },
+    assets: { provides: [{ id: 'model.sensevoice', kind: 'model', payload: 'payload/ctx', files: { context: 'model.bin' }, target: 'device' }] },
+  };
+  t('an asset may leave its targets to the catalog with target "device"', validateManifest(perDevice).ok);
+  t('a "device" asset may not pin source files, which would hold for one target only',
+    !validateManifest({ ...perDevice, assets: { provides: [{ ...perDevice.assets.provides[0],
+      source: assetProvide.assets.provides[0].source ?? { files: [{ path: 'model.bin', url: 'https://x.example/m.bin', size: 1, sha256: 'a'.repeat(64) }] } }] } }).ok);
+  t('a "device" asset may not be mixed with enumerated variants of the same id',
+    !validateManifest({ ...perDevice, assets: { provides: [perDevice.assets.provides[0], ctxVariant('v73')] } }).ok);
+  t('the device target id is derived from os/arch/htp/qnn',
+    deviceTargetSpec({ os: 'android', arch: 'arm64', htp: 'v79', qnn: '2.49' })?.id === 'android-arm64-v79-qnn249');
+  t('a device with an unknown dimension has no target spec',
+    deviceTargetSpec({ os: 'android', arch: 'arm64', htp: 'unknown', qnn: '2.49' }) === null);
+  {
+    const v79 = { os: 'android', arch: 'arm64', htp: 'v79', qnn: '2.49' };
+    const picked = selectAssetDeclaration(perDevice, 'model.sensevoice', v79);
+    t('a "device" asset selects this device\'s own target',
+      picked.ok && picked.declaration.target.id === 'android-arm64-v79-qnn249'
+      && picked.declaration.target_mode === DEVICE_TARGET);
+    t('a "device" asset on an unknown device is an explicit mismatch, not a guess',
+      !selectAssetDeclaration(perDevice, 'model.sensevoice', { ...v79, htp: 'unknown' }).ok);
+  }
   t('the declaration picked is the one built for this device',
     selectAssetDeclaration(twoVariants, 'model.sensevoice', devV73).declaration.target.id
       === 'android-arm64-v73-qnn247');

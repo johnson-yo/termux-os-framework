@@ -11,6 +11,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveInstalledPackages, installedRoot } from '../packages/installed-root.mjs';
+import { DEVICE_TARGET, resolveAssetTarget } from '../packages/manifest.mjs';
+import { deviceProfile } from '../packages/runtime-contract.mjs';
+
+// The probe spawns processes; a device does not change its SoC or bundled QNN while running.
+let cachedProfile = null;
+const currentProfile = () => (cachedProfile ??= deviceProfile());
 
 export const DECLARATION_INDEX_SCHEMA = 'termux-os.asset-declarations.v2';
 export const GENERIC_VARIANT = 'generic';
@@ -39,11 +45,15 @@ export function declarationsFromManifest({
   versionRoot = null,
   manifest,
   provenance = 'installed_manifest',
+  profile = null,
 } = {}) {
   if (!manifest || typeof manifest !== 'object') return [];
   const id = packageId ?? manifest.id ?? null;
   const version = packageVersion ?? manifest.version ?? null;
   return (manifest.assets?.provides ?? []).filter((asset) => asset && typeof asset.id === 'string' && asset.id)
+    .map((declared) => (declared.target === DEVICE_TARGET
+      ? resolveAssetTarget(declared, profile ?? currentProfile())
+      : declared))
     .map((asset) => {
       const variantId = declarationVariantId(asset);
       return {
@@ -59,6 +69,8 @@ export function declarationsFromManifest({
         payload: asset.payload ?? null,
         files: copyFiles(asset.files),
         target: asset.target ?? null,
+        // `device` variants carry no files here: the catalog owns them, per target.
+        target_mode: asset.target_mode ?? null,
         source: asset.source ?? null,
         provenance,
       };
@@ -209,6 +221,17 @@ if (process.argv.includes('--self-test')
     && index.declarations[0]?.package_id === 'pkg.example');
   const pure = declarationsFromManifest({ packageId: 'pkg.dev', manifest: { id: 'pkg.dev', version: '0.1.0', assets: { provides: [{ id: 'a', kind: 'binary', payload: 'a', files: {} }] } }, provenance: 'dev_mount' });
   test('Dev Mount uses the same derived shape', pure[0]?.provenance === 'dev_mount' && pure[0]?.asset_id === 'a');
+  const perDevice = (profile) => declarationsFromManifest({ packageId: 'pkg.catalog', profile, manifest: {
+    id: 'pkg.catalog', version: '2.0.0',
+    assets: { provides: [{ id: 'model.ctx', kind: 'model', payload: 'ctx', files: { context: 'model.bin' }, target: 'device' }] },
+  } })[0];
+  const v79 = perDevice({ os: 'android', arch: 'arm64', htp: 'v79', qnn: '2.49' });
+  test('a "device" asset declares exactly this device\'s variant',
+    v79?.variant_id === 'android-arm64-v79-qnn249' && v79?.target?.htp === 'v79' && v79?.target_mode === 'device');
+  test('the same manifest declares another variant on another device',
+    perDevice({ os: 'android', arch: 'arm64', htp: 'v73', qnn: '2.49' })?.variant_id === 'android-arm64-v73-qnn249');
+  test('an unknown device gets an explicit non-matching variant, never a guessed one',
+    perDevice({ os: 'android', arch: 'arm64', htp: 'unknown', qnn: '2.49' })?.variant_id === 'device-unknown');
   fs.rmSync(root, { recursive: true, force: true });
   process.exit(failures ? 1 : 0);
 }

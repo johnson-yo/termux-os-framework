@@ -2,6 +2,27 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.11
+
+- Add `assets.provides[].target: "device"`: an Asset with one variant per device
+  target whose target list is owned by the catalog rather than the manifest.
+  The declaration expands to this device's target (`<os>-<arch>-<htp>-qnn<qnn>`)
+  when read; a Manager supplies that target's files. A new target no longer
+  needs a Package release, and an update does not move installed bytes.
+- The Package installer leaves `device` variants to the asset Manager instead of
+  failing to find a payload in the archive.
+- Upgrade a legacy payload record to the object store when the same bytes are
+  committed as a verified object, so moving an Asset to another Package does not
+  leave its selection pointing at the old Package's directory.
+- Allow uninstalling an Asset Package whose Asset another installed Package
+  also provides; moving an Asset between Packages is install-new, then
+  uninstall-old.
+- Project the current payload Selections to `<models>/.objects/selections.v1.json`
+  whenever an operation writes the ledger, so consumers outside Termux can find
+  the selected object without mistaking a superseded one for a second answer.
+  It is never written at startup: the update boundary check fingerprints the
+  model store, and any write in that window rolls an update back.
+
 ## 0.3.10
 
 - Probe Capabilities during Registry-assisted install preflight. A provider

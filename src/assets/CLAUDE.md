@@ -26,6 +26,25 @@ A Package's `targets[]` describes where its code runs. An `assets.provides[]` en
 
 The store directory comes from the payload's target. Two variants sharing one directory would overwrite each other, and an EPContext wrapper referencing `./model.bin` would then open the wrong pair and fail inside the runtime. A repeated asset id with no target is a manifest error. Selection failure reports the device profile alongside the variants that exist.
 
+## Catalog-owned variants
+
+`assets.provides[].target: "device"` declares an Asset whose device variants are listed by the
+catalog, not by the manifest. Every reader expands it through `resolveAssetTarget` to this device's
+concrete target, so the Declaration Index, variant selection, and transfers all see an ordinary
+target id; the literal `device` never reaches a caller. Such a declaration carries no source files:
+a Manager resolves the files for the expanded target from its catalog and pulls them through the
+normal transfer primitives. An unknown device expands to a non-matching `device-unknown` variant.
+
+## Selection projection
+
+`<models>/.objects/selections.v1.json` is a read-only copy of the current Selections (asset,
+variant, payload id, object path), rewritten from the ledger whenever an operation writes it — never at startup and never by the
+startup v1 migration, because the update boundary check fingerprints every file under the model
+store (path, size, mtime) and a write in that window rolls the update back. Identical content is
+not rewritten.
+It exists because the Android App cannot read Termux private storage, while the object store keeps
+superseded payloads. The ledger stays authoritative; a projection write never fails a ledger write.
+
 ## Where the bytes come from
 
 Source selection and upstream-specific URL construction belong to the calling Manager or Asset Package. Core transfer primitives consume an explicit, already-resolved source request or byte stream plus expected file metadata. Core must not encode Hugging Face, ModelScope, GitHub, or any other source as built-in policy. A Manager may choose direct, a catalog proxy, or another adapter and then ask Core to perform generic streaming, resume, verification, and atomic storage. For sufficiently large fresh files, the generic HTTP primitive may use a bounded set of explicit byte ranges; this is a transport optimization, not source or package policy.

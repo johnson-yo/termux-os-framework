@@ -181,7 +181,7 @@ const requireLedger = () => {
 };
 
 /** Atomic v2 ledger write. Callers use generation CAS before changing facts. */
-export function writePayloadLedger(ledger, { expectedGeneration = undefined } = {}) {
+export function writePayloadLedger(ledger, { expectedGeneration = undefined, project = true } = {}) {
   const current = readPayloadLedger();
   if (current.error) throw operationError('payload_ledger_corrupt', current.error);
   if (expectedGeneration !== undefined && Number(expectedGeneration) !== current.generation) {
@@ -205,7 +205,54 @@ export function writePayloadLedger(ledger, { expectedGeneration = undefined } = 
       try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
     } catch { /* directory fsync is not available on every Android filesystem */ }
   } finally { fs.rmSync(tmp, { force: true }); }
+  if (project) writeSelectionProjection(next);
   return next;
+}
+
+export const SELECTION_PROJECTION_SCHEMA = 'termux-os.asset-selections.v1';
+export const selectionProjectionPath = () => path.join(sharedStore(), '.objects', 'selections.v1.json');
+
+/**
+ * A read-only copy of the current Selections, placed beside the payload objects.
+ *
+ * ⭐ Consumers outside Termux (the Android App) cannot read the ledger in Termux private storage,
+ * yet the object store keeps superseded payloads. Without this file such a consumer can only scan
+ * every object, and two builds of the same target look like two valid answers. The projection
+ * names exactly the selected object per asset/variant. The ledger stays authoritative: this is
+ * rewritten from it when a Manager/Core operation writes the ledger, and a failure here never fails
+ * the write.
+ *
+ * ⛔ Never written at startup, and never by the v1 migration that can run at startup. A Framework
+ * update fingerprints every file under the model store (path, size, mtime) before and after the
+ * swap, from the *old* controller; one write here during that window rolls the update back — on
+ * every device, forever. Identical content is not rewritten either, for the same reason.
+ */
+export function writeSelectionProjection(ledger = readPayloadLedger()) {
+  if (!ledger || ledger.error) return null;
+  const selections = Object.values(ledger.selections ?? {}).map((selection) => {
+    const payload = ledger.payloads?.[selection.payload_id] ?? null;
+    return {
+      asset_id: selection.asset_id,
+      variant_id: selection.variant_id ?? 'generic',
+      payload_id: selection.payload_id,
+      path: payload?.storage_path ?? null,
+    };
+  }).filter((item) => item.asset_id && item.payload_id && item.path)
+    .sort((a, b) => `${a.asset_id}\u0000${a.variant_id}`.localeCompare(`${b.asset_id}\u0000${b.variant_id}`));
+  const body = { schema: SELECTION_PROJECTION_SCHEMA, generation: ledger.generation ?? 0, updated_at: ledger.updated_at ?? null, selections };
+  const file = selectionProjectionPath();
+  const text = `${JSON.stringify(body, null, 2)}\n`;
+  try { if (fs.readFileSync(file, 'utf8') === text) return body; } catch { /* absent: write it */ }
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, text);
+    fs.renameSync(tmp, file);
+    return body;
+  } catch {
+    fs.rmSync(tmp, { force: true });
+    return null;
+  }
 }
 
 export const selectionKey = (assetId, variantId = 'generic') => `${String(assetId)}\u0000${String(variantId || 'generic')}`;
@@ -286,12 +333,23 @@ export function recordPayloads(records = [], { expectedGeneration = undefined } 
   for (const item of prepared) {
     const { id, normalizedFiles, storagePath, layout, extra, existing } = item;
     ledger.payloads[id] = existing ?? payloadRecord({ payloadId: id, files: normalizedFiles, storagePath, layout, ...extra });
+    /**
+     * ⭐ A legacy record is upgraded when the same bytes now also exist as a verified object.
+     * A legacy directory belongs to the Package that installed it and disappears with that
+     * Package's uninstall; the object belongs to no one. Moving an Asset between Packages hits
+     * exactly this case (same bytes, new owner), and keeping the legacy path left the selection
+     * pointing at the old Package's directory while the freshly verified object was orphaned.
+     */
+    const upgradeToObject = existing && (existing.layout ?? 'object') === 'legacy' && layout === 'object';
     if (existing) ledger.payloads[id] = {
       ...existing, ...extra, state: 'ready',
+      ...(upgradeToObject ? { layout: 'object' } : {}),
       // Keep the first ledger file metadata.  The object is immutable and its
       // role is caller metadata; replacing it on a reuse would make a
       // Manager's compatibility projection depend on install order.
-      storage_path: existing.storage_path ?? storagePath ?? payloadObjectDir(id), files: existing.files,
+      storage_path: upgradeToObject ? payloadObjectDir(id)
+        : existing.storage_path ?? storagePath ?? payloadObjectDir(id),
+      files: existing.files,
     };
     delete ledger.tombstones[id];
     if (item.selection) {
@@ -525,6 +583,46 @@ if (process.argv.includes('--self-test')
   t('role metadata does not create a false payload identity conflict',
     roleFirst.payload.payload_id === roleReuse.payload.payload_id
       && roleReuse.payload.files[0].role === 'generic');
+
+  {
+    // A legacy record whose bytes are now committed as an object becomes that object.
+    {
+      const files = [{ path: 'h.bin', size: 5, sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824' }];
+      const legacy = recordPayload({ files, layout: 'legacy', storagePath: path.join(tmp, 'store/old.pkg/1.0.0/t/p') });
+      t('a legacy record starts at its package directory', legacy.payload.layout === 'legacy');
+      const upgraded = recordPayload({ files, layout: 'object' });
+      t('an object commit of the same bytes moves the record into the object store',
+        upgraded.payload.layout === 'object' && upgraded.payload.storage_path === payloadObjectDir(upgraded.payload.payload_id));
+    }
+    const idA = 'a'.repeat(64);
+    const idB = 'b'.repeat(64);
+    writeSelectionProjection({
+      generation: 7, updated_at: 'now',
+      payloads: { [idA]: { payload_id: idA, storage_path: payloadObjectDir(idA) }, [idB]: { payload_id: idB, storage_path: payloadObjectDir(idB) } },
+      selections: { [selectionKey('model.ctx', 'android-arm64-v79-qnn249')]: { asset_id: 'model.ctx', variant_id: 'android-arm64-v79-qnn249', payload_id: idB } },
+    });
+    const projected = JSON.parse(fs.readFileSync(selectionProjectionPath(), 'utf8'));
+    const entry = projected.selections.find((item) => item.asset_id === 'model.ctx');
+    t('a ledger write projects the selected object beside the objects, for consumers outside Termux',
+      projected.schema === SELECTION_PROJECTION_SCHEMA && projected.generation === 7
+        && entry?.variant_id === 'android-arm64-v79-qnn249' && entry?.payload_id === idB
+        && entry?.path === payloadObjectDir(idB));
+    t('an unselected payload object is not projected',
+      !projected.selections.some((item) => item.payload_id === idA));
+    const before = fs.statSync(selectionProjectionPath()).mtimeMs;
+    const again = fs.readFileSync(selectionProjectionPath(), 'utf8');
+    const sameLedger = JSON.parse(again);
+    writeSelectionProjection({
+      generation: sameLedger.generation, updated_at: sameLedger.updated_at,
+      payloads: { [idB]: { payload_id: idB, storage_path: payloadObjectDir(idB) } },
+      selections: { [selectionKey('model.ctx', 'android-arm64-v79-qnn249')]: { asset_id: 'model.ctx', variant_id: 'android-arm64-v79-qnn249', payload_id: idB } },
+    });
+    t('identical content is not rewritten, so an update boundary fingerprint cannot move',
+      fs.statSync(selectionProjectionPath()).mtimeMs === before);
+    writePayloadLedger({ ...readPayloadLedger(), selections: {} });
+    t('every ledger write refreshes the projection',
+      JSON.parse(fs.readFileSync(selectionProjectionPath(), 'utf8')).selections.length === 0);
+  }
 
   fs.mkdirSync(path.dirname(payloadLedgerPath()), { recursive: true });
   fs.writeFileSync(payloadLedgerPath(), `{"schema":"${PAYLOAD_LEDGER_SCHEMA}"}`);

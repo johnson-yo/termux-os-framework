@@ -11,7 +11,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { MANIFEST_FILENAME, validateManifest, manifestTargets, matchTarget, TARGET_GENERIC } from '../src/packages/manifest.mjs';
+import { MANIFEST_FILENAME, validateManifest, manifestTargets, matchTarget, TARGET_GENERIC, DEVICE_TARGET } from '../src/packages/manifest.mjs';
 import { declaredDependencies } from '../src/packages/dependencies.mjs';
 import { checkFreeSpace } from '../src/assets/fetch.mjs';
 import { stagePullFiles } from '../src/assets/transfer/staging.mjs';
@@ -519,6 +519,14 @@ async function installAssetPayloads(stagedPkg, manifest, targetId, options = {})
        * 一模一樣的 "optional, not fetched"——讀起來像同一件事做了兩遍，而真正該說的是
        * 其中一份根本不是給這台機器的。
        */
+      /**
+       * ⭐ `device` 變體不在這裡取：它有哪些檔、從哪取，由目錄說了算，而那是 Manager 的事。
+       * 包只是宣告「我提供這個 id」，裝上它不代表要替使用者下載幾百 MB。
+       */
+      if (a.target === DEVICE_TARGET) {
+        console.log(`asset ${a.id}: per-device variant, provisioned by the asset Manager from its catalog`);
+        continue;
+      }
       if (a.target && !matchTarget(a.target, profile).ok) {
         console.log(`asset ${a.id}: variant ${a.target.id} is not for this device, skipped`);
         continue;
