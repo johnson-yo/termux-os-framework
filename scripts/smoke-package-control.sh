@@ -33,6 +33,11 @@ rsync -a --exclude AGENTS.md --exclude HANDOFF.md --exclude .sdk/ \
   "$ROOT/sdk/examples/service-basic/" \
   "$WORK/release/github.termux-os.service.example-counter/"
 tar -czf "$WORK/example-counter.tar.gz" -C "$WORK/release" github.termux-os.service.example-counter
+mkdir -p "$WORK/release/github.termux-os.app.example-feed-consumer"
+rsync -a --exclude AGENTS.md --exclude HANDOFF.md --exclude .sdk/ \
+  "$ROOT/sdk/examples/app-feed-consumer/" \
+  "$WORK/release/github.termux-os.app.example-feed-consumer/"
+tar -czf "$WORK/feed-consumer.tar.gz" -C "$WORK/release" github.termux-os.app.example-feed-consumer
 
 node -e '
   const fs=require("fs");
@@ -47,6 +52,7 @@ node -e '
 start_server() {
   HOME="$WORK/home" CONFIG="$WORK/config.json" PACKAGES_INSTALLED_DIR="$WORK/packages" \
     PACKAGE_CONTROL_ROOT="$WORK/control" FRAMEWORK_PERSIST_ROOT="$WORK/persist" \
+    PACKAGE_REGISTRY_URL="http://127.0.0.1:1" \
     PACKAGE_JOB_TEST_DELAY_MS=300 TMPDIR="$WORK/tmp" \
     node "$ROOT/src/server.mjs" >"$WORK/framework.log" 2>&1 &
   FW_PID=$!
@@ -134,11 +140,55 @@ if [ "$SHA" = "$(sha256sum "$WORK/example-counter.tar.gz" | awk '{print $1}')" ]
 else
   bad "upload Release SHA"
 fi
+if UPLOAD_ID="$UPLOAD_ID" node -e 'const d=require(process.argv[1]);const u=d.uploads.find(x=>x.id===process.env.UPLOAD_ID);
+  process.exit(u?.install_source==="local_file"&&u.registry_verified===false&&u.dependency_mode==="local_only"?0:1)' "$WORK/checked.json"; then
+  ok "browser upload is classified as local-only input"
+else
+  bad "browser upload source classification"
+fi
 if [ "$(find "$WORK/tmp" -maxdepth 1 -type d -name 'pkg-check-*' | wc -l)" -eq 0 ]; then
   ok "preflight temporary extraction cleaned"
 else
   bad "preflight temporary extraction cleaned"
 fi
+
+echo "--- 2b. Local-only dependency refusal does not consult Registry ---"
+curl -sf -b "$COOKIE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/octet-stream' \
+  -H 'X-Filename: feed-consumer.tar.gz' --data-binary "@$WORK/feed-consumer.tar.gz" \
+  "$BASE/api/admin/package-manager/uploads" >"$WORK/feed-upload.json"
+FEED_UPLOAD_ID="$(node -e 'process.stdout.write(require(process.argv[1]).upload.id)' "$WORK/feed-upload.json")"
+FEED_CHECK_JOB="$(node -e 'process.stdout.write(require(process.argv[1]).job.id)' "$WORK/feed-upload.json")"
+wait_api_job "$FEED_CHECK_JOB" "$WORK/feed-check-job.json" || true
+curl -sf -b "$COOKIE" "$BASE/api/admin/package-manager" >"$WORK/feed-checked.json"
+FEED_SHA="$(FEED_UPLOAD_ID="$FEED_UPLOAD_ID" node -e 'const d=require(process.argv[1]);process.stdout.write(d.uploads.find(x=>x.id===process.env.FEED_UPLOAD_ID).sha256)' "$WORK/feed-checked.json")"
+if FEED_UPLOAD_ID="$FEED_UPLOAD_ID" node -e 'const d=require(process.argv[1]);const u=d.uploads.find(x=>x.id===process.env.FEED_UPLOAD_ID);
+  process.exit(u?.dependencies===null?0:1)' "$WORK/feed-checked.json"; then
+  ok "inventory keeps historical dependency resolution lazy"
+else
+  bad "inventory keeps historical dependency resolution lazy"
+fi
+curl -sf -b "$COOKIE" \
+  "$BASE/api/admin/package-manager/uploads/$FEED_UPLOAD_ID/dependencies?dependency_mode=local_only" \
+  >"$WORK/feed-dependencies.json"
+if FEED_UPLOAD_ID="$FEED_UPLOAD_ID" node -e 'const d=require(process.argv[1]);
+  process.exit(d.ok&&d.upload_id===process.env.FEED_UPLOAD_ID&&d.dependency_mode==="local_only"
+    &&d.dependencies?.installable===false?0:1)' "$WORK/feed-dependencies.json"; then
+  ok "selected upload dependency details are resolved on demand"
+else
+  bad "selected upload dependency details are resolved on demand"
+fi
+FEED_SHA="$FEED_SHA" node -e 'require("fs").writeFileSync(process.argv[1],JSON.stringify({confirm_sha256:process.env.FEED_SHA,confirm_unverified:true}))' "$WORK/feed-install-body.json"
+CODE="$(curl -s -o "$WORK/feed-install-response.json" -w '%{http_code}' -b "$COOKIE" -H "X-CSRF-Token: $CSRF" \
+  -H 'Content-Type: application/json' --data-binary "@$WORK/feed-install-body.json" \
+  "$BASE/api/admin/package-manager/uploads/$FEED_UPLOAD_ID/install")"
+if [ "$CODE" = "409" ] && grep -q local_dependencies_missing "$WORK/feed-install-response.json" \
+  && ! grep -q registry_unavailable "$WORK/feed-install-response.json"; then
+  ok "local-only install reports missing local dependency without Registry access"
+else
+  bad "local-only dependency/Registry boundary HTTP $CODE"
+fi
+curl -sf -X DELETE -b "$COOKIE" -H "X-CSRF-Token: $CSRF" \
+  "$BASE/api/admin/package-manager/uploads/$FEED_UPLOAD_ID" >/dev/null
 
 echo "--- 3. Confirm + detached install across Framework restart ---"
 CODE="$(curl -s -o "$WORK/wrong-sha.json" -w '%{http_code}' -b "$COOKIE" -H "X-CSRF-Token: $CSRF" \
@@ -239,6 +289,98 @@ if [ "$CODE" = 409 ] && grep -q preflight_required "$WORK/no-previous.json"; the
   ok "rollback hidden/blocked without previous version"
 else
   bad "rollback previous-version guard"
+fi
+echo "--- 4a. Dirty active worktree: explicit backup before replacement ---"
+ACTIVE_DIR="$WORK/packages/github.termux-os.service.example-counter/versions/0.1.0"
+git -C "$ACTIVE_DIR" init -q -b main
+git -C "$ACTIVE_DIR" config user.name smoke
+git -C "$ACTIVE_DIR" config user.email smoke@example.invalid
+git -C "$ACTIVE_DIR" add -A
+git -C "$ACTIVE_DIR" commit -qm baseline
+printf '\nlocal edit\n' >>"$ACTIVE_DIR/README.md"
+printf 'untracked local note\n' >"$ACTIVE_DIR/local-note.txt"
+mkdir -p "$WORK/release-v011/github.termux-os.service.example-counter"
+rsync -a --exclude AGENTS.md --exclude HANDOFF.md --exclude .sdk/ \
+  "$ROOT/sdk/examples/service-basic/" \
+  "$WORK/release-v011/github.termux-os.service.example-counter/"
+node -e 'const fs=require("fs");const p=process.argv[1];const m=JSON.parse(fs.readFileSync(p));m.version="0.1.1";fs.writeFileSync(p,JSON.stringify(m,null,2)+"\n")' \
+  "$WORK/release-v011/github.termux-os.service.example-counter/termux-os.package.json"
+tar -czf "$WORK/example-counter-0.1.1.tar.gz" -C "$WORK/release-v011" github.termux-os.service.example-counter
+curl -sf -b "$COOKIE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/octet-stream' \
+  -H 'X-Filename: example-counter-0.1.1.tar.gz' --data-binary "@$WORK/example-counter-0.1.1.tar.gz" \
+  "$BASE/api/admin/package-manager/uploads" >"$WORK/dirty-upload.json"
+DIRTY_UPLOAD_ID="$(node -e 'process.stdout.write(require(process.argv[1]).upload.id)' "$WORK/dirty-upload.json")"
+DIRTY_CHECK_JOB="$(node -e 'process.stdout.write(require(process.argv[1]).job.id)' "$WORK/dirty-upload.json")"
+wait_api_job "$DIRTY_CHECK_JOB" "$WORK/dirty-check-job.json" || true
+curl -sf -b "$COOKIE" "$BASE/api/admin/package-manager" >"$WORK/dirty-checked.json"
+if node -e 'const d=require(process.argv[1]);const p=d.packages.find(x=>x.id==="github.termux-os.service.example-counter");
+  process.exit(p?.install_safety?.dirty===true&&p.install_safety.change_count>=2?0:1)' "$WORK/dirty-checked.json"; then
+  ok "inventory exposes active dirty-worktree safety state"
+else
+  bad "dirty-worktree safety state"
+fi
+DIRTY_SHA="$(DIRTY_UPLOAD_ID="$DIRTY_UPLOAD_ID" node -e 'const d=require(process.argv[1]);process.stdout.write(d.uploads.find(x=>x.id===process.env.DIRTY_UPLOAD_ID).sha256)' "$WORK/dirty-checked.json")"
+DIRTY_SHA="$DIRTY_SHA" node -e 'require("fs").writeFileSync(process.argv[1],JSON.stringify({confirm_sha256:process.env.DIRTY_SHA,confirm_unverified:true,preserve_dirty:true}))' "$WORK/dirty-install-body.json"
+curl -sf -b "$COOKIE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
+  --data-binary "@$WORK/dirty-install-body.json" \
+  "$BASE/api/admin/package-manager/uploads/$DIRTY_UPLOAD_ID/install" >"$WORK/dirty-install-start.json"
+DIRTY_INSTALL_JOB="$(node -e 'process.stdout.write(require(process.argv[1]).job.id)' "$WORK/dirty-install-start.json")"
+wait_api_job "$DIRTY_INSTALL_JOB" "$WORK/dirty-install-job.json" || true
+SMOKE_HOME="$WORK/home"
+BACKUP_DIR="$SMOKE_HOME/.termux-os/package-archives/github.termux-os.service.example-counter"
+if node -e 'process.exit(require(process.argv[1]).job.status==="success"?0:1)' "$WORK/dirty-install-job.json" \
+  && [ "$(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.gz.json' 2>/dev/null | wc -l)" -ge 1 ] \
+  && grep -q 'saved dirty worktree backup' "$WORK/dirty-install-job.json"; then
+  ok "dirty update archives the complete worktree before install"
+else
+  bad "dirty update backup/install"
+fi
+echo "--- 4b. Dirty active worktree: explicit force discard ---"
+FORCE_ACTIVE_DIR="$WORK/packages/github.termux-os.service.example-counter/versions/0.1.1"
+git -C "$FORCE_ACTIVE_DIR" init -q -b main
+git -C "$FORCE_ACTIVE_DIR" config user.name smoke
+git -C "$FORCE_ACTIVE_DIR" config user.email smoke@example.invalid
+git -C "$FORCE_ACTIVE_DIR" add -A
+git -C "$FORCE_ACTIVE_DIR" commit -qm force-baseline
+printf '\nforce-discard-me\n' >>"$FORCE_ACTIVE_DIR/README.md"
+mkdir -p "$WORK/release-v012/github.termux-os.service.example-counter"
+rsync -a --exclude AGENTS.md --exclude HANDOFF.md --exclude .sdk/ \
+  "$ROOT/sdk/examples/service-basic/" \
+  "$WORK/release-v012/github.termux-os.service.example-counter/"
+node -e 'const fs=require("fs");const p=process.argv[1];const m=JSON.parse(fs.readFileSync(p));m.version="0.1.2";fs.writeFileSync(p,JSON.stringify(m,null,2)+"\n")' \
+  "$WORK/release-v012/github.termux-os.service.example-counter/termux-os.package.json"
+tar -czf "$WORK/example-counter-0.1.2.tar.gz" -C "$WORK/release-v012" github.termux-os.service.example-counter
+curl -sf -b "$COOKIE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/octet-stream' \
+  -H 'X-Filename: example-counter-0.1.2.tar.gz' --data-binary "@$WORK/example-counter-0.1.2.tar.gz" \
+  "$BASE/api/admin/package-manager/uploads" >"$WORK/force-upload.json"
+FORCE_UPLOAD_ID="$(node -e 'process.stdout.write(require(process.argv[1]).upload.id)' "$WORK/force-upload.json")"
+FORCE_CHECK_JOB="$(node -e 'process.stdout.write(require(process.argv[1]).job.id)' "$WORK/force-upload.json")"
+wait_api_job "$FORCE_CHECK_JOB" "$WORK/force-check-job.json" || true
+curl -sf -b "$COOKIE" "$BASE/api/admin/package-manager" >"$WORK/force-checked.json"
+FORCE_SHA="$(FORCE_UPLOAD_ID="$FORCE_UPLOAD_ID" node -e 'const d=require(process.argv[1]);process.stdout.write(d.uploads.find(x=>x.id===process.env.FORCE_UPLOAD_ID).sha256)' "$WORK/force-checked.json")"
+FORCE_SHA="$FORCE_SHA" node -e 'require("fs").writeFileSync(process.argv[1],JSON.stringify({confirm_sha256:process.env.FORCE_SHA,confirm_unverified:true,preserve_dirty:true,force_dirty:true}))' "$WORK/force-conflict-body.json"
+CODE="$(curl -s -o "$WORK/force-conflict.json" -w '%{http_code}' -b "$COOKIE" -H "X-CSRF-Token: $CSRF" \
+  -H 'Content-Type: application/json' --data-binary "@$WORK/force-conflict-body.json" \
+  "$BASE/api/admin/package-manager/uploads/$FORCE_UPLOAD_ID/install")"
+if [ "$CODE" = "409" ] && grep -q dirty_options_conflict "$WORK/force-conflict.json"; then
+  ok "dirty backup and force discard cannot be selected together"
+else
+  bad "dirty backup/force discard conflict guard"
+fi
+FORCE_SHA="$FORCE_SHA" node -e 'require("fs").writeFileSync(process.argv[1],JSON.stringify({confirm_sha256:process.env.FORCE_SHA,confirm_unverified:true,force_dirty:true}))' "$WORK/force-install-body.json"
+curl -sf -b "$COOKIE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
+  --data-binary "@$WORK/force-install-body.json" \
+  "$BASE/api/admin/package-manager/uploads/$FORCE_UPLOAD_ID/install" >"$WORK/force-install-start.json"
+FORCE_INSTALL_JOB="$(node -e 'process.stdout.write(require(process.argv[1]).job.id)' "$WORK/force-install-start.json")"
+wait_api_job "$FORCE_INSTALL_JOB" "$WORK/force-install-job.json" || true
+curl -sf -b "$COOKIE" "$BASE/api/admin/package-manager" >"$WORK/force-installed.json"
+if node -e 'const d=require(process.argv[1]);const p=d.packages.find(x=>x.id==="github.termux-os.service.example-counter");
+  process.exit(require(process.argv[2]).job.status==="success"&&p?.version==="0.1.2"?0:1)' \
+  "$WORK/force-installed.json" "$WORK/force-install-job.json" \
+  && grep -q -- '--force-dirty' "$WORK/force-install-job.json"; then
+  ok "explicit force discard reaches the installer and replaces the dirty Package"
+else
+  bad "explicit force discard install"
 fi
 CODE="$(curl -s -o "$WORK/wrong-id.json" -w '%{http_code}' -b "$COOKIE" -H "X-CSRF-Token: $CSRF" \
   -H 'Content-Type: application/json' --data '{"confirm_package_id":"wrong"}' \

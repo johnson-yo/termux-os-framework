@@ -742,6 +742,7 @@ function cmdCheckInstalled(id, args) {
 
 // ============================================================
 // install <tar> [sha256] [--force-target] [--allow-missing-external]
+//        [--preserve-dirty | --force-dirty]
 //（§6.2–6.4：staging→原子激活→失敗零半成品；023 §6.2/§9.1：裝之前先判機型與依賴）
 // ============================================================
 async function cmdInstall(tarPath, shaPath, args = []) {
@@ -765,6 +766,9 @@ async function cmdInstall(tarPath, shaPath, args = []) {
   const selectionSnapshot = captureSelectionSnapshot(readPayloadLedger(), selectionEntries);
   const forceTarget = args.includes('--force-target');
   const allowMissing = args.includes('--allow-missing-external');
+  const preserveDirty = args.includes('--preserve-dirty');
+  const forceDirty = args.includes('--force-dirty');
+  if (preserveDirty && forceDirty) die('choose either --preserve-dirty or --force-dirty, not both');
 
   // 023 §6.2/§9.1：**在動現場之前**判機型與外部依賴——裝到一半才發現不兼容，
   // 代價是把一個好好的 active version 換成一個跑不起來的
@@ -787,6 +791,7 @@ async function cmdInstall(tarPath, shaPath, args = []) {
    * ⚠ unknown 不当作 dirty——旧的 source_tar 包没有 Git 身份，把它们一律拒绝会让
    * 过渡期所有升级停摆；但也绝不当作 clean 去覆盖，unknown 只是不触发这道门。
    */
+  let dirtyWorktree = null;
   if (prevActive) {
     const prevDir = path.join(pkgDir, 'versions', prevActive.active_version);
     const git = packageGitState(prevDir);
@@ -799,16 +804,18 @@ async function cmdInstall(tarPath, shaPath, args = []) {
       git.changes = git.changes.length ? git.changes
         : [{ code: 'HD', path: `HEAD ${nowHead.slice(0, 12)} ≠ released ${prevHead.slice(0, 12)}`, untracked: false }];
     }
-    if (git.state === GIT_STATE.DEV && !args.includes('--force-dirty')) {
+    const dirty = git.state === GIT_STATE.DEV;
+    dirtyWorktree = { dirty, dir: prevDir, git, prevHead, nowHead };
+    if (dirty && !preserveDirty && !forceDirty) {
       const sample = git.changes.slice(0, 10).map((c) => `    ${c.code} ${c.path}`).join('\n');
       die(`${id} ${prevActive.active_version} has local modifications (${git.changes.length} change(s)); refusing to overwrite them:\n`
         + `${sample}${git.changes.length > 10 ? '\n    …' : ''}\n`
-        + '  Commit or push them, copy them out, or run\n'
-        + `    node scripts/package-manager.mjs restore ${id}\n`
-        + '  to return to the released content first. --force-dirty overrides and discards them.');
+        + '  Run the install again with\n'
+        + `    node scripts/package-manager.mjs install <archive> [sha256] --preserve-dirty\n`
+        + '  to save the complete active worktree before replacement, or use --force-dirty only to discard it.');
     }
-    if (git.state === GIT_STATE.DEV) {
-      console.log(`WARNING: --force-dirty — discarding ${git.changes.length} local change(s) in ${id} ${prevActive.active_version}`);
+    if (dirty && forceDirty) {
+      console.log(`WARNING: --force-dirty — discarding ${git.changes.length} local change(s) in ${id} ${prevActive.active_version}; no backup was made`);
     }
   }
   const ext = checkExternal(manifest);
@@ -846,6 +853,23 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     const stagedPkg = path.join(staging, id);
     if (v.top_id !== id) fs.renameSync(stagedRoot, stagedPkg);
     if (!fs.existsSync(path.join(stagedPkg, MANIFEST_FILENAME))) throw new Error('staging missing manifest');
+
+    // Save before stopping services or moving the active version. The backup
+    // is a complete private archive, not just a diff: deleted and untracked
+    // files, plus the local Git identity, must remain recoverable.
+    if (dirtyWorktree?.dirty && preserveDirty) {
+      const backup = archiveDirtyWorktree(dirtyWorktree.dir, {
+        id,
+        version: prevActive.active_version,
+        target: prevActive.active_target ?? TARGET_GENERIC,
+        active_archive_sha256: prevActive.archive_sha256 ?? null,
+        head: dirtyWorktree.nowHead,
+        released_head: dirtyWorktree.prevHead,
+        git: dirtyWorktree.git,
+      });
+      console.log(`saved dirty worktree backup for ${id} ${prevActive.active_version}`
+        + ` (${backup.sha256.slice(0, 12)}…, ${backup.path})`);
+    }
 
     await stopOwnedServices(manifest);
 
@@ -1106,6 +1130,77 @@ function cmdReconcile(id) {
 function readInstallOrigin(tarPath) {
   try { return JSON.parse(fs.readFileSync(`${tarPath}.origin.json`, 'utf8')); }
   catch { return { kind: 'local_file', path: path.basename(tarPath) }; }
+}
+
+/**
+ * Preserve a dirty active Package before an update replaces it.
+ *
+ * This is intentionally a private, recoverable archive rather than a commit:
+ * the worktree may contain user data, untracked files, or a deliberately
+ * detached local experiment.  A full tar also preserves deletions and the
+ * `.git` identity, which a patch or `git checkout` cannot reliably reconstruct.
+ */
+function archiveDirtyWorktree(versionRoot, meta) {
+  const destination = path.join(os.homedir(), '.termux-os', 'package-archives', meta.id);
+  const stamp = `${new Date().toISOString().replaceAll(':', '')}-${process.pid}`;
+  const base = `${meta.version}@${meta.target ?? TARGET_GENERIC}-dirty-${stamp}`;
+  const archive = path.join(destination, `${base}.tar.gz`);
+  const partial = `${archive}.part`;
+  const metadata = `${archive}.json`;
+  const metadataPartial = `${metadata}.part`;
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  try {
+    execFileSync('tar', ['-czf', partial, '-C', path.dirname(versionRoot), path.basename(versionRoot)], {
+      stdio: 'ignore',
+    });
+    const digest = sha256File(partial);
+    fs.renameSync(partial, archive);
+    fs.writeFileSync(metadataPartial, `${JSON.stringify({
+      schema: 'termux-os.package-dirty-backup.v1',
+      package_id: meta.id,
+      version: meta.version,
+      target: meta.target ?? TARGET_GENERIC,
+      archive,
+      sha256: digest,
+      size: fs.statSync(archive).size,
+      active_archive_sha256: meta.active_archive_sha256 ?? null,
+      head: meta.head ?? null,
+      released_head: meta.released_head ?? null,
+      changes: meta.git?.changes ?? [],
+      ignored: meta.git?.ignored ?? [],
+      created_at: new Date().toISOString(),
+    }, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(metadataPartial, metadata);
+    fs.chmodSync(archive, 0o600);
+    return { path: archive, sha256: digest, metadata };
+  } catch (error) {
+    fs.rmSync(partial, { force: true });
+    fs.rmSync(archive, { force: true });
+    fs.rmSync(metadataPartial, { force: true });
+    fs.rmSync(metadata, { force: true });
+    throw new Error(`dirty Package backup failed: ${String(error?.message ?? error)}`);
+  }
+}
+
+function cmdDirtyBackups(id) {
+  if (!/^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*){3,}$/.test(String(id))) {
+    die(`invalid package id: ${id}`);
+  }
+  const destination = path.join(os.homedir(), '.termux-os', 'package-archives', id);
+  let entries = [];
+  try {
+    entries = fs.readdirSync(destination)
+      .filter((name) => name.endsWith('.tar.gz.json'))
+      .map((name) => {
+        try { return JSON.parse(fs.readFileSync(path.join(destination, name), 'utf8')); } catch { return null; }
+      })
+      .filter((item) => item?.schema === 'termux-os.package-dirty-backup.v1');
+  } catch { /* No backup directory is an empty, successful result. */ }
+  console.log(JSON.stringify({
+    schema: 'termux-os.package-dirty-backups.v1',
+    package_id: id,
+    backups: entries,
+  }, null, 2));
 }
 
 /**
@@ -1374,7 +1469,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 switch (cmd) {
   case 'pack': await cmdPack(rest[0] ?? die('usage: pack <package-id> [--target <id>] [--artifact-dir <path>] [--source <dir>]'), rest.slice(1)); break;
   case 'verify': await cmdVerify(rest[0] ?? die('usage: verify <tar> [sha256]'), rest[1]?.startsWith('--') ? undefined : rest[1]); break;
-  case 'install': await cmdInstall(rest[0] ?? die('usage: install <tar> [sha256] [--force-target] [--allow-missing-external]'),
+  case 'install': await cmdInstall(rest[0] ?? die('usage: install <tar> [sha256] [--force-target] [--allow-missing-external] [--preserve-dirty | --force-dirty]'),
     rest[1]?.startsWith('--') ? undefined : rest[1], rest.slice(1)); break;
   case 'uninstall': await cmdUninstall(rest[0] ?? die('usage: uninstall <package-id>')); break;
   case 'rollback': await cmdRollback(rest[0] ?? die('usage: rollback <package-id>')); break;
@@ -1389,7 +1484,8 @@ switch (cmd) {
   case 'legacy-list': cmdLegacyList(rest[0] ?? null); break;
   case 'legacy-archive': await cmdLegacyArchive(rest[0] ?? die('usage: legacy-archive <package-id>')); break;
   case 'archive-dev-artifacts': await cmdArchiveDevArtifacts(rest[0] ?? die('usage: archive-dev-artifacts <package-id>')); break;
+  case 'dirty-backups': cmdDirtyBackups(rest[0] ?? die('usage: dirty-backups <package-id>')); break;
   default:
-    console.log('usage: node scripts/package-manager.mjs <pack|verify|install|uninstall|rollback|list|profile|check|check-installed|restore|state|reconcile|dev-sync|legacy-list|legacy-archive|archive-dev-artifacts> ...');
+    console.log('usage: node scripts/package-manager.mjs <pack|verify|install|uninstall|rollback|list|profile|check|check-installed|restore|state|reconcile|dev-sync|legacy-list|legacy-archive|archive-dev-artifacts|dirty-backups> ...');
     process.exit(cmd ? 1 : 0);
 }

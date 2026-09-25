@@ -19,6 +19,7 @@ import { builtinActions } from './theatre/adapters.mjs';
 import * as stage from './stage/manager.mjs';
 import {
   serviceDependencyGate, reverseDependencies, dependencyTree, resolveDeclaredDependencies,
+  resolveDeclaredDependenciesLocal,
 } from './packages/dependency-runtime.mjs';
 import {
   loadPackages, loadSinglePackage, unregisterPackage, _getRecord,
@@ -52,7 +53,7 @@ import {
 import {
   DEFAULT_PACKAGE_REGISTRY_URL, configurePackageRegistry, downloadPackageFromRegistry,
   downloadFrameworkFromRegistry, frameworkRegistryInfo, packageRegistryContainsSha256,
-  packageRegistryFindByPackageId,
+  packageRegistryFindByPackageId, packageRegistryInfo,
   packageRegistryDetails, packageRegistrySnapshot, refreshPackageRegistry, packageRegistryFindProviders,
 } from './system/package-registry.mjs';
 import {
@@ -1260,7 +1261,8 @@ const server = http.createServer(async (req, res) => {
     const status = code === 'upload_too_large' ? 413
       : code.startsWith('unknown_') ? 404
         : ['package_job_active', 'upload_job_active', 'preflight_required', 'confirmation_mismatch',
-          'unverified_release_confirmation_required', 'required_by_others', 'dependency_not_in_catalog']
+          'unverified_release_confirmation_required', 'required_by_others', 'dependency_not_in_catalog',
+          'local_dependencies_missing', 'invalid_dependency_mode', 'dirty_options_conflict']
           .includes(code) ? 409 : 400;
     return json(res, status, {
       ok: false,
@@ -1291,6 +1293,35 @@ const server = http.createServer(async (req, res) => {
         },
       } : {}),
     });
+  };
+  const installDependencyMode = (upload, body = {}) => {
+    const requested = body?.dependency_mode == null ? null : String(body.dependency_mode);
+    if (requested && !['local_only', 'registry'].includes(requested)) {
+      throw Object.assign(new Error('dependency_mode must be local_only or registry'), {
+        code: 'invalid_dependency_mode',
+      });
+    }
+    // Checking the unverified-SHA acknowledgement is an explicit local/offline
+    // decision. It must not be followed by a Registry lookup or dependency
+    // download, even when an old client also sent a conflicting mode.
+    if (body?.confirm_unverified === true) {
+      if (requested === 'registry') {
+        throw Object.assign(new Error('unverified archive acknowledgement requires local_only dependency mode'), {
+          code: 'invalid_dependency_mode',
+        });
+      }
+      return 'local_only';
+    }
+    return requested ?? (upload.install_source === 'registry' ? 'registry' : 'local_only');
+  };
+  const dependencyPlanForUpload = async (upload, mode = installDependencyMode(upload)) => {
+    const declared = upload?.preflight?.dependencies?.requires ?? [];
+    if (!declared.length) return null;
+    const plan = mode === 'local_only'
+      ? await resolveDeclaredDependenciesLocal(declared)
+      : resolveDeclaredDependencies(declared,
+        { catalog: packageRegistryFindByPackageId, providers: packageRegistryFindProviders });
+    return { ...plan, dependency_mode: mode };
   };
   if (url === '/api/admin/credentials' && req.method === 'GET') {
     if (!hasPermission(auth, 'read')) return json(res, 401, { ok: false, error: 'unauthorized' });
@@ -1613,24 +1644,26 @@ const server = http.createServer(async (req, res) => {
     if (!hasPermission(auth, 'read')) return json(res, 401, { ok: false, error: 'unauthorized' });
     try {
       const snapshot = packageManagerSnapshot(listPackages());
+      const packages = snapshot.packages.map((item) => ({
+        ...item,
+        // Core resolves the exact installable archive; the WebUI must not repeat catalog policy.
+        registry_update: packageRegistryInfo({ packageId: item.id, currentVersion: item.version }),
+      }));
       return json(res, 200, {
         ok: true,
         ...snapshot,
+        packages,
         uploads: snapshot.uploads.map((upload) => ({
           ...upload,
+          // This is a cached, pure lookup only; it never refreshes the Registry.
+          // If the user acknowledges an unverified local archive in the install
+          // POST, that route short-circuits before this lookup altogether.
           registry_verified: packageRegistryContainsSha256(upload.sha256),
-          /**
-           * ⭐ 依賴計畫**隨快照一起交出來**，不另開一個往返。
-           *
-           * 這樣安裝對話框看到的，就是安裝路由拒絕時用的同一份數據——
-           * 「界面說能裝、後端說不能」這種矛盾在結構上不可能發生。
-           */
-          dependencies: upload.preflight?.dependencies?.requires?.length
-            ? resolveDeclaredDependencies(
-              upload.preflight.dependencies.requires,
-              { catalog: packageRegistryFindByPackageId, providers: packageRegistryFindProviders },
-            )
-            : null,
+          dependency_mode: upload.install_source === 'registry' ? 'registry' : 'local_only',
+          // Historical uploads are part of the health-check input. Resolve a
+          // dependency plan only for the selected upload; resolving every old
+          // plan here makes inventory latency grow with retained history.
+          dependencies: null,
         })),
         registry: packageRegistrySnapshot(),
       });
@@ -1657,6 +1690,24 @@ const server = http.createServer(async (req, res) => {
     }
   }
   {
+    const m = url.match(/^\/api\/admin\/package-manager\/uploads\/([\w.@-]+)\/dependencies$/);
+    if (m && req.method === 'GET') {
+      if (!hasPermission(auth, 'read')) return json(res, 401, { ok: false, error: 'unauthorized' });
+      try {
+        const upload = getPackageUpload(m[1]);
+        if (!upload) throw Object.assign(new Error('unknown_upload'), { code: 'unknown_upload' });
+        const requested = parsed.searchParams.get('dependency_mode');
+        const dependencyMode = installDependencyMode(upload, requested === null ? {} : { dependency_mode: requested });
+        return json(res, 200, {
+          ok: true,
+          upload_id: upload.id,
+          dependency_mode: dependencyMode,
+          dependencies: await dependencyPlanForUpload(upload, dependencyMode),
+        }, { 'Cache-Control': 'no-store' });
+      } catch (error) { return packageControlError(error); }
+    }
+  }
+  {
     const m = url.match(/^\/api\/admin\/package-manager\/uploads\/([\w.@-]+)\/(check|install)$/);
     if (m && req.method === 'POST') {
       try {
@@ -1664,6 +1715,7 @@ const server = http.createServer(async (req, res) => {
         if (!upload) throw Object.assign(new Error('unknown_upload'), { code: 'unknown_upload' });
         // 依賴在前、目標在後的安裝順序。只有 install 會用到它。
         const installOrder = [];
+        let installOptions = null;
         if (m[2] === 'install') {
           const body = await readBody(req);
           if (!upload.preflight?.ok || upload.status !== 'preflight_passed') {
@@ -1672,7 +1724,17 @@ const server = http.createServer(async (req, res) => {
           if (body?.confirm_sha256 !== upload.sha256) {
             throw Object.assign(new Error('confirmed Release SHA does not match upload'), { code: 'confirmation_mismatch' });
           }
-          if (!packageRegistryContainsSha256(upload.sha256) && body?.confirm_unverified !== true) {
+          const dependencyMode = installDependencyMode(upload, body);
+          if (dependencyMode === 'local_only'
+            && body?.confirm_unverified !== true
+            && !packageRegistryContainsSha256(upload.sha256)) {
+            throw Object.assign(new Error('local archive installation requires explicit acknowledgement of the archive SHA-256'), {
+              code: 'unverified_release_confirmation_required',
+            });
+          }
+          if (dependencyMode === 'registry'
+            && !packageRegistryContainsSha256(upload.sha256)
+            && body?.confirm_unverified !== true) {
             throw Object.assign(new Error('this archive is not present in the verified Registry catalog; explicit acknowledgement is required'), {
               code: 'unverified_release_confirmation_required',
             });
@@ -1687,9 +1749,15 @@ const server = http.createServer(async (req, res) => {
            */
           const declared = upload.preflight?.dependencies?.requires ?? [];
           if (declared.length) {
-            const plan = resolveDeclaredDependencies(declared,
-              { catalog: packageRegistryFindByPackageId, providers: packageRegistryFindProviders });
-            if (!plan.installable) {
+            const plan = await dependencyPlanForUpload(upload, dependencyMode);
+            if (dependencyMode === 'local_only' && !plan.installable) {
+              const blocked = (plan.blocked ?? []).filter((node) => node.required !== false);
+              throw Object.assign(
+                new Error(`required dependencies are not ready locally: ${blocked.map((node) => node.id).join(', ')}`),
+                { code: 'local_dependencies_missing', dependencies: plan },
+              );
+            }
+            if (dependencyMode === 'registry' && !plan.installable) {
               throw Object.assign(
                 new Error(`missing from the Registry catalog: ${plan.missing_from_catalog.map((n) => n.id).join(', ')}`),
                 { code: 'dependency_not_in_catalog', dependencies: plan },
@@ -1717,11 +1785,22 @@ const server = http.createServer(async (req, res) => {
               installOrder.push(stored.id);
             }
           }
+          const preserveDirty = body?.preserve_dirty === true;
+          const forceDirty = body?.force_dirty === true;
+          if (preserveDirty && forceDirty) {
+            throw Object.assign(new Error('choose either dirty backup or force discard, not both'), {
+              code: 'dirty_options_conflict',
+            });
+          }
+          installOptions = preserveDirty ? { preserve_dirty: true }
+            : forceDirty ? { force_dirty: true } : null;
         }
         installOrder.push(upload.id);
-        const job = startPackageJob(m[2], m[2] === 'install' && installOrder.length > 1
+        const target = m[2] === 'install' && installOrder.length > 1
           ? { upload_ids: installOrder }
-          : { upload_id: upload.id });
+          : { upload_id: upload.id };
+        if (installOptions) target.options = installOptions;
+        const job = startPackageJob(m[2], target);
         const current = updatePackageUpload(upload.id, { job_id: job.id });
         return json(res, 202, { ok: true, upload: current, job });
       } catch (error) { return packageControlError(error); }

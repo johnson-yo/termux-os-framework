@@ -36,6 +36,25 @@ const kindRank = (kind) => {
 const pickArchive = (version) => (version?.files ?? [])
   .filter((item) => KIND_RE.test(String(item.kind ?? '')) && String(item.name ?? '').endsWith('.tar.gz'))
   .sort((a, b) => kindRank(a.kind) - kindRank(b.kind))[0] ?? null;
+/**
+ * Turn the Core's archive decision into the only selection shape consumers need.
+ *
+ * The WebUI must not know which archive kinds exist or which one wins.  That is
+ * catalog policy, and keeping it here also makes release_asset and source_tar
+ * behave identically for every caller.
+ */
+const selectionFor = (project, version) => {
+  const file = pickArchive(version);
+  if (!project || !version || !file) return null;
+  return {
+    source: project.source,
+    repository: project.repository,
+    version: version.version,
+    upstream_ref: version.upstream_ref,
+    kind: file.kind,
+    file: file.name,
+  };
+};
 const REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const VERSION_RE = /^(?![vV])[A-Za-z0-9._+@/-]+$/;
 const FILE_RE = /^[A-Za-z0-9._/-]+$/;
@@ -93,7 +112,20 @@ function publicSnapshot(value = state) {
     fetched_at: value.fetched_at ?? null,
     status: value.status ?? 'not_fetched',
     error: value.error ?? null,
-    packages: value.packages ?? [],
+    packages: (value.packages ?? []).map((project) => ({
+      ...project,
+      versions: (project.versions ?? []).map((version) => {
+        const archive = pickArchive(version);
+        return {
+          ...version,
+          // Expose the Core decision so clients never reimplement archive policy.
+          selection: selectionFor(project, version),
+          // Keep the metadata for that same selected archive beside its coordinates.
+          size: archive?.size ?? null,
+          sha256: archive?.sha256 ?? null,
+        };
+      }),
+    })),
   };
 }
 
@@ -291,57 +323,7 @@ export function frameworkRegistryInfo({ repository, currentVersion } = {}) {
   const project = state.packages.find((item) => item.source === 'github'
     && (!repository || item.repository === repository)
     && item.types.includes(FRAMEWORK_REGISTRY_TYPE));
-  if (!project) return {
-    available: false, repository: repository ?? null, current_version: currentVersion ?? null,
-    latest_version: null, update_available: false, selection: null,
-  };
-  const latest = project.latest_verified_version || project.latest_version;
-  const version = project.versions.find((item) => item.version === latest);
-  const file = pickArchive(version);
-  const updateAvailable = Boolean(latest && currentVersion && compareVersions(latest, currentVersion) > 0);
-  return {
-    available: Boolean(latest && file),
-    repository: project.repository,
-    display_name: project.display_name,
-    homepage: project.homepage,
-    current_version: currentVersion ?? null,
-    latest_version: latest ?? null,
-    latest_published_at: project.latest_verified_published_at ?? null,
-    update_available: updateAvailable,
-    selection: latest && file ? {
-      source: 'github', repository: project.repository, version: latest, upstream_ref: version.upstream_ref,
-      kind: file.kind, file: file.name,
-    } : null,
-    file: file ?? null,
-    // 全部已驗證版本，而不只是 latest。「已是最新」不等於「無事可做」——
-    // 檔案損壞要能重裝當前版本，出問題要能裝回指定的舊版；
-    // last-good 只有一格，連更兩次就夠不著更早的版本了。
-    versions: project.versions
-      .map((item) => {
-        // status 缺席代表 Registry 沒表態（舊目錄），沿用 latest 路徑的寬鬆處理；
-        // 明確標成非 verified 的版本不列出，免得使用者按下去才被安裝器拒絕。
-        if (item.status && item.status !== 'verified') return null;
-        const archive = pickArchive(item);
-        if (!archive) return null;
-        return {
-          version: item.version,
-          published_at: item.published_at ?? null,
-          size: archive.size ?? null,
-          sha256: archive.sha256 ?? null,
-          // 相對當前版本的方向，讓 UI 不必自己再實作一次版本比較
-          relation: currentVersion
-            ? (compareVersions(item.version, currentVersion) > 0 ? 'newer'
-              : compareVersions(item.version, currentVersion) < 0 ? 'older' : 'current')
-            : 'unknown',
-          selection: {
-            source: 'github', repository: project.repository, version: item.version,
-            upstream_ref: item.upstream_ref, kind: archive.kind, file: archive.name,
-          },
-        };
-      })
-      .filter(Boolean)
-      .sort((a, b) => compareVersions(b.version, a.version)),
-  };
+  return registryProjectInfo(project, { repository, currentVersion });
 }
 
 function remoteFilename(selection) {
@@ -351,24 +333,31 @@ function remoteFilename(selection) {
 
 function githubSourceUrls(selection, version) {
   if (selection.source !== 'github') return null;
-  /**
-   * `release_asset` 沒有 github_direct 這條快捷路。
-   *
-   * Release asset 的直連要走 GitHub API（`/releases/assets/<id>` + Accept 頭 + 一次
-   * 跳去 S3 的重定向），Worker 的 `/download` 已經把這套做完了。在客戶端再實作一份
-   * 只會多出一個會漂移的副本，而它拿不到 `upstream_asset_id`——目錄裡根本沒這欄。
-   */
-  if (selection.kind === 'release_asset') return null;
   const upstreamRef = typeof version.upstream_ref === 'string'
     ? (UPSTREAM_REF_RE.test(version.upstream_ref) ? version.upstream_ref : null)
     : VERSION_RE.test(selection.version) ? selection.version : null;
   if (!upstreamRef) return null;
   const encodedRepository = selection.repository.split('/').map(encodeURIComponent).join('/');
   const encodedRef = encodeURIComponent(upstreamRef);
+  const releaseUrl = `https://github.com/${encodedRepository}/releases/tag/${encodedRef}`;
+  if (selection.kind === 'release_asset') {
+    // The public Release download coordinate is fully determined by the pinned
+    // repository, upstream tag, and catalog-listed asset name. Do not use the
+    // GitHub API asset endpoint here: the Registry Worker reaches that endpoint
+    // without the publisher token and can receive HTTP 403. If this public path
+    // fails, the normal Registry /check → /download fallback still applies.
+    if (selection.file.includes('/')) return null;
+    return {
+      upstream_ref: upstreamRef,
+      source_url: `https://github.com/${encodedRepository}/releases/download/${encodedRef}/${encodeURIComponent(selection.file)}`,
+      release_url: releaseUrl,
+    };
+  }
+  if (selection.kind !== 'source_tar') return null;
   return {
     upstream_ref: upstreamRef,
     source_url: `https://github.com/${encodedRepository}/archive/refs/tags/${encodedRef}.tar.gz`,
-    release_url: `https://github.com/${encodedRepository}/releases/tag/${encodedRef}`,
+    release_url: releaseUrl,
   };
 }
 
@@ -551,6 +540,67 @@ const latestVersionOf = (project) => {
   }
   return declared ?? project.versions.at(-1);
 };
+
+/**
+ * Build the catalog-facing install/update view for any Registry project.
+ *
+ * Framework and Package Manager are different callers, not different archive
+ * policies.  Keeping this result in Core gives both callers the same selected
+ * version, archive kind, file, size and digest, including the release_asset
+ * preferred/source_tar fallback rule.
+ */
+function registryProjectInfo(project, { repository = null, packageId = null, currentVersion = null } = {}) {
+  const latest = project ? latestVersionOf(project) : null;
+  const file = pickArchive(latest);
+  const latestVersion = latest?.version ?? null;
+  const reason = !project ? 'package_not_in_registry'
+    : !latest ? 'no_verified_version'
+      : !file ? 'no_installable_archive' : null;
+  const versions = (project?.versions ?? [])
+    .map((item) => {
+      // status 缺席代表 Registry 没表态（旧目录），沿用兼容路径；明确的非 verified 版本不下发。
+      if (item.status && item.status !== 'verified') return null;
+      const archive = pickArchive(item);
+      if (!archive) return null;
+      return {
+        version: item.version,
+        published_at: item.published_at ?? null,
+        size: archive.size ?? null,
+        sha256: archive.sha256 ?? null,
+        relation: currentVersion
+          ? (compareVersions(item.version, currentVersion) > 0 ? 'newer'
+            : compareVersions(item.version, currentVersion) < 0 ? 'older' : 'current')
+          : 'unknown',
+        selection: selectionFor(project, item),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => compareVersions(b.version, a.version));
+  return {
+    available: Boolean(latest && file),
+    source: project?.source ?? null,
+    package_id: project?.package_id ?? packageId ?? null,
+    repository: project?.repository ?? repository ?? null,
+    display_name: project?.display_name ?? null,
+    homepage: project?.homepage ?? null,
+    current_version: currentVersion ?? null,
+    latest_version: latestVersion,
+    latest_published_at: project?.latest_verified_published_at ?? latest?.published_at ?? null,
+    update_available: Boolean(file && latestVersion && currentVersion
+      && compareVersions(latestVersion, currentVersion) > 0),
+    reason,
+    selection: latest && file ? selectionFor(project, latest) : null,
+    file: file ?? null,
+    versions,
+  };
+}
+
+/** The installed Package inventory consumes the same Core selection as Framework. */
+export function packageRegistryInfo({ packageId, currentVersion } = {}) {
+  const wanted = String(packageId ?? '').trim();
+  const project = state.packages.find((item) => item.package_id === wanted);
+  return registryProjectInfo(project, { packageId: wanted || null, currentVersion });
+}
 
 export function packageRegistryFindByPackageId(packageId) {
   const wanted = String(packageId ?? '').trim();
@@ -862,7 +912,7 @@ if (process.argv.includes('--self-test')
   test('manual GitHub Release fallback is structured', manualFallback);
   test('snapshot is private-file mode', (fs.statSync(path.join(tmp, 'snapshot.json')).mode & 0o777) === 0o600);
 
-  // ---- release_asset：優先於 source_tar，且不走 github_direct ----
+  // ---- release_asset：優先於 source_tar，先走固定 tag/name 的公開 Release URL ----
   const bothKinds = {
     registry_version: 9,
     packages: [{
@@ -877,15 +927,23 @@ if (process.argv.includes('--self-test')
       }],
     }],
   };
-  let askedGithubDirect = false;
+  const releaseRequests = [];
+  let registryArchiveRequests = 0;
   configurePackageRegistry({
     baseUrl: 'https://registry.example',
     snapshotPath: path.join(tmp, 'snapshot.json'),
     fetchImpl: async (url, init) => {
       const parsed = new URL(url);
-      if (parsed.hostname === 'github.com') { askedGithubDirect = true; throw new Error('github must not be probed for a release asset'); }
+      if (parsed.hostname === 'github.com') {
+        releaseRequests.push({ method: init?.method ?? 'GET', pathname: parsed.pathname });
+        if (parsed.pathname === '/example/dual/releases/download/2.0.0/a.b.c.dual-2.0.0.tar.gz') {
+          return new Response('x'.repeat(20), { status: 200, headers: { 'content-length': '20' } });
+        }
+        throw new Error('unexpected GitHub path for release asset');
+      }
       if (parsed.pathname === '/list') return new Response(JSON.stringify(bothKinds), { status: 200 });
       if (parsed.pathname === '/check') {
+        registryArchiveRequests += 1;
         return new Response(JSON.stringify({
           project: { source: 'github', repository: 'example/dual' },
           version: { version: '2.0.0' },
@@ -893,6 +951,7 @@ if (process.argv.includes('--self-test')
         }), { status: 200 });
       }
       if (parsed.pathname === '/download') {
+        registryArchiveRequests += 1;
         return new Response('x'.repeat(20), { status: 200, headers: { 'content-length': '20' } });
       }
       throw new Error(`unexpected ${url} ${init?.method ?? 'GET'}`);
@@ -900,6 +959,8 @@ if (process.argv.includes('--self-test')
   });
   await refreshPackageRegistry();
   const dual = packageRegistryFindByPackageId('a.b.c.dual');
+  const dualInfo = packageRegistryInfo({ packageId: 'a.b.c.dual', currentVersion: '1.0.0' });
+  const publicDual = packageRegistrySnapshot().packages.find((item) => item.package_id === 'a.b.c.dual');
   /**
    * ⭐ 同一版本同時登記兩種歸檔時取我們自己產的那一個。
    * 兩者都能裝，但只有 release_asset 帶得動 Git 身份；選錯不會報錯，只會讓
@@ -907,12 +968,56 @@ if (process.argv.includes('--self-test')
    */
   test('release_asset outranks the GitHub source archive',
     dual?.kind === 'release_asset' && dual?.file === 'a.b.c.dual-2.0.0.tar.gz');
+  test('Package update info exposes the same typed release selection',
+    dualInfo.update_available && dualInfo.selection?.kind === 'release_asset'
+      && dualInfo.selection?.file === 'a.b.c.dual-2.0.0.tar.gz');
+  test('public catalog versions carry Core-selected install coordinates',
+    publicDual?.versions?.[0]?.selection?.kind === 'release_asset'
+      && publicDual.versions[0].selection.file === 'a.b.c.dual-2.0.0.tar.gz'
+      && publicDual.versions[0].size === 20
+      && publicDual.versions[0].sha256 === 'b'.repeat(64));
   const dualDownload = await downloadPackageFromRegistry({
     source: 'github', repository: 'example/dual', version: '2.0.0',
     kind: 'release_asset', file: 'a.b.c.dual-2.0.0.tar.gz',
   });
-  test('a release asset downloads through the Registry, never through github.com',
-    dualDownload.origin.path === 'termux_os_registry' && askedGithubDirect === false);
+  test('a release asset downloads from the catalog-pinned public Release URL first',
+    dualDownload.origin.path === 'github_direct'
+      && releaseRequests.map((item) => item.method).join(',') === 'HEAD,GET'
+      && releaseRequests.every((item) => item.pathname === '/example/dual/releases/download/2.0.0/a.b.c.dual-2.0.0.tar.gz')
+      && registryArchiveRequests === 0);
+
+  let releaseFallbackRequests = 0;
+  configurePackageRegistry({
+    baseUrl: 'https://registry.example',
+    snapshotPath: path.join(tmp, 'snapshot.json'),
+    fetchImpl: async (url, init) => {
+      const parsed = new URL(url);
+      if (parsed.hostname === 'github.com') return new Response('missing', { status: 404 });
+      if (parsed.pathname === '/list') return new Response(JSON.stringify(bothKinds), { status: 200 });
+      if (parsed.pathname === '/check') {
+        releaseFallbackRequests += 1;
+        return new Response(JSON.stringify({
+          project: { source: 'github', repository: 'example/dual' },
+          version: { version: '2.0.0' },
+          file: { kind: 'release_asset', name: 'a.b.c.dual-2.0.0.tar.gz', size: 20, sha256: 'b'.repeat(64) },
+        }), { status: 200 });
+      }
+      if (parsed.pathname === '/download') {
+        releaseFallbackRequests += 1;
+        return new Response('x'.repeat(20), { status: 200, headers: { 'content-length': '20' } });
+      }
+      throw new Error(`unexpected ${url} ${init?.method ?? 'GET'}`);
+    },
+  });
+  await refreshPackageRegistry();
+  const releaseFallback = await downloadPackageFromRegistry({
+    source: 'github', repository: 'example/dual', version: '2.0.0',
+    kind: 'release_asset', file: 'a.b.c.dual-2.0.0.tar.gz',
+  });
+  test('Registry remains the fallback when the public Release URL is unavailable',
+    releaseFallback.origin.path === 'termux_os_registry'
+      && releaseFallback.origin.fallback_from === 'github_direct'
+      && releaseFallbackRequests === 2);
 
   // ---- 過渡相容：只有 source_tar 的舊包仍然可裝 ----
   const legacyOnly = {
@@ -937,8 +1042,11 @@ if (process.argv.includes('--self-test')
   });
   await refreshPackageRegistry();
   const legacy = packageRegistryFindByPackageId('a.b.c.legacy');
+  const legacyInfo = packageRegistryInfo({ packageId: 'a.b.c.legacy', currentVersion: '0.9.0' });
   test('a source_tar-only Package stays installable during the transition',
     legacy?.kind === 'source_tar' && legacy?.version === '1.0.0');
+  test('Package update info falls back to a source_tar-only archive',
+    legacyInfo.update_available && legacyInfo.selection?.kind === 'source_tar');
   fs.rmSync(tmp, { recursive: true, force: true });
   process.exit(fails ? 1 : 0);
 }

@@ -21,8 +21,18 @@
 - loopback-only public configuration;
 - authenticated read APIs and authenticated, CSRF-protected browser writes;
 - immutable Package versions and SHA-256 release verification;
-- local archive installation warns and requires explicit acknowledgement when
-  the SHA-256 is not present in the cached verified Registry catalog;
+- local archive installation requires an explicit SHA-256 acknowledgement when
+  its digest is not already in the cached verified catalog and defaults to a
+  local-only dependency path; the acknowledgement does not authorize a
+  Registry lookup or download;
+- Registry dependency supplementation is a separate explicit mode, never an
+  implicit fallback from a local archive;
+- active dirty Package worktrees require a separate explicit choice: the WebUI
+  may save a complete backup or deliberately discard the worktree, while the
+  CLI exposes the equivalent `--preserve-dirty` / `--force-dirty` options;
+  neither choice is inferred from the SHA-256 acknowledgement;
+- dirty-worktree backups are written to private Termux storage with a digest
+  sidecar before the active version is replaced;
 - archive path and symlink checks;
 - runtime artifact, architecture, and target preflight;
 - process identity validation before sending signals;

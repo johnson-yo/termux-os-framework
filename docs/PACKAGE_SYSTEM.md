@@ -51,6 +51,33 @@ root to the Manifest ID. The Registry metadata and streamed SHA-256 are
 checked before the archive enters local preflight. Remote downloads never
 bypass the normal explicit Install step.
 
+A browser-uploaded archive is a `local_file` candidate. Its install path is
+local-only by default: the archive SHA-256 is checked against the uploaded
+bytes, the normal Manifest/target/runtime preflight still runs, and required
+dependencies must already be usable on the device. The local path does not
+download dependency archives. If its digest is not already in the cached
+verified catalog, the unverified-SHA acknowledgement is required; once it is
+checked, the install request cannot perform a Registry lookup or download.
+An operator may explicitly request `dependency_mode: registry` for a separately
+trusted candidate, but that is a different mode and is never implied by the
+acknowledgement.
+
+The inventory endpoint does not resolve dependency plans for every retained
+upload. The Manager requests dependency details for the selected upload, and
+the install route recomputes that plan immediately before it mutates package
+state. This keeps health checks bounded without weakening the local-only
+Registry boundary.
+
+Before replacing an active Package, the Manager reports a dirty Git worktree
+and requires one independent decision. The WebUI offers either a confirmation
+to save a complete private backup first or an explicit confirmation to force
+discard the local worktree without a backup. The CLI equivalents are
+`--preserve-dirty` and the intentionally destructive `--force-dirty`. Dirty
+backups are stored under
+`~/.termux-os/package-archives/<package-id>/` with a SHA-256 metadata sidecar;
+`dirty-backups <package-id>` lists them for recovery. Neither choice changes
+the immutable Release archive or persistent Package data.
+
 The public catalog lists only versions and files that have passed Registry
 verification. It may expose an `official` array with multiple maintainer IDs;
 the Framework may map any non-empty array to the compact public label

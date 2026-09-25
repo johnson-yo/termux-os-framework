@@ -22,6 +22,13 @@ A directory under the Installed Root that has `versions/` but no `active.json` i
 failed Package rather than skipped. Skipping it left the user with something they could neither see,
 remove, nor reinstall without opening a shell to find out why it had vanished.
 
+Dependency resolution has two callers with different authority. Runtime and
+normal Registry-assisted preflight may use the cached catalog to describe a
+possible supply. Local archive installation uses the local-only resolver: it
+reports the installed Package/Capability/Asset facts, never manufactures a
+remote supply plan, and blocks on any required dependency that is not already
+ready on the device.
+
 ## `.models` declarations
 
 An installed Package version may declare raw model consumers with empty files at

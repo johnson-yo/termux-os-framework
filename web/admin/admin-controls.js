@@ -31,6 +31,9 @@ const stateWord = (value) => STATE_WORDS[String(value ?? '').trim()] ?? value ??
 const installFlow = {
   steps: [],
   cancel: null,
+  preserveDirty: false,
+  forceDirty: false,
+  dependencyMode: 'local_only',
 };
 
 /**
@@ -71,6 +74,9 @@ function installDialogReset(title, steps) {
   $('install-ack-wrap').hidden = true;
   $('install-ack').checked = false;
   $('install-confirm').hidden = true;
+  installFlow.preserveDirty = false;
+  installFlow.forceDirty = false;
+  installFlow.dependencyMode = 'local_only';
   $('install-cancel').textContent = tr('取消');
   if (!dialog.open) dialog.showModal();
   return dialog;
@@ -93,7 +99,11 @@ function installFail(message) {
 }
 
 /** 等用户在报告上点「同意并安装」。取消返回 false，流程就停在这里，不装。 */
-function installAwaitConsent({ rows, warning = null, acknowledgement = null, label = '同意并安装' }) {
+function installAwaitConsent({
+  rows, warning = null, acknowledgement = null, dirtyAcknowledgement = null,
+  forceDirtyAcknowledgement = null,
+  dependencyMode = 'local_only', blocked = false, label = '同意并安装',
+}) {
   const report = $('install-report');
   report.replaceChildren(...rows.map(([key, value]) => valueRow(key, value)));
   report.hidden = false;
@@ -103,20 +113,55 @@ function installAwaitConsent({ rows, warning = null, acknowledgement = null, lab
     $('install-ack-text').textContent = tr(acknowledgement);
     $('install-ack-wrap').hidden = false;
   }
+  let dirtyAck = null;
+  let forceDirtyAck = null;
+  const makeDirtyChoice = (text, value) => {
+    if (!text) return null;
+    const dirtyLabel = document.createElement('label');
+    dirtyLabel.className = 'confirm-ack';
+    const input = document.createElement('input');
+    input.type = 'radio';
+    input.name = 'install-dirty-choice';
+    input.value = value;
+    const dirtyText = document.createElement('span');
+    dirtyText.textContent = tr(text);
+    dirtyLabel.append(input, dirtyText);
+    report.append(dirtyLabel);
+    return input;
+  };
+  if (dirtyAcknowledgement) dirtyAck = makeDirtyChoice(dirtyAcknowledgement, 'preserve');
+  if (forceDirtyAcknowledgement) forceDirtyAck = makeDirtyChoice(forceDirtyAcknowledgement, 'force');
   const confirm = $('install-confirm');
   confirm.textContent = tr(label);
-  confirm.hidden = false;
-  confirm.disabled = Boolean(acknowledgement);
-  const onAck = () => { confirm.disabled = acknowledgement ? !ack.checked : false; };
+  confirm.hidden = blocked;
+  const updateConsentState = () => {
+    const dirtyChoiceRequired = Boolean(dirtyAcknowledgement || forceDirtyAcknowledgement);
+    confirm.disabled = blocked
+      || (Boolean(acknowledgement) && !ack.checked)
+      || (dirtyChoiceRequired && !dirtyAck?.checked && !forceDirtyAck?.checked);
+  };
+  updateConsentState();
+  const onAck = updateConsentState;
   ack.addEventListener('change', onAck);
+  dirtyAck?.addEventListener('change', onAck);
+  forceDirtyAck?.addEventListener('change', onAck);
   return new Promise((resolve) => {
     const done = (value) => {
       ack.removeEventListener('change', onAck);
+      dirtyAck?.removeEventListener('change', onAck);
+      forceDirtyAck?.removeEventListener('change', onAck);
       confirm.removeEventListener('click', onConfirm);
       $('install-cancel').removeEventListener('click', onCancel);
       resolve(value);
     };
-    const onConfirm = () => { confirm.hidden = true; $('install-warning').hidden = true; done(true); };
+    const onConfirm = () => {
+      installFlow.preserveDirty = Boolean(dirtyAck?.checked);
+      installFlow.forceDirty = Boolean(forceDirtyAck?.checked);
+      installFlow.dependencyMode = dependencyMode;
+      confirm.hidden = true;
+      $('install-warning').hidden = true;
+      done(true);
+    };
     // ⚠ 只负责「使用者不同意」这件事；关闭对话框由那个从不摘掉的绑定做。
     const onCancel = () => done(false);
     confirm.addEventListener('click', onConfirm);
@@ -211,23 +256,9 @@ function showManualDownloadDialog({ title, manual, nextStep }) {
   });
 }
 
-async function runFrameworkPreflight(upload) {
-  try {
-    const result = await apiData(`/api/admin/framework-update/uploads/${encodeURIComponent(upload.id)}/preflight`, {
-      method: 'POST', body: '{}',
-    });
-    frameworkUpdateNotice = { kind: 'good', text: `Started the check for ${upload.original_name}: ${jobLabel(result.job)}.` };
-  } catch (error) {
-    frameworkUpdateNotice = { kind: 'bad', text: `Check: ${error.message ?? error}` };
-  }
-  await loadFrameworkUpdate();
-}
-
-async function runFrameworkUpdate(upload, currentBuild) {
-  const accepted = await confirmAction({
-    title: '安装 Framework 更新',
-    label: 'Update Framework',
-    details: [
+function frameworkUpdateConsent(upload, currentBuild) {
+  return {
+    rows: [
       ['当前构建', currentBuild ?? '未知'],
       ['更新文件', upload.original_name],
       ['目标构建', upload.preflight?.candidate_build ?? 'validated by formal check'],
@@ -236,16 +267,74 @@ async function runFrameworkUpdate(upload, currentBuild) {
       ['成功判据', 'Browser Login, admin menu, integrity, Package inventory and boundary comparison'],
       ['失败时的行为', 'the existing engine automatically restores the previous version and records the evidence'],
     ],
-  });
+    warning: '安装过程中 Framework 会重启，控制台会短暂中断。',
+    label: '同意并安装',
+  };
+}
+
+async function runFrameworkPreflight(upload) {
+  installDialogReset('安装 Framework 更新', ['检查', '安装', '重启恢复']);
+  installStep(0, 'active');
+  let started;
+  try {
+    started = await apiData(`/api/admin/framework-update/uploads/${encodeURIComponent(upload.id)}/preflight`, {
+      method: 'POST', body: '{}',
+    });
+  } catch (error) {
+    installStep(0, 'failed');
+    installFail(`检查：${error.message ?? error}`);
+    await loadFrameworkUpdate();
+    return undefined;
+  }
+
+  const finished = await installAwaitJob(`/api/admin/framework-update/jobs/${started.job.id}`);
+  const snapshot = await apiData('/api/admin/framework-update').catch(() => null);
+  const fresh = snapshot?.uploads?.find((item) => item.id === upload.id) ?? upload;
+  if (finished.status !== 'success' || fresh.status !== 'preflight_passed') {
+    installStep(0, 'failed');
+    installFail(finished.error ?? finished.output ?? fresh.preflight?.output ?? '检查没有通过，这个安装包不能安装。');
+    await loadFrameworkUpdate();
+    return undefined;
+  }
+  installStep(0, 'done');
+  return runFrameworkUpdate(fresh, snapshot?.current_build ?? '未知', { dialogAlreadyOpen: true, stepOffset: 1 });
+}
+
+async function runFrameworkUpdate(upload, currentBuild, { dialogAlreadyOpen = false, stepOffset = 0 } = {}) {
+  if (!dialogAlreadyOpen) {
+    installDialogReset('安装 Framework 更新', ['安装', '重启恢复']);
+    installStep(0, 'active');
+  }
+  const accepted = await installAwaitConsent(frameworkUpdateConsent(upload, currentBuild));
   if (!accepted) return;
   try {
     const result = await apiData(`/api/admin/framework-update/uploads/${encodeURIComponent(upload.id)}/update`, {
       method: 'POST', body: JSON.stringify({ confirm_sha256: upload.sha256 }),
     });
-    frameworkUpdateNotice = { kind: 'good', text: `Started ${jobLabel(result.job)}. Framework will reconnect to its persistent update result.` };
+    const finished = await installAwaitJob(`/api/admin/framework-update/jobs/${result.job.id}`);
+    if (finished.status !== 'success') {
+      installStep(stepOffset, 'failed');
+      installFail(finished.error ?? finished.output ?? '更新失败，上一个版本已经恢复。');
+      await loadFrameworkUpdate();
+      return;
+    }
   } catch (error) {
-    frameworkUpdateNotice = { kind: 'bad', text: `Update: ${error.message ?? error}` };
+    installStep(stepOffset, 'failed');
+    installFail(`更新：${error.message ?? error}`);
+    await loadFrameworkUpdate();
+    return;
   }
+  installStep(stepOffset, 'done');
+  installStep(stepOffset + 1, 'active');
+  const alive = await installAwaitFramework();
+  installStep(stepOffset + 1, alive ? 'done' : 'failed');
+  if (!alive) {
+    installFail('更新已经执行，但 Framework 在两分钟内没有恢复应答。');
+    await loadFrameworkUpdate();
+    return;
+  }
+  $('install-cancel').textContent = tr('完成');
+  frameworkUpdateNotice = { kind: 'good', text: `Framework 已更新到 ${upload.preflight?.candidate_build ?? '新版本'}。` };
   await loadFrameworkUpdate();
 }
 
@@ -494,7 +583,7 @@ function renderFrameworkUpdate(data) {
   uploadWrap.append(input, uploadButton, progress); candidates.body.append(uploadWrap);
   // 只显示最新的那一个。上传是一次一个的动作，同时列出好几个「等待检查」的旧文件，
   // 读的人会以为它们都还要处理——实际上它们只是没被清掉。
-  const [current] = (data.uploads ?? []).filter((upload) => ['uploaded', 'preflight_passed'].includes(upload.status));
+  const [current] = (data.uploads ?? []).filter((upload) => ['uploaded', 'preflight_passed', 'preflight_failed'].includes(upload.status));
   if (current) candidates.body.append(frameworkUploadCard(current, data.current_build, busyNow));
 
   const recovery = section('恢复上一个版本');
@@ -598,6 +687,25 @@ async function runGuidedInstallFromUpload(upload, name, { selection = null, vers
 
   const identity = fresh.identity ?? {};
   const current = snapshot?.packages?.find((item) => item.id === identity.id);
+  const localOnly = fresh.install_source !== 'registry';
+  const dependencyMode = localOnly ? 'local_only' : (fresh.dependency_mode ?? 'registry');
+  let dependencies = null;
+  try {
+    const details = await apiData(`/api/admin/package-manager/uploads/${encodeURIComponent(fresh.id)}/dependencies?dependency_mode=${encodeURIComponent(dependencyMode)}`);
+    dependencies = details.dependencies ?? null;
+  } catch (error) {
+    installStep(stepOffset, 'failed');
+    installFail(`依赖检查：${error.message ?? error}`);
+    return loadPackageManager();
+  }
+  const dirty = current?.install_safety?.dirty === true;
+  const dependencyBlocked = dependencies?.installable === false;
+  const dependencyFailure = dependencyBlocked
+    ? (localOnly
+      ? '本地安装不会联网；请先在本机安装必需依赖：'
+        + ` ${(dependencies.missing_local ?? dependencies.blocked ?? []).map((node) => node.id).join(', ')}`
+      : `Registry 目录中没有可补齐的必需依赖：${(dependencies.missing_from_catalog ?? []).map((node) => node.id).join(', ')}`)
+    : null;
   const consented = await installAwaitConsent({
     rows: [
       ['Package', identity.name ?? identity.id ?? name],
@@ -607,17 +715,27 @@ async function runGuidedInstallFromUpload(upload, name, { selection = null, vers
       ['目标机型', identity.target ?? '未声明'],
       ['大小', formatBytes(fresh.size)],
       ['File SHA-256', fresh.sha256],
+      ['安装方式', localOnly ? '本地归档（安装期间不访问 Registry）' : 'Registry 归档（按目录补充依赖）'],
       ['来源', fresh.origin
         ? `${fresh.origin.repository ?? selection?.repository ?? '本地文件'} · ${originPathLabel(fresh.origin.path)}`
         : '本地文件'],
       ['会停止的服务', identity.services?.length ? identity.services.join(', ') : '无'],
       ['配置 / 数据', '保留'],
       ['失败时的行为', current ? '自动恢复上一个版本' : '删除未完成的安装'],
+      ...dependencyRows(dependencies),
     ],
-    warning: '安装过程中 Framework 会重启，控制台会短暂中断。',
+    warning: dependencyFailure ?? '安装过程中 Framework 会重启，控制台会短暂中断。',
     acknowledgement: fresh.registry_verified === true
       ? null
       : '我知道这个安装包的 SHA-256 不在已验证列表里，仍然要装。',
+    dirtyAcknowledgement: dirty
+      ? `当前版本有 ${current.install_safety.change_count} 处本地修改；我同意先备份完整工作区，再安装新版本。`
+      : null,
+    forceDirtyAcknowledgement: dirty
+      ? '我知道这会丢弃当前 Package 的全部本地修改、不创建备份，并继续强制覆盖。'
+      : null,
+    dependencyMode,
+    blocked: dependencyBlocked,
   });
   if (!consented) return loadPackageManager();
 
@@ -629,6 +747,9 @@ async function runGuidedInstallFromUpload(upload, name, { selection = null, vers
       body: JSON.stringify({
         confirm_sha256: fresh.sha256,
         ...(fresh.registry_verified === true ? {} : { confirm_unverified: true }),
+        dependency_mode: installFlow.dependencyMode,
+        ...(installFlow.preserveDirty ? { preserve_dirty: true } : {}),
+        ...(installFlow.forceDirty ? { force_dirty: true } : {}),
       }),
     })).job;
   } catch (error) {
@@ -662,35 +783,21 @@ const originPathLabel = (path) => ({
   termux_os_registry: 'Termux-OS Registry',
 }[path] ?? '已验证来源');
 
-/** 就地升级：从目录里取到 selection，交给同一条引导流程。 */
-/**
- * 这个已装的包对应目录里的哪一条。
- *
- * ⚠ 先前「有没有新版本」与「去装哪一版」各自写了一遍同样的查找，而且都只按
- * `release.repository` 这个**可选**的自由文本 join。同一个查找出现两次，就有两次
- * 各自走偏的机会；用一个可选字段当连接键，则让「能不能更新」取决于有没有人记得填它。
- */
-function registryEntryFor(item) {
-  return registryByPackageId.get(item.id)
-    ?? (item.repository ? registryByRepository.get(normalizeRepository(item.repository)) : null)
-    ?? null;
-}
-
-async function startPackageUpgrade(item, targetVersion) {
-  const entry = registryEntryFor(item);
-  const version = entry?.versions?.find((v) => v.version === targetVersion) ?? entry?.versions?.[0];
-  const file = version?.files?.find((f) => f.kind === 'source_tar' && f.name.endsWith('.tar.gz'));
-  if (!file) {
-    packageNotice = { kind: 'bad', text: `${item.name} ${targetVersion} 没有可用的源码包。` };
-    return loadPackageManager();
+/** 就地升级：Core 已经选好归档，更新与安装共用同一条引导流程。 */
+async function startPackageUpgrade(item) {
+  const update = item.registry_update;
+  const selection = update?.selection;
+  if (!update?.update_available || !selection) {
+    installDialogReset(`更新 ${item.name ?? item.id}`, ['下载', '检查', '安装', '完成']);
+    installFail(update?.reason === 'no_installable_archive'
+      ? 'Registry 找到了版本，但没有可安装的已验证归档。'
+      : '当前没有可用的已验证更新，请刷新 Registry 后重试。');
+    return undefined;
   }
   return runGuidedPackageInstall({
-    selection: {
-      source: entry.source, repository: entry.repository,
-      version: version.version, kind: file.kind, file: file.name,
-    },
+    selection,
     name: item.name ?? item.id,
-    version: version.version,
+    version: selection.version,
   });
 }
 
@@ -779,7 +886,7 @@ function dependencyRows(plan) {
       if (node.download.repository) parts.push(node.download.repository);
       parts.push(node.download.sha256 ? 'SHA-256 已登记' : '⚠ 无 SHA-256');
     } else if (node.state !== 'ready' && node.required) {
-      parts.push('⚠ Catalog 里没有');
+      parts.push(plan.dependency_mode === 'local_only' ? '⚠ 本机未就绪' : '⚠ Catalog 里没有');
     }
     rows.push([`${kind} · ${need}`, `${node.id} — ${parts.join(' · ')}`]);
   }
@@ -790,54 +897,9 @@ function dependencyRows(plan) {
 }
 
 async function installUpload(upload) {
-  const identity = upload.identity;
-  const snapshot = await (await api('/api/admin/package-manager')).json();
-  const current = snapshot.packages?.find((p) => p.id === identity.id);
-  const accepted = await confirmAction({
-    title: `Install ${identity.name ?? identity.id}`,
-    details: [
-      ['Package ID', identity.id],
-      ['Current version', current?.version ?? 'not installed'],
-      ['Package 版本', identity.version],
-      ['Target', identity.target],
-      ['File SHA-256', upload.sha256],
-      ['会停止的服务', identity.services?.length ? identity.services.join(', ') : 'none declared'],
-      ['配置 / 数据', 'preserved'],
-      ['失败时的行为', current ? 'the previous version is restored automatically' : 'the incomplete install is removed'],
-      ...dependencyRows(upload.dependencies),
-    ],
-    // ⛔ 依赖补不齐时按钮直接换成「无法安装」：装一个永远补不齐依赖的包，比不装更难查。
-    label: upload.dependencies && upload.dependencies.installable === false
-      ? '无法安装（依赖不在 Catalog）'
-      : (upload.dependencies?.nodes?.length ? '安装缺失依赖并继续' : (current ? 'Install update' : 'Install')),
-    acknowledgement: upload.registry_verified === true
-      ? null
-      : 'I understand this archive SHA-256 is not in the verified Registry list and I want to install it manually.',
-  });
-  if (!accepted) return;
-  if (upload.dependencies && upload.dependencies.installable === false) {
-    packageNotice = {
-      kind: 'bad',
-      text: `无法安装：${upload.dependencies.missing_from_catalog.map((n) => n.id).join(', ')} 不在 Registry 目录里。`,
-    };
-    await loadPackageManager();
-    return;
-  }
-  try {
-    const response = await api(`/api/admin/package-manager/uploads/${upload.id}/install`, {
-      method: 'POST',
-      body: JSON.stringify({
-        confirm_sha256: upload.sha256,
-        ...(upload.registry_verified === true ? {} : { confirm_unverified: true }),
-      }),
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.detail ?? result.error);
-    packageNotice = { kind: 'good', text: `Started ${jobLabel(result.job)}. Framework may restart; this page will reconnect to the persistent result.` };
-  } catch (error) {
-    packageNotice = { kind: 'bad', text: String(error?.message ?? error) };
-  }
-  await loadPackageManager();
+  const identity = upload.identity ?? {};
+  installDialogReset(`安装 ${identity.name ?? identity.id ?? upload.original_name}`, ['检查', '安装', '完成']);
+  return runGuidedInstallFromUpload(upload, identity.name ?? identity.id ?? upload.original_name, { stepOffset: 0 });
 }
 
 async function discardUpload(upload) {
@@ -1005,7 +1067,7 @@ function renderPackageCard(item) {
     : actionButton('打开', '', () => {}, true));
   actions.append(packageSettingLink(item));
   actions.append(actionButton('更新', 'primary',
-    () => startPackageUpgrade(item, upgrade), !canWrite() || !upgrade));
+    () => startPackageUpgrade(item), !canWrite() || !upgrade));
   actions.append(actionButton('开发', '',
     () => startPackageDev(item), !canWrite() || !item.installed_dir));
   actions.append(actionButton('回滚', '',
@@ -1133,41 +1195,18 @@ function packageUploadStatus(upload) {
   })[upload.status] ?? stateWord(String(upload.status ?? '').replaceAll('_', ' '));
 }
 
-/**
- * Installed 版本與 Registry 最新已驗證版本的比對結果。
- * 回傳可升級的目標版本，或 null。比較用數字段而非字串，避免 0.10 < 0.9。
- */
 let registryByRepository = new Map();
-// 目录条目按 package id 的索引：那才是这套系统的身份，仓库地址只是它的一个可选属性。
-let registryByPackageId = new Map();
-
-function compareSemver(a, b) {
-  const pa = String(a).split('.').map(Number);
-  const pb = String(b).split('.').map(Number);
-  for (let i = 0; i < 3; i += 1) {
-    const x = Number.isFinite(pa[i]) ? pa[i] : 0;
-    const y = Number.isFinite(pb[i]) ? pb[i] : 0;
-    if (x !== y) return x - y;
-  }
-  return 0;
-}
 
 /**
- * 这个已装的包在目录里有没有更新的版本。
+ * Installed 版本与 Core 给出的已验证更新候选。
  *
- * ⭐ **先按 package id 找，再退回仓库地址。**
- *
- * ⚠ 先前只按 `release.repository` 这个自由文本 join。一个包没写这一段（Manifest 里
- * `release` 整个是可选的），`item.repository` 就是 null，于是这里立刻返回 null——
- * 卡片上没有横幅、「更新」按钮永远是灰的，而**没有任何地方说得出为什么**。
- * package id 才是这套系统到处都在用的身份；拿一个可选的 URL 当连接键，
- * 等于让「能不能更新」取决于有没有人记得填那一行。
+ * WebUI 只消费 `registry_update.selection`，不再自行查目录、比较版本或筛选
+ * source_tar。这样 release_asset 与 source_tar 的选择永远由 Framework Core 统一决定。
  */
 function packageUpgrade(item) {
-  const entry = registryEntryFor(item);
-  const latest = entry?.latest_verified_version ?? entry?.latest_version;
-  if (!latest || !item.version) return null;
-  return compareSemver(latest, item.version) > 0 ? latest : null;
+  const update = item.registry_update;
+  if (!update?.update_available || !update.selection?.version) return null;
+  return update.selection.version;
 }
 
 /** 每次拿到 package-manager 快照時重建索引；官方名單與可升級判定都靠它。 */
@@ -1180,12 +1219,10 @@ async function ensureRegistryIndex() {
 
 function indexRegistry(data) {
   registryByRepository = new Map();
-  registryByPackageId = new Map();
   officialRepositories = new Set();
   for (const entry of data.registry?.packages ?? []) {
     const key = normalizeRepository(entry.repository);
     registryByRepository.set(key, entry);
-    if (entry.package_id) registryByPackageId.set(entry.package_id, entry);
     if (entry.official?.length) officialRepositories.add(key);
   }
 }
@@ -1292,16 +1329,16 @@ function renderRegistry(data) {
   for (const item of installable) {
     const card = document.createElement('article'); card.className = 'panel package-card registry-card';
     const version = item.versions?.find((entry) => entry.version === (item.latest_verified_version ?? item.latest_version)) ?? item.versions?.[0];
-    const file = version?.files?.find((entry) => entry.kind === 'source_tar' && entry.name.endsWith('.tar.gz'));
+    // Archive kind, filename and source are selected by Core and carried by the catalog snapshot.
+    const selection = version?.selection ?? null;
+    const file = selection ? { ...selection, size: version.size, sha256: version.sha256 } : null;
     card.append(text('b', registryDisplayName(item)), text('small', item.repository, 'meta'));
     if (item.description) card.append(text('p', item.description, 'package-card-description'));
     card.append(valueRow('最新已验证', version?.version ?? item.latest_verified_version ?? 'n/a'),
       valueRow('发布时间', item.latest_verified_published_at ?? version?.published_at ?? 'n/a'));
     if (file) {
-      // 檔名恆為 source.tar.gz，沒有資訊量；大小有。
       card.append(valueRow('源码包', formatBytes(file.size)));
       const detailBox = document.createElement('div'); detailBox.className = 'registry-details'; detailBox.hidden = true;
-      const selection = { source: item.source, repository: item.repository, version: version.version, kind: file.kind, file: file.name };
       let publicDetailsLoaded = false;
       /**
        * ⚠ 按钮要按**版本**说话，不是按「这个 id 装过没有」。

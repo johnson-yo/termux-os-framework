@@ -1,7 +1,8 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
  * [INPUT]: The live package loader, capability resolver, and asset registry.
- * [OUTPUT]: `deviceProbes`, `resolvePackageDependencies`, `dependencyTree`.
+ * [OUTPUT]: `deviceProbes`, `resolvePackageDependencies`, `resolveDeclaredDependencies`,
+ *           `resolveDeclaredDependenciesLocal`, `dependencyTree`.
  * [POS]: src/packages/dependency-runtime.mjs in termux-os-framework. The adapter between the pure
  *        ladder in `dependencies.mjs` and what is actually installed on this device.
  * [PROTOCOL]: Every probe reports facts only. It never decides whether a dependency is acceptable —
@@ -229,6 +230,41 @@ export function resolveDeclaredDependencies(declared, {
 }
 
 /**
+ * Resolve an uploaded local archive without consulting the Package Registry.
+ *
+ * A local archive already has its bytes; the Registry is neither its trust
+ * anchor nor an implicit dependency transport.  This resolver therefore uses
+ * only the installed Package/Asset/Capability facts.  A missing or unusable
+ * required dependency is a hard pre-install block, while an optional one is
+ * reported as degraded exactly as the normal resolver reports it.
+ */
+export async function resolveDeclaredDependenciesLocal(declared, { capabilityProbe = capabilityFacts } = {}) {
+  const capabilityCache = new Map();
+  for (const node of declared ?? []) {
+    if (node.kind !== DEP_KIND.CAPABILITY || capabilityCache.has(node.id)) continue;
+    capabilityCache.set(node.id, await capabilityProbe(node.id));
+  }
+  const plan = installPlan(declared, {
+    probes: {
+      [DEP_KIND.PACKAGE]: (id) => packageFacts(id),
+      [DEP_KIND.CAPABILITY]: (id) => capabilityCache.get(id) ?? null,
+      [DEP_KIND.ASSET]: (id) => assetFacts(id),
+    },
+  });
+  const blocked = (plan.blocked ?? []).filter((node) => node.required !== false);
+  return {
+    ...plan,
+    dependency_mode: 'local_only',
+    installable: blocked.length === 0,
+    missing_from_catalog: [],
+    missing_local: blocked,
+    download_bytes: 0,
+    install_order: [],
+    supply: [],
+  };
+}
+
+/**
  * 服務啟動門禁。依賴沒 ready 就不啟動，並回一個**結構化**的原因。
  *
  * ⚠ 錯誤必須結構化而不是一句話：WebUI 要據此列出缺了什麼、跳到哪去補。
@@ -322,6 +358,28 @@ if (process.argv.includes('--self-test')
   t('a required package the catalog cannot supply blocks the install instead of being skipped',
     noCoords.installable === false
     && (noCoords.missing_from_catalog ?? []).some((n) => n.id === 'ghost.pkg'));
+
+  const localOnly = await resolveDeclaredDependenciesLocal([
+    { kind: DEP_KIND.PACKAGE, id: 'ghost.local.pkg', required: true },
+  ]);
+  t('a local archive reports a missing dependency without a Registry supply plan',
+    localOnly.dependency_mode === 'local_only'
+    && localOnly.installable === false
+    && localOnly.supply.length === 0
+    && localOnly.download_bytes === 0
+    && localOnly.missing_local.some((node) => node.id === 'ghost.local.pkg'));
+
+  const localReadyCapability = await resolveDeclaredDependenciesLocal([
+    { kind: DEP_KIND.CAPABILITY, id: 'cap.ready', required: true },
+  ], {
+    capabilityProbe: async (id) => (id === 'cap.ready'
+      ? { installed: true, configured: true, reachable: true, healthy: true }
+      : null),
+  });
+  t('a local archive accepts an already-ready Capability without Registry access',
+    localReadyCapability.installable === true
+    && localReadyCapability.blocked.length === 0
+    && localReadyCapability.nodes[0]?.state === DEP_STATE.READY);
 
   process.exit(fails ? 1 : 0);
 }

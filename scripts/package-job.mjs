@@ -113,7 +113,15 @@ try {
         stdout = tail(`${stdout}\n== installing ${index + 1}/${uploads.length}: ${item.original_name}\n`);
         persistOutput();
       }
-      exitCode = await runOne(['install', item.archive_path, item.sha_path]);
+      const installArgs = ['install', item.archive_path, item.sha_path];
+      // Dirty-worktree policy belongs to the final user-selected Package. Any
+      // Registry-supplied dependency must retain the ordinary release guard;
+      // forwarding the option to every item would silently widen its scope.
+      if (item === upload) {
+        if (job.target.options?.preserve_dirty === true) installArgs.push('--preserve-dirty');
+        if (job.target.options?.force_dirty === true) installArgs.push('--force-dirty');
+      }
+      exitCode = await runOne(installArgs);
       // 依賴沒裝上就別裝依賴它的東西：半裝的結果看起來是成功的。
       if (exitCode !== 0) break;
       if (item !== upload) {

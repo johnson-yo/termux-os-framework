@@ -45,14 +45,18 @@ cleanup() {
       FRAMEWORK_AUTH_FILE="$HOME_FAKE/.termux-os/secrets/framework-auth.v1.json" \
       FRAMEWORK_PORT="$PORT" FRAMEWORK_BASE_URL="$BASE" bash "$CONTROL" stop >/dev/null 2>&1 || true
   fi
+  if [ -n "${BUILD_ARCHIVE:-}" ]; then
+    rm -f "$BUILD_ARCHIVE" "$BUILD_ARCHIVE.sha256"
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 
 npm run public:export >/dev/null
 mkdir -p "$WORK/source"
-cp -a "$ROOT/tmp/public-tree" "$WORK/source/framework"
-tar -czf "$ARCHIVE" -C "$WORK/source" framework
+BUILD_ARCHIVE="$ROOT/tmp/framework-installer-smoke-$$_source.tar.gz"
+node "$ROOT/scripts/build-framework-archive.mjs" --version "$FRAMEWORK_VERSION" --output "$BUILD_ARCHIVE" >/dev/null
+cp "$BUILD_ARCHIVE" "$ARCHIVE"
 SHA256="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
 
 # Reproduce the exact upgrade trap fixed by this release: the live Core has no

@@ -150,3 +150,15 @@ one intention, with a pending state in between that looked like an unfinished ch
 
 Framework updates and Package installs share that flow. They differ in where the archive comes from,
 not in what the user does, so they must not be two screens that drift apart.
+
+For Package installs the confirmation also shows the source mode. A file
+uploaded from the browser is local-only and the dialog must state that it will
+not contact the Registry; its unverified-SHA checkbox is the archive trust
+acknowledgement, not a network permission. Registry dependency supplementation
+is shown only for a Registry-sourced or explicitly Registry-mode candidate.
+If the current Package reports a dirty worktree, show a second, independent
+choice: one option agrees to a complete backup before replacement, and the
+other explicitly agrees to discard the local worktree without a backup. The
+browser sends exactly one of `preserve_dirty: true` or `force_dirty: true`
+only when that choice is selected; it never infers either from the archive
+acknowledgement.

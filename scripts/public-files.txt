@@ -33,6 +33,7 @@ docs/SECURITY_MODEL.md
 package.json
 scripts/CLAUDE.md
 scripts/build-package-asset.sh
+scripts/build-framework-archive.mjs
 scripts/check-publication.mjs
 scripts/conf-fingerprint.mjs
 scripts/export-public-tree.mjs

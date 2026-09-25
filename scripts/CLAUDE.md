@@ -16,12 +16,21 @@ Scripts here operate Framework Core, deterministic releases, local fixtures, or 
 - `package-manager.mjs` is the single Package release and installation engine.
   Public Package releases require `README.md`, `AGENTS.md`, `NOTICE.md`, and
   `LICENSE`; internal `CLAUDE.md`, `DEVELOPMENT.md`, `.sdk/`, and handoff notes
-  stay out of the immutable archive.
+  stay out of the immutable archive. Local uploaded archives install in
+  `local_only` mode by default and never fetch Registry dependencies after the
+  unverified-SHA acknowledgement. `--preserve-dirty` archives the complete
+  active worktree before replacement; `--force-dirty` (or the WebUI's explicit
+  `force_dirty` choice) is the discard escape hatch and must never be inferred
+  by a caller.
 - `hooks/` holds the Git hooks that enforce Commit discipline; install with
   `git config core.hooksPath scripts/hooks`.
 - `public-files.txt` is the exact public-source allowlist. `export-public-tree.mjs`
   copies only those files to an ignored staging tree, and
   `check-publication.mjs --tree` rejects anything outside the list.
+- `build-framework-archive.mjs` is the source-release builder. It exports and
+  checks the public tree, materializes contributor-only symlinks, injects the
+  generated `framework-<version>` deployment id, rejects remaining symlinks,
+  and emits the deterministic archive plus SHA-256 sidecar under `tmp/`.
 - `install.sh`, `upgrade.sh`, and `uninstall.sh` verify the Registry `framework`
   type, exact archive size, SHA-256, and package version before changing the
   runtime. They preserve private configuration, credentials, Package data,

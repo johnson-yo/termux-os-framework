@@ -12,6 +12,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolveInstalledPackages } from '../packages/installed-root.mjs';
+import { packageGitIdentity, packageGitState, GIT_STATE } from '../packages/git-state.mjs';
 import { getPackagePorts } from './port-registry.mjs';
 import { isPackageEnabled } from './package-settings.mjs';
 import { nodeExecutable } from './node-runtime.mjs';
@@ -24,6 +25,7 @@ const UPLOAD_SCHEMA = 'termux-os.package-upload.v1';
 const SNAPSHOT_SCHEMA = 'termux-os.package-manager.v1';
 const ACTIONS = new Set(['check', 'install', 'rollback', 'uninstall']);
 const ID_RE = /^[\w.@-]+$/;
+const INSTALL_SOURCE = Object.freeze({ LOCAL_FILE: 'local_file', REGISTRY: 'registry' });
 
 let config = {
   root: '',
@@ -50,20 +52,61 @@ const uploadMetaPath = (id) => path.join(dirs().uploads, `${id}.json`);
 const jobStore = () => createDetachedJobStore({ dir: dirs().jobs, idPattern: ID_RE });
 const packageId = (value, label = 'id') => assertId(value, label, ID_RE);
 
-const publicUpload = (u) => u && ({
-  schema: u.schema,
-  id: u.id,
-  original_name: u.original_name,
-  origin: u.origin ?? null,
-  size: u.size,
-  sha256: u.sha256,
-  status: u.status,
-  identity: u.identity ?? null,
-  preflight: u.preflight ?? null,
-  job_id: u.job_id ?? null,
-  created_at: u.created_at,
-  updated_at: u.updated_at,
+const installSourceFromOrigin = (origin) =>
+  ['github_direct', 'termux_os_registry'].includes(origin?.path)
+    ? INSTALL_SOURCE.REGISTRY : INSTALL_SOURCE.LOCAL_FILE;
+
+const normalizedUpload = (upload) => upload && ({
+  ...upload,
+  install_source: upload.install_source ?? installSourceFromOrigin(upload.origin),
 });
+
+const publicUpload = (u) => {
+  const upload = normalizedUpload(u);
+  return upload && ({
+    schema: upload.schema,
+    id: upload.id,
+    original_name: upload.original_name,
+    origin: upload.origin ?? null,
+    install_source: upload.install_source,
+    size: upload.size,
+    sha256: upload.sha256,
+    status: upload.status,
+    identity: upload.identity ?? null,
+    preflight: upload.preflight ?? null,
+    job_id: upload.job_id ?? null,
+    created_at: upload.created_at,
+    updated_at: upload.updated_at,
+  });
+};
+
+/**
+ * A Package update must show the current worktree hazard before confirmation.
+ * The answer comes from the bytes on disk and the saved release identity; it
+ * is deliberately not a user supplied flag or a persisted "clean" boolean.
+ */
+function packageInstallSafety(versionRoot, packageRoot, active) {
+  const git = packageGitState(versionRoot);
+  const target = active.active_target ?? 'generic';
+  const releaseMeta = readJson(path.join(packageRoot, 'archive', `${active.active_version}@${target}.json`));
+  const identity = packageGitIdentity(versionRoot);
+  const headDiverged = Boolean(releaseMeta?.head && identity.head && releaseMeta.head !== identity.head);
+  const dirty = git.state === GIT_STATE.DEV || headDiverged;
+  const changes = git.changes.length ? git.changes : headDiverged
+    ? [{ code: 'HD', path: `HEAD ${identity.head.slice(0, 12)} ≠ released ${releaseMeta.head.slice(0, 12)}`, untracked: false }]
+    : [];
+  return {
+    state: dirty ? GIT_STATE.DEV : git.state,
+    reason: headDiverged ? 'head_diverged_from_release' : git.reason,
+    dirty,
+    change_count: changes.length,
+    changes,
+    ignored_count: git.ignored.length,
+    head: identity.head,
+    released_head: releaseMeta?.head ?? null,
+    head_diverged: headDiverged,
+  };
+}
 
 export function configurePackageControl(opts) {
   config = {
@@ -91,6 +134,7 @@ async function storePackageStream(stream, filename, {
   expectedSize = null,
   expectedSha256 = null,
   origin = null,
+  installSource = INSTALL_SOURCE.LOCAL_FILE,
   onTooLarge = null,
 } = {}) {
   ensure();
@@ -160,6 +204,7 @@ async function storePackageStream(stream, filename, {
     archive_path: archivePath,
     sha_path: shaPath,
     origin,
+    install_source: installSource,
     size,
     sha256,
     status: 'uploaded',
@@ -189,16 +234,17 @@ export async function storePackageRemoteDownload(response, filename, options = {
     expectedSize: options.expectedSize,
     expectedSha256: options.expectedSha256,
     origin: options.origin ?? null,
+    installSource: INSTALL_SOURCE.REGISTRY,
   });
 }
 
 export function getPackageUpload(id, { internal = false } = {}) {
-  const value = readJson(uploadMetaPath(packageId(id, 'upload_id')));
+  const value = normalizedUpload(readJson(uploadMetaPath(packageId(id, 'upload_id'))));
   return internal ? value : publicUpload(value);
 }
 
 export function updatePackageUpload(id, patch) {
-  const current = getPackageUpload(id, { internal: true });
+  const current = normalizedUpload(getPackageUpload(id, { internal: true }));
   if (!current) throw Object.assign(new Error('unknown_upload'), { code: 'unknown_upload' });
   const next = { ...current, ...patch, updated_at: now() };
   writeJson(uploadMetaPath(id), next);
@@ -274,10 +320,20 @@ export function startPackageJob(action, target) {
   const uploadIds = action === 'install' && Array.isArray(target.upload_ids)
     ? target.upload_ids.map((id) => packageId(id, 'upload_id'))
     : null;
+  const preserveDirty = action === 'install' && target?.options?.preserve_dirty === true;
+  const forceDirty = action === 'install' && target?.options?.force_dirty === true;
+  if (preserveDirty && forceDirty) {
+    throw Object.assign(new Error('choose either dirty backup or force discard, not both'), {
+      code: 'dirty_options_conflict',
+    });
+  }
+  const installOptions = action === 'install' && (preserveDirty || forceDirty)
+    ? { preserve_dirty: preserveDirty, force_dirty: forceDirty }
+    : null;
   const normalized = action === 'check' || action === 'install'
     ? (uploadIds
-      ? { upload_ids: uploadIds, upload_id: uploadIds.at(-1) }
-      : { upload_id: packageId(target.upload_id, 'upload_id') })
+      ? { upload_ids: uploadIds, upload_id: uploadIds.at(-1), ...(installOptions ? { options: installOptions } : {}) }
+      : { upload_id: packageId(target.upload_id, 'upload_id'), ...(installOptions ? { options: installOptions } : {}) })
     : { package_id: packageId(target.package_id, 'package_id') };
   for (const id of normalized.upload_ids ?? (normalized.upload_id ? [normalized.upload_id] : [])) {
     if (!getPackageUpload(id, { internal: true })) {
@@ -328,10 +384,11 @@ export function packageManagerSnapshot(loaderPackages = []) {
   recoverPackageJobs();
   const loader = new Map(loaderPackages.map((p) => [p.id, p]));
   const { entries, errors } = resolveInstalledPackages(config.installedRoot);
-  const packages = entries.map(({ id, dir, active }) => {
+  const packages = entries.map(({ id, dir, packageRoot, active }) => {
     const loaded = loader.get(id);
     const manifest = readJson(path.join(dir, 'termux-os.package.json'));
     const services = (manifest?.components?.services ?? []).map((s) => typeof s === 'string' ? s : s.id).filter(Boolean);
+    const installSafety = packageInstallSafety(dir, packageRoot ?? path.join(config.installedRoot, id), active);
     return {
       id,
       name: manifest?.name ?? loaded?.name ?? id,
@@ -356,6 +413,7 @@ export function packageManagerSnapshot(loaderPackages = []) {
       runtime: loaded?.runtime ?? null,
       health: loaded?.status === 'loaded' ? 'available' : 'attention',
       webui: loaded?.status === 'loaded' ? `/packages/${id}/` : null,
+      install_safety: installSafety,
     };
   });
   return {

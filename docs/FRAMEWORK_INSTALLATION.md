@@ -37,6 +37,18 @@ bash scripts/install.sh \
   --sha256 <64-hex-sha256>
 ```
 
+Maintainers must build a local source archive through the public-boundary
+builder, rather than archiving the checkout directly. The builder runs the
+publication gate, materializes repository symlinks that Android cannot accept,
+injects the deployment identity required by the update engine, rejects any
+remaining non-regular entry, and writes a SHA-256 sidecar:
+
+```sh
+node scripts/build-framework-archive.mjs \
+  --version 0.3.9 \
+  --output tmp/framework-0.3.9-local.tar.gz
+```
+
 The installer creates the private runtime under `~/.termux-os/framework/` and
 the controller at `~/framework.sh`. Configuration and persistent Framework
 state default to `/sdcard/termux-os/framework/`; credentials remain in Termux

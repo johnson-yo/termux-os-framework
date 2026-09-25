@@ -44,8 +44,21 @@ must still match the catalog's exact size and SHA-256 while streaming before a
 local Package Manager preflight candidate is created. Installing remains a
 separate explicit action. A manually imported archive whose SHA-256 is not in
 the cached verified catalog requires a separate safety acknowledgement before
-installation. The cached catalog contains public metadata only and never
-stores an access token.
+installation, and browser-uploaded archives are treated as local input by
+default. After that acknowledgement, local installation uses only on-device
+dependency facts and does not query the Registry or download dependency
+archives. Registry dependency supplementation requires an explicit
+`dependency_mode: registry` request; it is never an automatic fallback. The
+cached catalog contains public metadata only and never stores an access token.
+
+If the active Package worktree has local Git changes, installation pauses for
+a separate decision. The WebUI can save a complete private backup before
+replacement or explicitly discard the worktree without saving it. The CLI
+equivalents are `--preserve-dirty` and the intentionally destructive
+`--force-dirty`; neither is enabled by the SHA-256 acknowledgement. Backups
+and their metadata live under
+`~/.termux-os/package-archives/<package-id>/` and can be enumerated with
+`node scripts/package-manager.mjs dirty-backups <package-id>`.
 
 When the private auth file is in use, `~/framework.sh reset-password` is the
 local recovery path. Use `~/framework.sh reset-password --generate` for a

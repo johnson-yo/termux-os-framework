@@ -2,6 +2,16 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.9
+
+- Keep browser-uploaded Package archives local-only by default. An explicit
+  unverified-SHA acknowledgement now short-circuits Registry access, and
+  required dependencies must already be available locally unless the operator
+  explicitly selects Registry supplementation.
+- Require a separate decision before replacing an edited active Package, with
+  an atomic private full-worktree backup option and an explicit destructive
+  CLI override.
+
 ## 0.3.8
 
 - Reuse a content-addressed Asset payload when a Package and its Manager

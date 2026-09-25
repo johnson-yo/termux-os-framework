@@ -54,6 +54,7 @@ function safeOutput(output) {
 const { output: requestedOutput } = parseArgs(process.argv.slice(2));
 const output = safeOutput(requestedOutput);
 const entries = readManifest();
+let materializedSymlinks = 0;
 
 if (fs.existsSync(output)) fs.rmSync(output, { recursive: true, force: true });
 fs.mkdirSync(output, { recursive: true });
@@ -67,8 +68,21 @@ for (const entry of entries) {
   const stat = fs.lstatSync(source);
   if (!stat.isFile() && !stat.isSymbolicLink()) fail(`manifest entry is not a file: ${entry}`);
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  if (stat.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(source), target);
-  else fs.copyFileSync(source, target);
+  if (stat.isSymbolicLink()) {
+    // Public source archives are consumed by the Android update engine, which
+    // deliberately accepts only regular files and directories. Keep the
+    // repository symlink useful to contributors, but materialize it at the
+    // publication boundary after proving that it stays inside Core.
+    const resolved = fs.realpathSync(source);
+    const rootResolved = fs.realpathSync(root);
+    if (resolved !== rootResolved && !resolved.startsWith(`${rootResolved}${path.sep}`)) {
+      fail(`symbolic link escapes the Framework tree: ${entry}`);
+    }
+    if (!fs.statSync(resolved).isFile()) fail(`symbolic link target is not a file: ${entry}`);
+    fs.copyFileSync(resolved, target);
+    materializedSymlinks += 1;
+  } else fs.copyFileSync(source, target);
 }
 
-console.log(`PASS public export: ${entries.length} files -> ${path.relative(root, output)}`);
+const suffix = materializedSymlinks ? `; materialized ${materializedSymlinks} symlink(s)` : '';
+console.log(`PASS public export: ${entries.length} files -> ${path.relative(root, output)}${suffix}`);
