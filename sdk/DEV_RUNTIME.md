@@ -7,8 +7,8 @@ was released or something you have edited, and the work tree answers which.**
 
 | Question | Answered by | Command |
 |---|---|---|
-| Is this code the same as what was released? | `git status` on the active version directory | `package-manager state <id>` |
-| Will my edits reload automatically? | the watcher | `termux-os-sdk dev status <id>` |
+| Is this code the same as what was released? | `git status` on the active version directory | `termux-os-sdk dev status <id> --json` → `state`, `git` |
+| Will my edits reload automatically? | the watcher | `termux-os-sdk dev status <id> --json` → `watching`, `last_reload_result` |
 
 They are independent. Watching a clean Package leaves it released; stopping the watcher on an
 edited Package leaves it edited. There is no "enter dev mode" action, because entering it is
@@ -18,10 +18,11 @@ just editing a file.
 
 ```sh
 termux-os-sdk dev start  <package-id>   # watch the installed work tree, reload on change
-termux-os-sdk dev status <package-id>   # Git state + watcher state + services
+termux-os-sdk dev status <package-id>   # the single status: state, work tree, Git, watcher, reload, services
 termux-os-sdk dev reload <package-id>   # reload now, without waiting for the watcher
 termux-os-sdk dev stop   <package-id>   # stop watching; the Package keeps its state
 termux-os-sdk dev logs   <package-id>   # logs of the Package's own services
+termux-os-sdk service start|stop|restart <service-id>   # one service, post-checked
 ```
 
 The Package must already be installed: `dev` acts on the one installed copy, using its service
@@ -69,8 +70,8 @@ Editing an installed Package is allowed at any time, and the Git state reports i
 Declaring that you are developing it is a separate, explicit act:
 
 ```sh
-node scripts/package-manager.mjs activate-development <package-id>   # or: termux-os-sdk dev activate <id>
-node scripts/package-manager.mjs development-status   <package-id>   # state + provenance + Git history
+termux-os-sdk dev activate <package-id>          # enter Development (sticky)
+termux-os-sdk dev status   <package-id> --json   # state + provenance + Git history
 ```
 
 Activation records the official baseline in `<packageRoot>/.development/` and changes nothing else:
@@ -85,8 +86,9 @@ and uninstall refuse when it (or Development provenance) is present; add
 `--preserve-development` to back up first or `--force-discard` to discard. Backups keep `.git`:
 
 ```sh
-node scripts/package-manager.mjs development-backups <package-id>
-node scripts/package-manager.mjs restore-development-backup <package-id> <backup-name|sha256-prefix>
+termux-os-sdk dev backup  <package-id>                 # back up the whole work tree now
+termux-os-sdk dev backups <package-id>                 # list backups (branch, HEAD, stash)
+termux-os-sdk dev restore-backup <package-id> <backup-name|sha256-prefix> [--preserve-development | --force-discard]
 ```
 
 ## Returning to the released content
@@ -94,13 +96,17 @@ node scripts/package-manager.mjs restore-development-backup <package-id> <backup
 Editing is one-way by design; a cleared flag would not un-edit a file. Restore the bytes:
 
 ```sh
-node scripts/package-manager.mjs restore <package-id> [--preserve-development | --force-discard]
+termux-os-sdk restore <package-id> [--preserve-development | --force-discard]
 ```
 
 That unpacks the original Release archive saved at install time, verified against its SHA-256.
 Configuration, persisted data and shared assets live outside the work tree and are untouched.
 
 A Framework or Package update refuses to run over an edited work tree rather than overwriting it.
+`termux-os-sdk rollback <package-id>` switches to the previous installed Release when there is one
+(`no_previous_release` otherwise), and `termux-os-sdk uninstall <package-id>` removes the Package
+while keeping `config/`. The `scripts/package-manager.mjs` commands behind these remain operator
+tools; Agents use the SDK.
 
 ## What was removed
 

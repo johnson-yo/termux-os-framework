@@ -75,11 +75,15 @@ try {
   const output = io.tail(`${stdout}${stderr ? `\n${stderr}` : ''}`.trim());
   let engineState = io.readJson(io.state);
   if (job.action === 'registry_upgrade' && exitCode === 0) {
+    // The installer states what the run meant for last-good: upgrade, same_version_replacement,
+    // or already_current (nothing was touched).
+    const outcome = stdout.match(/outcome=(upgrade|same_version_replacement|already_current)\b/)?.[1] ?? 'upgrade';
     engineState = {
       schema: 'termux-os.framework-update-state.v1', update_id: job.id,
       previous_build: previousBuild, candidate_build: `framework-${job.target.version}`,
-      stage: 'complete', status: 'success',
-      message: 'Framework update completed by Registry installer', registry_upgrade: true,
+      stage: 'complete', status: 'success', outcome,
+      message: outcome === 'already_current' ? 'Framework is already at this exact Registry archive; nothing changed'
+        : 'Framework update completed by Registry installer', registry_upgrade: true,
       started_at: job.started_at ?? io.now(), updated_at: io.now(),
     };
     io.writeJson(io.state, engineState);

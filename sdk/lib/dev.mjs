@@ -1,7 +1,8 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
  * [INPUT]: A Framework connection and a Package source repository or ID.
- * [OUTPUT]: Dev watcher commands plus atomic host-source to device-active sync.
+ * [OUTPUT]: Dev watcher commands, the single Agent `dev status`, development backup routing, and
+ *           atomic host-source to device-active sync.
  * [POS]: sdk/lib/dev.mjs in termux-os-framework.
  * [PROTOCOL]: Dev always targets the one installed active worktree. The SDK
  *             never creates a second workspace, versions slot, or service.
@@ -14,6 +15,8 @@ import path from 'node:path';
 import { run, emit, fail, frameworkToken, packageDir, readManifest, sdkMetaDir } from './util.mjs';
 import { resolveConnection, frameworkFetch, transportExec, transportPut } from './connection.mjs';
 import { packageGitIdentity, packageGitState } from '../../src/packages/git-state.mjs';
+import { cmdDevBackup } from './lifecycle.mjs';
+import { listStageServices, serviceView } from './service.mjs';
 
 const TOKEN = frameworkToken();
 const api = (conn, p, opts = {}) => frameworkFetch(conn, p, { token: TOKEN, ...opts });
@@ -58,8 +61,50 @@ const RETIRED = {
   'data-mode': 'release and dev share the same data; there is no isolated mode to choose.',
 };
 
-const SUBCOMMANDS = ['start', 'stop', 'status', 'reload', 'logs', 'sync', 'activate'];
+const SUBCOMMANDS = ['start', 'stop', 'status', 'reload', 'logs', 'sync', 'activate', 'backup', 'backups', 'restore-backup'];
 const USAGE = `Usage: termux-os-sdk dev <${SUBCOMMANDS.join('|')}> <package-id> [--source <repo>]`;
+
+/**
+ * The one status an Agent reads: Package state, provenance, the work tree, Git lineage, the
+ * watcher, the last reload, rollback/restore facts and live services, from one command. The raw
+ * Framework status stays available under `framework` with --verbose.
+ */
+export function agentStatus(d, services, backups, flags = {}) {
+  const git = d.git ?? {};
+  const active = d.reconcile?.active ?? {};
+  const out = {
+    ok: true, schema: 'termux-os.sdk-dev-status.v1', package_id: d.package_id,
+    state: d.state, state_reason: d.state_reason ?? null, state_summary: d.state_summary ?? null,
+    provenance: d.provenance ?? null, development_only: d.development_only === true,
+    worktree: d.worktree ?? d.version_dir ?? null, version: active.version ?? null, target: active.target ?? null,
+    archive_sha256: active.archive_sha256 ?? null,
+    watching: d.watching === true, watch_mode: d.watch_mode ?? null, seq: d.seq ?? 0,
+    runtime_generation: d.runtime_generation ?? null, runtime_owner: d.runtime_owner ?? null,
+    last_reload: d.last_reload ?? null, last_reload_result: d.last_reload_result ?? null,
+    last_reload_error: d.last_reload_error ?? null,
+    git: {
+      available: git.available ?? null, branch: git.branch ?? null, detached: git.detached ?? null,
+      head: git.head ?? null, released_head: git.released_head ?? null,
+      local_baseline_head: git.local_baseline_head ?? null, head_relation: git.head_relation ?? null,
+      worktree: git.worktree ?? null, changes: (git.changes ?? []).length,
+      commits_ahead: git.commits_ahead ?? 0, stash_count: git.stash_count ?? 0,
+      local_refs: git.local_refs ?? [],
+    },
+    local_history_present: d.local_history_present ?? null,
+    protection_required: d.protection_required ?? null,
+    development: d.development ?? null,
+    rollback: d.reconcile?.rollback ?? null,
+    restorable: Boolean(active.archive_sha256) && !d.development_only,
+    development_backups: backups,
+    services,
+    conflict: d.reconcile?.conflict === true,
+    conflicts: d.reconcile?.conflicts ?? [],
+    legacy_workspaces: d.reconcile?.legacy_workspaces ?? [],
+  };
+  if (flags.verbose) out.framework = d;
+  return out;
+}
+
 
 function sourceDir(id, flags) {
   const dir = packageDir(id, { source: flags.source ? path.resolve(String(flags.source)) : null });
@@ -222,6 +267,7 @@ export async function cmdDev(flags, pos) {
   }
   if (!SUBCOMMANDS.includes(sub ?? '')) return fail(flags, 'unknown_dev_subcommand', sub ?? '(missing)', USAGE);
   if (!id) return fail(flags, 'missing_package_id', null, USAGE);
+  if (['backup', 'backups', 'restore-backup'].includes(sub)) return cmdDevBackup(flags, sub, id, pos[2]);
   const conn = resolveConnection(flags);
 
   if (sub === 'sync') return cmdDevSync(flags, id, conn);
@@ -241,7 +287,22 @@ export async function cmdDev(flags, pos) {
     const r = await api(conn, `/api/dev/packages/${id}/status`);
     if (!r.ok) return fail(flags, 'framework_unreachable', r.error, 'Start Framework and retry.');
     if (!r.data?.ok) return fail(flags, r.data?.error ?? 'status_failed', r.data?.detail ?? null, r.data?.fix ?? null);
-    return emit(r.data, flags, show);
+    const stage = await listStageServices(conn);
+    const services = stage.ok
+      ? stage.services.filter((s) => s.package === id || (r.data.services ?? []).includes(s.id)).map(serviceView)
+      : (r.data.services ?? []).map((sid) => ({ id: sid, state: 'unknown' }));
+    const b = await api(conn, `/api/dev/packages/${id}/development/backups`);
+    const backups = b.ok && b.data?.ok ? (b.data.backups ?? []).length : null;
+    return emit(agentStatus(r.data, services, backups, flags), flags, (o) => {
+      console.log(`Package  : ${o.package_id} ${o.version ?? ''}`);
+      console.log(`State    : ${o.state_summary ?? o.state}`);
+      console.log(`Provenance: ${o.provenance ?? 'official'}${o.development_only ? ' (no official Release yet)' : ''}`);
+      console.log(`Work tree: ${o.worktree}`);
+      console.log(`Git      : ${o.git.branch ?? 'detached'} @ ${String(o.git.head ?? '').slice(0, 12)}  released=${String(o.git.released_head ?? '-').slice(0, 12)}  ${o.git.worktree}  ahead=${o.git.commits_ahead} stash=${o.git.stash_count} refs=${o.git.local_refs.length}`);
+      console.log(`Watching : ${o.watching ? `yes (${o.watch_mode})` : 'no'}  generation=${o.runtime_generation ?? 'none'}  reload=${o.last_reload_result ?? '-'}`);
+      console.log(`Services : ${o.services.map((sv) => `${sv.id}=${sv.state}`).join(', ') || 'none'}`);
+      if (o.development_backups) console.log(`Backups  : ${o.development_backups}`);
+    });
   }
 
   if (sub === 'logs') {

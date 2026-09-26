@@ -33,7 +33,7 @@ const CATALOG_DIR = path.join(ROOT, 'web/admin/i18n');
 
 // 界面文字只从这些出口产生，所以只在这些调用点上提取。
 const CALL_SITES = [
-  /(?:section|valueRow|statusRow|actionButton|linkButton|pageLink|text|tr)\(\s*(?:'(?:p|b|h2|h3|span|small|summary|code|div|pre)',\s*)?'([^']+)'/g,
+  /(?:section|valueRow|statusRow|actionButton|linkButton|pageLink|text|tr|tf)\(\s*(?:'(?:p|b|h2|h3|span|small|summary|code|div|pre)',\s*)?'([^']+)'/g,
   /(?:title|label|description|textContent|placeholder):\s*'([^']+)'/g,
   // textContent = '…' / placeholder = '…'：直接赋值也是界面文字，先前漏了这一类，
   // 于是新加的控件文案不会进目录，翻译永远差那几条。

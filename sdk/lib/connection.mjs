@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { emit, fail, runCapture } from './util.mjs';
+import { childStdio, emit, fail, runCapture } from './util.mjs';
 
 export const SDK_HOME = process.env.TERMUX_OS_SDK_HOME
   || path.join(os.homedir(), '.termux-os-sdk');
@@ -68,12 +68,13 @@ export function resolveConnection(flags) {
 }
 
 // HTTP observes Framework state; SSH curl is a compatibility fallback.
-export async function frameworkFetch(conn, urlPath, { timeoutMs = 5000, token = null } = {}) {
+export async function frameworkFetch(conn, urlPath, { timeoutMs = 5000, token = null, method = 'GET', body = undefined } = {}) {
+  const payload = body === undefined ? undefined : JSON.stringify(body);
   if (conn.framework_url) {
     try {
       const r = await fetch(`${conn.framework_url}${urlPath}`, {
-        signal: AbortSignal.timeout(timeoutMs),
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        method, signal: AbortSignal.timeout(timeoutMs), body: payload,
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(payload ? { 'Content-Type': 'application/json' } : {}) },
       });
       return { ok: true, status: r.status, data: await r.json().catch(() => null) };
     } catch (e) {
@@ -81,8 +82,11 @@ export async function frameworkFetch(conn, urlPath, { timeoutMs = 5000, token = 
     }
   }
   if (conn.transport.type === 'ssh') {
-    const auth = token ? `-H 'Authorization: Bearer ${token}' ` : '';
-    const r = runCapture('ssh', [conn.transport.host, `curl -s -m ${Math.ceil(timeoutMs / 1000)} ${auth}http://127.0.0.1:8980${urlPath}`]);
+    const q = (v) => `'${String(v).replaceAll("'", "'\"'\"'")}'`;
+    const auth = token ? `-H ${q(`Authorization: Bearer ${token}`)} ` : '';
+    const data = payload ? `-H 'Content-Type: application/json' --data ${q(payload)} ` : '';
+    const r = runCapture('ssh', [conn.transport.host,
+      `curl -s -m ${Math.ceil(timeoutMs / 1000)} -X ${method} ${auth}${data}http://127.0.0.1:8980${urlPath}`]);
     if (r.status !== 0 || !r.stdout.trim()) return { ok: false, error: `ssh ${conn.transport.host} unreachable or framework down` };
     try { return { ok: true, status: 200, data: JSON.parse(r.stdout) }; }
     catch { return { ok: false, error: 'framework returned non-JSON via ssh tunnel' }; }
@@ -99,10 +103,10 @@ export function transportPut(conn, localPath, remoteDest, flags) {
     fs.copyFileSync(localPath, dest);
     return 0;
   }
-  if (t.type === 'ssh') return spawnSync('scp', [localPath, `${t.host}:${remoteDest}`], { stdio: 'inherit' }).status ?? 1;
-  if (t.type === 'adb') return spawnSync('adb', [...(t.serial ? ['-s', t.serial] : []), 'push', localPath, remoteDest], { stdio: 'inherit' }).status ?? 1;
+  if (t.type === 'ssh') return spawnSync('scp', [localPath, `${t.host}:${remoteDest}`], { stdio: childStdio() }).status ?? 1;
+  if (t.type === 'adb') return spawnSync('adb', [...(t.serial ? ['-s', t.serial] : []), 'push', localPath, remoteDest], { stdio: childStdio() }).status ?? 1;
   if (t.type === 'custom' && t.put) {
-    return spawnSync('bash', ['-c', t.put.replaceAll('{src}', localPath).replaceAll('{dest}', remoteDest)], { stdio: 'inherit' }).status ?? 1;
+    return spawnSync('bash', ['-c', t.put.replaceAll('{src}', localPath).replaceAll('{dest}', remoteDest)], { stdio: childStdio() }).status ?? 1;
   }
   return fail(flags, 'transport_unavailable',
     `connection "${conn.name ?? conn.source}" transport=${t.type} cannot transfer files`,
@@ -119,7 +123,7 @@ const withRemoteEnv = (command, env) => {
 
 export function transportExec(conn, command, flags, { capture = false, env = {} } = {}) {
   const t = conn.transport;
-  const opts = capture ? { encoding: 'utf8' } : { stdio: 'inherit' };
+  const opts = capture ? { encoding: 'utf8' } : { stdio: childStdio() };
   const norm = (r) => (capture ? { status: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' } : (r.status ?? 1));
   if (t.type === 'local') {
     return norm(spawnSync('bash', ['-c', command], { ...opts, env: { ...process.env, ...env } }));

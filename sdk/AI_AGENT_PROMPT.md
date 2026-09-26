@@ -12,8 +12,8 @@ user for the feature request before editing.]
 ## Start with facts
 
 1. Read every `AGENTS.md` or `CLAUDE.md` that governs the current workspace.
-2. Locate the active Framework root. Use `termux-os-sdk` from `PATH`, or use
-   `<framework-root>/sdk/termux-os-sdk`.
+2. Use `termux-os-sdk` from `PATH` (Framework links it at every start). Only on a
+   Framework older than 0.3.16 fall back to `<framework-root>/sdk/termux-os-sdk`.
 3. Run `termux-os-sdk context --json` and inspect the current Package, Capability,
    port, runtime, and target contracts before designing the feature.
 4. Ask first: am I already in an installed active work tree
@@ -27,6 +27,24 @@ user for the feature request before editing.]
    `service`, `app`, `adapter`, or `asset`. Use `termux-os-sdk choose` when the
    boundary is not obvious. On a phone, a Web App starts with
    `termux-os-sdk new --type app --template web --dev --id <id> --name "<Name>"`.
+
+## Control the Framework only through the SDK
+
+- `termux-os-sdk dev status <id> --json` is the one status to read: state, provenance, work tree,
+  version, Git branch/HEAD/released HEAD/local commits/stash/local refs, watcher, last reload,
+  rollback target, services, and backup count. Do not assemble it from other endpoints.
+- Services: `termux-os-sdk service list [<id>]` and `service status|start|stop|restart|logs
+  <service-id>`. Every change is post-checked; `service_not_found` means the ID is wrong.
+- Lifecycle: `termux-os-sdk restore|rollback|uninstall <id>` and
+  `termux-os-sdk dev backup|backups|restore-backup <id> [<backup>]`. When one of them answers
+  `development_backup_required` or `local_history_present`, pick `--preserve-development` (back up
+  first) unless the user explicitly asked to discard work, then `--force-discard`.
+- Always pass `--json` and parse stdout directly; logs are on stderr.
+- `install`, `restore`, `rollback`, and `dev restore-backup` replace the work tree directory; `cd`
+  into `dev status … .worktree` again before the next `git` command.
+- Never call `curl` against Framework, `scripts/package-manager.mjs`, or `scripts/package-job.mjs`
+  for these operations. Source history is plain `git` (branch, commit); GitHub is `git`/`gh` with
+  the developer's own credentials. There is no SDK wrapper for either.
 
 ## Keep the boundary clean
 
@@ -90,11 +108,11 @@ user for the feature request before editing.]
 5. Run:
 
    ```sh
-   termux-os-sdk doctor <package-id>
-   termux-os-sdk test <package-id>
-   termux-os-sdk release <package-id>
-   termux-os-sdk install <absolute-release.tar.gz>
-   termux-os-sdk verify-device <package-id>
+   termux-os-sdk doctor <package-id> --json
+   termux-os-sdk test <package-id> --json
+   termux-os-sdk release <package-id> --json
+   termux-os-sdk install <absolute-release.tar.gz> --json
+   termux-os-sdk verify-device <package-id> --json
    termux-os-sdk handoff <package-id>
    ```
 

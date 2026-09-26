@@ -30,31 +30,66 @@ export function frameworkToken() {
   catch { return null; }
 }
 
-/** Parse --flag value, boolean --flag, and positional arguments. */
+/**
+ * Flags that never take a value. Without this list `--json <package-id>` would swallow the
+ * Package ID as the flag's value, which is the most common way an Agent calls the SDK.
+ */
+export const BOOLEAN_FLAGS = new Set([
+  'json', 'dev', 'allow-dirty', 'from-active', 'preserve-development', 'force-discard',
+  'preserve-dirty', 'force-dirty', 'help', 'verbose',
+]);
+
+/** Parse --flag value, boolean --flag, --flag=value, and positional arguments. */
 export function parseArgs(argv) {
   const flags = {};
   const pos = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      if (eq > 2) { flags[a.slice(2, eq)] = a.slice(eq + 1); continue; }
       const key = a.slice(2);
-      if (i + 1 < argv.length && !argv[i + 1].startsWith('--')) { flags[key] = argv[++i]; }
+      if (!BOOLEAN_FLAGS.has(key) && i + 1 < argv.length && !argv[i + 1].startsWith('--')) { flags[key] = argv[++i]; }
       else flags[key] = true;
     } else pos.push(a);
   }
   return { flags, pos };
 }
 
+/**
+ * JSON mode: stdout carries exactly one JSON object. Everything else — stage banners, builder
+ * and child-process output, hook logs — goes to stderr. The final object is written through the
+ * original stdout writer, which only `emit`/`fail` hold.
+ */
+let jsonStdout = null;
+export function enterJsonMode() {
+  if (jsonStdout) return;
+  jsonStdout = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, encoding, callback) => process.stderr.write(chunk, encoding, callback);
+}
+export const jsonMode = () => jsonStdout !== null;
+
+/** stdio for a child whose output is diagnostic: inherited, but never onto JSON stdout. */
+export const childStdio = () => (jsonStdout ? ['inherit', 2, 2] : 'inherit');
+
+let emitted = false;
+function writeJson(obj) {
+  // One object per invocation: a second emit is a bug in the command, not extra output.
+  if (emitted) { process.stderr.write(`${JSON.stringify(obj)}\n`); return; }
+  emitted = true;
+  (jsonStdout ?? process.stdout.write.bind(process.stdout))(`${JSON.stringify(obj, null, 2)}\n`);
+}
+
 /** Emit one JSON object or a human-readable representation. */
 export function emit(obj, flags, human) {
-  if (flags.json) console.log(JSON.stringify(obj, null, 2));
+  if (flags.json) writeJson(obj);
   else human(obj);
 }
 
 /** Emit a stable error and exit non-zero. */
 export function fail(flags, code, detail, fix) {
   const obj = { ok: false, code, ...(detail ? { detail } : {}), ...(fix ? { fix } : {}) };
-  if (flags?.json) console.log(JSON.stringify(obj, null, 2));
+  if (flags?.json) writeJson(obj);
   else {
     console.error(`✗ ${code}${detail ? `: ${detail}` : ''}`);
     if (fix) console.error(`  Next: ${fix}`);
@@ -64,7 +99,7 @@ export function fail(flags, code, detail, fix) {
 
 /** Run a Core tool without hiding its output or exit status. */
 export function run(cmd, args, opts = {}) {
-  const r = spawnSync(cmd, args, { stdio: 'inherit', cwd: FW_ROOT, ...opts });
+  const r = spawnSync(cmd, args, { stdio: childStdio(), cwd: FW_ROOT, ...opts });
   return r.status ?? 1;
 }
 

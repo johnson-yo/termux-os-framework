@@ -434,7 +434,7 @@ export function activatePackageDevelopment(id) {
         id, versionRoot: current.active.path, packageRoot: current.active.root, active, conflicts: current.conflicts,
       });
       if (!result.ok) return { ok: false, error: result.code, error_code: result.code, detail: result.detail ?? null, fix: result.fix ?? null };
-      return { ok: true, package_id: id, development: result.development, state: devStatus(id) };
+      return { ok: true, package_id: id, development: result.development, git_identity: result.git_identity, state: devStatus(id) };
     } finally { lock.release(); }
   });
 }

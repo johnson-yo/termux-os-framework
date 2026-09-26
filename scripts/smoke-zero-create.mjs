@@ -187,7 +187,8 @@ try {
   // Z12–Z14: same-version first officialization through the SDK.
   const inst = sdk('install', tar, '--json');
   check('Z12 sdk install of the release just built from HEAD succeeds', inst.status === 0, inst.out.slice(-800) + inst.err);
-  check('Z13 the install was protected automatically', inst.out.includes('--preserve-development') || inst.out.includes('development history is backed up'));
+  check('Z13 the install was protected automatically', inst.json?.protection === 'preserve-development'
+    && inst.err.includes('development history is backed up'));
   const backups = pm('development-backups', ID).json?.backups ?? [];
   const pre = backups.find((b) => b.reason === 'update');
   check('Z13 development backup holds dev/foo, main and B/C lineage', Boolean(pre?.refs?.some((r) => r.ref === 'refs/heads/dev/foo' && r.commit === C)

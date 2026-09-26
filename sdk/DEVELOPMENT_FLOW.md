@@ -7,7 +7,9 @@
 5. Run `doctor` until it has no failures.
 6. Iterate on the one installed active worktree with Dev Runtime. On a phone that work tree is the
    source (`new --dev`, or `dev activate` for an official Package); `dev sync` is only for a source
-   repository on another machine. Stop the watcher before release verification.
+   repository on another machine. Commit with plain `git`; read state with
+   `termux-os-sdk dev status <id> --json`; control services with `termux-os-sdk service …`.
+   Stop the watcher before release verification.
 7. Create and install an immutable release.
 8. Run the declared device verification hook.
 9. Generate the handoff and record the exact release, evidence, and known issues.

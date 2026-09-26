@@ -82,3 +82,11 @@ non-loopback origin keeps the full password path, and that is what the remote ha
 smoke exists to prove.
 
 Credentials and browser sessions stay in Termux-private storage. Administration code must not expose secrets. Device verification must report the exact installed release it inspected.
+
+`sdk-shim.mjs` runs at every Framework start: it links `$PREFIX/bin/termux-os-sdk` to this Framework's
+`sdk/termux-os-sdk` (the stable runtime path, so update and rollback need no copy), replaces only a
+link Framework made, reports a foreign file as a collision, and never touches a shell rc file. It
+writes only inside Termux's prefix. `/api/access-info` reports the result as `sdk_command`.
+
+Package lifecycle jobs include `backup` (a manual development backup) next to restore, restore_backup,
+rollback and uninstall; the SDK uses exactly these jobs.

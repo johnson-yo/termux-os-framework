@@ -77,7 +77,15 @@ An upgrade backs up the healthy current runtime, stops Framework, installs the
 verified candidate, preserves runtime observations and private state, then
 starts and health-checks the new version. A failed activation restores the
 previous runtime and controller. `--rollback` restores the controller's
-last-good archive. The default uninstall removes only the runtime and
+last-good archive.
+
+Last-good is one rollback generation per version. Upgrading to a different version first saves
+the running build as last-good. The same version is never a new generation: the exact archive
+that is already running (and healthy) is `already_current` and changes nothing — no restart, no
+reinstall — while a different build of the same version is a `same_version_replacement` that keeps
+the existing last-good. Both the upload path (`framework.sh update`) and the Registry path
+(`upgrade.sh`) record the outcome and the old and new archive SHA-256 in the update state and
+history. The Registry still treats a published version as immutable. The default uninstall removes only the runtime and
 controller; it preserves configuration, credentials, Installed Packages,
 models, and caches. `--purge` additionally removes Framework configuration,
 credentials, and install state, but never removes Installed Packages, models,

@@ -215,6 +215,7 @@ export async function cmdInstall(flags, pos) {
   const truth = await installedTruth(conn, idGuess);
   const connArg = conn.source === 'default-local' ? '' : (conn.name ? ` --connection ${conn.name}` : ` --remote ${conn.transport.host}`);
   emit({ ok: true, tar: base, connection: where, package: idGuess, ...truth,
+    protection: protectionFlag ? protectionFlag.trim().replace(/^--/, '') : null,
     next: `termux-os-sdk verify-device ${idGuess}${connArg}; then termux-os-sdk handoff ${idGuess}` },
   flags, (o) => {
     console.log(`\n✓ Installed ${o.package} → ${o.connection}`);
@@ -236,6 +237,14 @@ async function installedTruth(conn, pkgId) {
     out.installed_sha256 = p.data.package.install?.archive_sha256 ?? null;
     out.target = p.data.package.manifest?.targets?.[0]?.id ?? 'generic';
     svcIds = p.data.package.manifest?.components?.services ?? [];
+  }
+  // active.json is the installed truth; the loaded record can lag a Framework restart.
+  const r = await frameworkFetch(conn, `/api/dev/packages/${pkgId}/status`, { token });
+  if (r.ok && r.data?.ok && r.data.reconcile?.active) {
+    out.installed_version = r.data.reconcile.active.version;
+    out.installed_sha256 = r.data.reconcile.active.archive_sha256 ?? out.installed_sha256 ?? null;
+    out.target = r.data.reconcile.active.target ?? out.target;
+    out.state = r.data.state;
   }
   const s = await frameworkFetch(conn, '/api/stage/services', { token });
   if (s.ok && s.data?.services) {

@@ -167,6 +167,34 @@ else
   bad "upgrade preserves runtime and persistent boundaries"
 fi
 
+# Same-version Registry upgrades: the exact archive is a no-op and a different build never
+# rotates last-good (framework.sh cmd_update carries the same rule for uploaded archives).
+PID_BEFORE="$(cat "$RUNTIME/framework.pid" 2>/dev/null || true)"
+if run_installer "$ROOT/scripts/upgrade.sh" --archive "$ARCHIVE" --version "$FRAMEWORK_VERSION" --sha256 "$SHA256" \
+  2>&1 | grep -q 'outcome=already_current' && [ "$(cat "$RUNTIME/framework.pid" 2>/dev/null || true)" = "$PID_BEFORE" ] \
+  && curl -sf "$BASE/health" >/dev/null; then
+  ok "exact same Registry archive is already_current (no restart)"
+else
+  bad "exact same Registry archive is already_current (no restart)"
+fi
+run_installer "$CONTROL" backup >"$WORK/backup.log" 2>&1 || { echo "backup failed:"; tail -5 "$WORK/backup.log"; }
+LAST_GOOD_BEFORE="$(sha256sum "$PERSIST/backups/last-good.json" 2>/dev/null | awk '{print $1}')"
+mkdir -p "$WORK/rebuild" && tar -xzf "$ARCHIVE" -C "$WORK/rebuild"
+REBUILD_ROOT="$(ls "$WORK/rebuild")"
+printf 'same-version-build-b\n' > "$WORK/rebuild/$REBUILD_ROOT/.build-note"
+ARCHIVE_B="$WORK/framework-source-b.tar.gz"
+tar -czf "$ARCHIVE_B" -C "$WORK/rebuild" "$REBUILD_ROOT"
+SHA256_B="$(sha256sum "$ARCHIVE_B" | awk '{print $1}')"
+run_installer "$ROOT/scripts/upgrade.sh" --archive "$ARCHIVE_B" --version "$FRAMEWORK_VERSION" --sha256 "$SHA256_B" \
+  >"$WORK/upgrade-b.log" 2>&1 || { echo "upgrade B failed:"; tail -8 "$WORK/upgrade-b.log"; }
+if grep -q 'outcome=same_version_replacement' "$WORK/upgrade-b.log" && curl -sf "$BASE/health" >/dev/null \
+  && [ -n "$LAST_GOOD_BEFORE" ] && [ "$(sha256sum "$PERSIST/backups/last-good.json" | awk '{print $1}')" = "$LAST_GOOD_BEFORE" ] \
+  && [ "$(node -p "require('$RUNTIME/.framework-release.json').archive_sha256")" = "$SHA256_B" ]; then
+  ok "same-version different Registry archive keeps last-good"
+else
+  bad "same-version different Registry archive keeps last-good"
+fi
+
 run_installer "$ROOT/scripts/uninstall.sh" --yes
 if [ ! -e "$RUNTIME" ] && [ ! -e "$CONTROL" ] && [ -f "$PERSIST/conf/user.conf" ] \
   && [ -f "$PERSIST/data/user.txt" ] && [ -f "$WORK/packages/active.json" ] && [ -f "$WORK/models/model.marker" ]; then

@@ -45,14 +45,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+set_version() {
+  node -e 'const fs=require("fs"),p=process.argv[1],d=JSON.parse(fs.readFileSync(p,"utf8"));d.version=process.argv[2];fs.writeFileSync(p,JSON.stringify(d,null,2)+"\n")' "$1/package.json" "$2"
+}
+
+# Candidates carry an explicit version: last-good semantics depend on version, not build name.
 build_candidate() {
-  local build="$1" mode="${2:-good}" out tree
+  local build="$1" mode="${2:-good}" version="${3:-1.0.1}" out tree
   out="$TMP/candidates/$build"
   tree="$out/tree/framework"
   rm -rf "$out"
   mkdir -p "$tree"
   rsync -a --exclude-from="$ROOT/.deployignore" "$ROOT/" "$tree/"
   printf '%s\n' "$build" > "$tree/.deploy-id"
+  set_version "$tree" "$version"
   case "$mode" in
     good) ;;
     broken) rm -f "$tree/web/admin/index.html" ;;
@@ -70,6 +76,7 @@ echo "=== 030 Framework Update smoke（隔離、不連手機）==="
 mkdir -p "$RUNTIME" "$PERSIST/conf" "$PERSIST/data" "$INSTALLED" "$ASSETS"
 rsync -a --exclude-from="$ROOT/.deployignore" "$ROOT/" "$RUNTIME/"
 printf 'old-build\n' > "$RUNTIME/.deploy-id"
+set_version "$RUNTIME" 1.0.0
 cp "$ROOT/scripts/framework.sh" "$CONTROL"
 chmod +x "$CONTROL"
 CONTROL_SHA_BEFORE="$(sha256sum "$CONTROL" | awk '{print $1}')"
@@ -92,10 +99,22 @@ mkdir -p "$RUNTIME/.runtime/observations"
 printf '{"schema":"termux-os.observations.v1","observations":[{"observation_id":"sentinel"}]}\n' \
   > "$RUNTIME/.runtime/observations/observations.v1.json"
 
-build_candidate good-build
-build_candidate broken-build broken
-build_candidate interrupted-build hanging
+build_candidate good-build good 1.0.1
+build_candidate broken-build broken 1.0.2
+build_candidate interrupted-build hanging 1.0.2
+build_candidate watch-build good 1.0.3
+build_candidate unhealthy-build good 1.0.4
+build_candidate u-a good 1.1.0
+build_candidate u-b good 1.1.0
+build_candidate u-broken broken 1.1.0
+build_candidate u-next good 1.1.1
 GOOD="$TMP/candidates/good-build/framework-good-build.tar.gz"
+WATCH="$TMP/candidates/watch-build/framework-watch-build.tar.gz"
+UNHEALTHY="$TMP/candidates/unhealthy-build/framework-unhealthy-build.tar.gz"
+cand() { printf '%s' "$TMP/candidates/$1/framework-$1.tar.gz"; }
+lg() { node -e 'try{const d=require(process.argv[1]);process.stdout.write(String(d[process.argv[2]]??""))}catch{}' "$PERSIST/backups/last-good.json" "$1"; }
+st() { node -e 'try{const d=require(process.argv[1]);process.stdout.write(String(d[process.argv[2]]??""))}catch{}' "$PERSIST/updates/state.v1.json" "$1"; }
+deployed() { curl -sf "$BASE_URL/api/dev/version" | node -pe 'JSON.parse(require("fs").readFileSync(0)).deploy_id'; }
 BROKEN="$TMP/candidates/broken-build/framework-broken-build.tar.gz"
 INTERRUPTED="$TMP/candidates/interrupted-build/framework-interrupted-build.tar.gz"
 
@@ -142,6 +161,12 @@ echo "--- 2. preflight + 正常 update ---"
 if run_control preflight-update "$GOOD" "$GOOD.sha256"; then ok "candidate preflight"; else bad "candidate preflight"; fi
 if run_control update "$GOOD" "$GOOD.sha256"; then ok "atomic update"; else bad "atomic update"; fi
 need test "$(curl -sf "$BASE_URL/api/dev/version" | node -pe 'JSON.parse(require("fs").readFileSync(0)).deploy_id')" = good-build
+# U1: a new version rotates the running build into last-good.
+if [ "$(lg deploy_id)" = old-build ] && [ "$(lg version)" = 1.0.0 ] && [ "$(st outcome)" = upgrade ]; then
+  ok "U1 1.0.0 → 1.0.1: last-good = 1.0.0"
+else
+  bad "U1 1.0.0 → 1.0.1: last-good = 1.0.0 (got $(lg deploy_id)/$(lg version), outcome $(st outcome))"
+fi
 if tar -tzf "$PERSIST/backups/last-good.tar.gz" | grep -qE '(^|/)AGENTS\.md$'; then
   bad "last-good contains sandbox-sensitive AGENTS symlink"
 else
@@ -191,7 +216,7 @@ if curl -sf -m 8 -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: app
 else
   bad "watcher active"
 fi
-if run_control update "$GOOD" "$GOOD.sha256" >/dev/null 2>&1; then bad "active watcher update refused"; else ok "active watcher update refused"; fi
+if run_control update "$WATCH" "$WATCH.sha256" >/dev/null 2>&1; then bad "active watcher update refused"; else ok "active watcher update refused"; fi
 need test "$(curl -sf "$BASE_URL/api/dev/version" | node -pe 'JSON.parse(require("fs").readFileSync(0)).deploy_id')" = good-build
 curl -sf -m 8 -X POST -H "Authorization: Bearer $TOKEN" \
   "$BASE_URL/api/dev/packages/$DEV_ID/stop" >/dev/null || bad "watcher stop"
@@ -292,18 +317,70 @@ echo "--- 10. 起不來的 Framework 仍然更新得動 ---"
 # 這裡曾經直接拒絕，於是設備卡死在壞掉的版本上，只能開 shell 手動救——而使用者沒有 shell。
 LAST_GOOD_BEFORE="$(sha256sum "$PERSIST/backups/last-good.tar.gz" | awk '{print $1}')"
 run_control stop >/dev/null 2>&1 || true
-if run_control update "$GOOD" "$GOOD.sha256" >/dev/null 2>&1; then
+if run_control update "$UNHEALTHY" "$UNHEALTHY.sha256" >/dev/null 2>&1; then
   ok "current 不健康時仍可更新"
 else
   bad "current 不健康時仍可更新"
 fi
-need test "$(curl -sf "$BASE_URL/api/dev/version" | node -pe 'JSON.parse(require("fs").readFileSync(0)).deploy_id')" = good-build
+need test "$(curl -sf "$BASE_URL/api/dev/version" | node -pe 'JSON.parse(require("fs").readFileSync(0)).deploy_id')" = unhealthy-build
 # 壞掉的版本不得覆蓋已知good的備份，否則「還能退回去」這個保證就沒了。
 if [ "$(sha256sum "$PERSIST/backups/last-good.tar.gz" | awk '{print $1}')" = "$LAST_GOOD_BEFORE" ]; then
   ok "不健康時保留既有 last-good 不覆蓋"
 else
   bad "不健康時保留既有 last-good 不覆蓋"
 fi
+
+echo "--- 11. same-version update 不是新的 rollback generation（U2–U5）---"
+A="$(cand u-a)"; B="$(cand u-b)"; BROKEN_B="$(cand u-broken)"; NEXT="$(cand u-next)"
+if run_control update "$A" "$A.sha256" >/dev/null 2>&1 && [ "$(deployed)" = u-a ]; then ok "1.1.0 build A installed"; else bad "1.1.0 build A installed"; fi
+BASE_LG_ID="$(lg deploy_id)"; BASE_LG_VERSION="$(lg version)"
+BASE_LG_SHA="$(sha256sum "$PERSIST/backups/last-good.tar.gz" | awk '{print $1}')"
+need test "$BASE_LG_VERSION" = 1.0.4
+
+if run_control update "$B" "$B.sha256" >/dev/null 2>&1 && [ "$(deployed)" = u-b ]; then ok "U2 build B replaced build A"; else bad "U2 build B replaced build A"; fi
+if [ "$(st outcome)" = same_version_replacement ] && [ "$(lg deploy_id)" = "$BASE_LG_ID" ] \
+  && [ "$(sha256sum "$PERSIST/backups/last-good.tar.gz" | awk '{print $1}')" = "$BASE_LG_SHA" ]; then
+  ok "U2 same_version_replacement keeps last-good = $BASE_LG_VERSION"
+else
+  bad "U2 same_version_replacement keeps last-good (outcome $(st outcome), last-good $(lg deploy_id))"
+fi
+if tail -n 1 "$PERSIST/updates/history.v1.jsonl" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const d=JSON.parse(s);
+  process.exit(d.outcome==="same_version_replacement"&&/^[0-9a-f]{64}$/.test(d.previous_archive_sha256||"")&&/^[0-9a-f]{64}$/.test(d.candidate_archive_sha256||"")&&d.previous_archive_sha256!==d.candidate_archive_sha256?0:1)})'; then
+  ok "U2 history records old and new archive SHA"
+else
+  bad "U2 history records old and new archive SHA"
+fi
+
+PID_BEFORE="$(cat "$RUNTIME/framework.pid" 2>/dev/null)"
+if run_control update "$B" "$B.sha256" >/dev/null 2>&1; then ok "U3 exact same archive accepted"; else bad "U3 exact same archive accepted"; fi
+if [ "$(st outcome)" = already_current ] && [ "$(cat "$RUNTIME/framework.pid" 2>/dev/null)" = "$PID_BEFORE" ] \
+  && [ "$(lg deploy_id)" = "$BASE_LG_ID" ] && [ "$(deployed)" = u-b ]; then
+  ok "U3 already_current: no restart, no reinstall, last-good untouched"
+else
+  bad "U3 already_current (outcome $(st outcome), pid $PID_BEFORE→$(cat "$RUNTIME/framework.pid" 2>/dev/null))"
+fi
+if run_control preflight-update "$B" "$B.sha256" >/dev/null 2>&1 \
+  && node -e 'process.exit(require(process.argv[1]).outcome==="already_current"?0:1)' "$PERSIST/updates/preflight.v1.json"; then
+  ok "U3 preflight reports already_current"
+else
+  bad "U3 preflight reports already_current"
+fi
+
+if run_control update "$BROKEN_B" "$BROKEN_B.sha256" >/dev/null 2>&1; then bad "U4 broken same-version build rejected"; else ok "U4 broken same-version build rejected"; fi
+if [ "$(deployed)" = u-b ] && [ "$(st status)" = failed_rolled_back ] && [ "$(lg deploy_id)" = "$BASE_LG_ID" ] \
+  && [ "$(sha256sum "$PERSIST/backups/last-good.tar.gz" | awk '{print $1}')" = "$BASE_LG_SHA" ]; then
+  ok "U4 build A-equivalent restored; last-good still $BASE_LG_VERSION"
+else
+  bad "U4 restore (deployed $(deployed), status $(st status), last-good $(lg deploy_id))"
+fi
+
+if run_control update "$NEXT" "$NEXT.sha256" >/dev/null 2>&1 && [ "$(deployed)" = u-next ]; then ok "U5 1.1.1 installed"; else bad "U5 1.1.1 installed"; fi
+if [ "$(lg deploy_id)" = u-b ] && [ "$(lg version)" = 1.1.0 ] && [ "$(st outcome)" = upgrade ]; then
+  ok "U5 last-good = the current good 1.1.0 build (u-b)"
+else
+  bad "U5 last-good = u-b (got $(lg deploy_id)/$(lg version))"
+fi
+if run_control rollback >/dev/null 2>&1 && [ "$(deployed)" = u-b ]; then ok "U5 rollback returns to 1.1.0 build B"; else bad "U5 rollback returns to 1.1.0 build B"; fi
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

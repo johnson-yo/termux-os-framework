@@ -15,6 +15,15 @@ worktree or runtime instance.
   source repository on another machine. It previews the target, transfers only the selected Git repository, atomically
   replaces the installed active worktree, and reloads that same Package ID.
 - Delegate release and installation to the Core Package Manager; do not duplicate its rules.
+- Agent control surface: `lib/lifecycle.mjs` (`restore`, `rollback`, `uninstall`, `dev backup|backups|
+  restore-backup`) runs the same Package jobs the WebUI uses and reports the installer's refusal codes
+  unchanged; `lib/service.mjs` (`service …`) is a thin client of `/api/stage/services` with a post-check;
+  `dev status` is the single Agent status (`agentStatus` in `lib/dev.mjs`). No SDK command wraps `git`
+  or GitHub, and none makes a safety decision of its own.
+- `--json`: stdout is exactly one JSON object (`util.enterJsonMode` routes every other write and child
+  stdout to stderr). `--json` and the protection flags are boolean (`util.BOOLEAN_FLAGS`).
+- `termux-os-sdk` resolves its own symlink: Framework links `$PREFIX/bin/termux-os-sdk` to it at every
+  start (`src/system/sdk-shim.mjs`).
 - Return non-zero on failure and include a stable error code plus a concrete next step.
 - `dev-mount` may expose a user-private SSHFS view of the one reconciled active
   Installed Root worktree; it must never create a Package, worktree, runtime owner,
@@ -28,4 +37,5 @@ worktree or runtime instance.
 - Keep `AI_AGENT_PROMPT.md`, generated manifests, and generated WebUI aligned with the current Core contracts.
 - Keep `PUBLISHING.md` aligned with the public GitHub, Registry, and phone-market contracts.
 
-Run `bash scripts/smoke-sdk.sh` after changing generators, templates, schemas, or CLI flow.
+Run `bash scripts/smoke-sdk.sh` after changing generators, templates, schemas, or CLI flow, and
+`node scripts/smoke-agent-surface.mjs` after changing the Agent control surface or JSON output.

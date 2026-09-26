@@ -95,6 +95,19 @@ declared `verify-device` hook before claiming device readiness.
 
 ## Publish the GitHub source
 
+GitHub is not part of the Framework runtime. Framework has no GitHub login, token storage,
+credential manager, or push wrapper, and its WebUI never asks for a GitHub token. GitHub
+credentials belong to the developer's normal Git/gh environment, not Framework configuration.
+
+For a Package created on the phone with `termux-os-sdk new --dev`, after local acceptance:
+
+1. replace the placeholder Git identity (`termux-os-local@localhost.invalid`) with your real one in
+   that repository (`git config user.name …`, `git config user.email …`);
+2. add a normal Git remote to the installed work tree;
+3. push with `git` or `gh`;
+4. create and push the version tag;
+5. register the release with the Registry tools below.
+
 Use a clean public repository and a stable version tag:
 
 ```sh

@@ -11,6 +11,12 @@ const api = (...args) => window.TermuxOS.api(...args);
 // 所有界面文字都经过下面这几个组件，所以翻译只在这里接一次。
 // 经典脚本共用同一个全局作用域，所以这里不能叫 t——i18n.js 已经声明了那个名字。
 const tr = (value) => (window.TermuxOSI18n?.t ? window.TermuxOSI18n.t(value) : value);
+/**
+ * A translatable template with named slots: tf('{count} 个本地提交', { count: 3 }). The template —
+ * not the filled-in text — is the catalog key, so a translation can move the slot where its
+ * grammar needs it.
+ */
+const tf = (template, vars = {}) => String(tr(template)).replace(/\{(\w+)\}/g, (slot, key) => (key in vars ? String(vars[key]) : slot));
 
 const text = (tag, value, className) => Object.assign(document.createElement(tag), {
   // 翻译在这里发生：所有界面文字都经由 text/valueRow/statusRow/actionButton 产生，
@@ -1253,15 +1259,15 @@ const linkButton = (label, href, variant = '', { newTab = false } = {}) => {
 
 function confirmAction({ title, label, details, acknowledgement = null }) {
   const dialog = $('confirm-dialog');
-  $('confirm-title').textContent = title;
-  $('confirm-submit').textContent = label;
+  $('confirm-title').textContent = tr(title);
+  $('confirm-submit').textContent = tr(label);
   $('confirm-details').replaceChildren(...details.map(([key, value]) => valueRow(key, value)));
   const ackWrap = $('confirm-ack-wrap');
   const ack = $('confirm-ack');
   const ackText = $('confirm-ack-text');
   ack.checked = false;
   ackWrap.hidden = !acknowledgement;
-  ackText.textContent = acknowledgement ?? '';
+  ackText.textContent = acknowledgement ? tr(acknowledgement) : '';
   $('confirm-submit').disabled = Boolean(acknowledgement);
   const updateAck = () => { $('confirm-submit').disabled = Boolean(acknowledgement) && !ack.checked; };
   ack.addEventListener('change', updateAck);
@@ -1292,11 +1298,11 @@ function chooseAction({ title, details = [], note = null, choices }) {
   }
   const form = document.createElement('form');
   form.method = 'dialog';
-  const heading = document.createElement('h2'); heading.textContent = title;
+  const heading = document.createElement('h2'); heading.textContent = tr(title);
   const rows = document.createElement('div'); rows.className = 'confirm-details';
   rows.replaceChildren(...details.map(([key, value]) => valueRow(key, value)));
   form.append(heading, rows);
-  if (note) { const p = document.createElement('p'); p.className = 'alert warning'; p.textContent = note; form.append(p); }
+  if (note) { const p = document.createElement('p'); p.className = 'alert warning'; p.textContent = tr(note); form.append(p); }
   const row = document.createElement('div'); row.className = 'button-row choice-row';
   const cancel = document.createElement('button'); cancel.value = 'cancel'; cancel.textContent = tr('取消');
   cancel.className = buttonClass('');

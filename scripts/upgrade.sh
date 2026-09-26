@@ -57,11 +57,29 @@ else
   download_archive "$INSTALL_VERSION"
 fi
 
+INCOMING_SHA="${INSTALL_SHA256:-$(sha256sum "$INSTALL_ARCHIVE" | awk '{print $1}')}"
+CURRENT_SHA="$(json_field "$FRAMEWORK_RUNTIME/.framework-release.json" archive_sha256 2>/dev/null || true)"
+LAST_GOOD_META="$FRAMEWORK_PERSIST/backups/last-good.json"
+
+# Same version is not a new rollback generation (see framework.sh cmd_update). The exact archive
+# already running and healthy is a no-op: no stop, no reinstall, last-good untouched.
+OUTCOME=upgrade
+if [ "$current" = "$INSTALL_VERSION" ]; then
+  if [ -n "$CURRENT_SHA" ] && [ "$CURRENT_SHA" = "$INCOMING_SHA" ] && running; then
+    say "outcome=already_current version=$INSTALL_VERSION sha256=$INCOMING_SHA"
+    exit 0
+  fi
+  OUTCOME=same_version_replacement
+fi
+say "outcome=$OUTCOME version=${current:-none}->$INSTALL_VERSION sha256=${CURRENT_SHA:-unknown}->$INCOMING_SHA"
+
 # A Framework that cannot start is exactly the one that needs upgrading. Refusing here left such a
 # device with no way forward through either the panel or this installer, which is the situation the
 # upgrade path exists for. The existing last-good is preserved rather than overwritten with a build
 # that just failed its own health check.
-if [ -f "$FRAMEWORK_CONTROL" ]; then
+if [ "$OUTCOME" = same_version_replacement ] && [ -f "$LAST_GOOD_META" ]; then
+  say "same version: last-good stays $(json_field "$LAST_GOOD_META" deploy_id 2>/dev/null || echo unknown)"
+elif [ -f "$FRAMEWORK_CONTROL" ]; then
   if ! run_controller backup >/dev/null 2>&1; then
     say "current Framework failed its health check; keeping the existing last-good and upgrading anyway"
   fi

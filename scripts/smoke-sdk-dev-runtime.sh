@@ -210,10 +210,10 @@ SVC_AFTER=$(curl -s -H "$AUTH" $B/api/stage/services | python3 -c "
 import json,sys;print(','.join(sorted(s['id'] for s in json.load(sys.stdin)['services'])))")
 [ "$SVC_BEFORE" = "$SVC_AFTER" ] && ok "reload 前後 service id 完全相同" || bad "service id 變了: $SVC_BEFORE → $SVC_AFTER"
 curl -s -H "$AUTH" $B/api/packages/$ID | grep -q '"id"' && ok "唯一 package 記錄仍可查" || bad "package 記錄丟失"
-$SDK dev status $ID --json | python3 -c "
-import json,sys; d=json.load(sys.stdin); r=d['reconcile']
-assert r['active']['path']==d['version_dir'] and d['runtime_generation'] and not r['stale_generations']
-assert len(d['services'])==len(set(d['services']))
+$SDK dev status $ID --json --verbose | python3 -c "
+import json,sys; d=json.load(sys.stdin); r=d['framework']['reconcile']
+assert r['active']['path']==d['worktree'] and d['runtime_generation'] and not r['stale_generations']
+ids=[s['id'] for s in d['services']]; assert len(ids)==len(set(ids))
 assert r['previous'] is None or r['previous']['path'] != r['active']['path']" \
   && ok "reconcile 對齊 active/previous，generation 單 owner" || bad "reconcile/generation"
 
@@ -221,7 +221,7 @@ echo "--- 11b. legacy/duplicate identity gates ---"
 mkdir -p "$WORK/legacy/$ID"
 cp "$V/termux-os.package.json" "$WORK/legacy/$ID/termux-os.package.json"
 tf "legacy source blocks dev start" $SDK dev start $ID --json
-$SDK dev status $ID --json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['state']=='conflicted' and d['reconcile']['legacy_workspaces']" \
+$SDK dev status $ID --json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['state']=='conflicted' and d['conflict'] and d['legacy_workspaces']" \
   && ok "legacy workspace is reported, not loaded" || bad "legacy reconcile"
 rm -rf "$WORK/legacy/$ID"
 mkdir -p "$WORK/installed/duplicate/versions/0.1.0"

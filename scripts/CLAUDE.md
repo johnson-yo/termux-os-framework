@@ -5,6 +5,12 @@ Scripts here operate Framework Core, deterministic releases, local fixtures, or 
 - Device aliases, IP addresses, product engines, models, and vendor build tools do not belong here.
 - Tests must isolate home, ports, Installed Root, state, and generated artifacts.
 - `framework.sh` is the runtime controller. On Termux it is installed in private Home as `~/framework.sh`; the installed controller has a POSIX trampoline so direct execution works on Android even though Android lacks `/usr/bin/env`, while the implementation still runs under Termux Bash. Controller-driven uploaded updates preserve that trusted file. The independent verified-Registry installer and public `install.sh`, `upgrade.sh`, and `uninstall.sh` entrypoints are the source-release lifecycle path and stage the verified candidate controller before stopping an older runtime, so a legacy Core can hand stop into its own Android SELinux domain without granting root or weakening process identity checks.
+- Last-good is one rollback generation per version. `framework.sh update` and `upgrade.sh` classify
+  every run as `upgrade` (rotate the running build into last-good), `same_version_replacement` (a
+  different build of the running version; last-good is kept) or `already_current` (the exact running
+  archive, healthy: nothing is touched). The runtime records its archive in `.framework-release.json`;
+  state, preflight and history carry the outcome and both archive SHA-256 values.
+  `smoke-framework-update.sh` U1–U5 and `smoke-framework-installer.sh` pin this.
 - `termux-os-bootstrap.sh` is the sole Termux login recovery bridge. It is installed with the Framework runtime under `~/.termux-os/framework/scripts/`, owns only bounded ADB/SSHD/Core recovery, and never starts a Package Work directly. It appends to one log per boot (`boot-<epoch>.log` in the state directory, newest two kept, older ones deleted) and keeps `termux-os-bootstrap.log` as a symlink to the current boot, recording the scan geometry each round so a failed recovery can be retraced afterwards. Discovery is a single port sweep over the kernel ephemeral range (32768-60999); the adb mDNS path is deliberately absent because the target's adb build rejects `mdns services` outright while still costing seconds of the round budget on a cold adb server. `test-termux-os-bootstrap.sh` covers its fixed paths, lock contract, scan geometry, and per-boot retention without a device.
 - `framework.sh reset-password` is the local private-auth recovery command; it
   must never accept or persist a password through public Framework config.
@@ -36,3 +42,6 @@ Scripts here operate Framework Core, deterministic releases, local fixtures, or 
   runtime. They preserve private configuration, credentials, Package data,
   models, caches, and runtime observations outside the release tree.
 - Shell scripts keep the shebang first, followed by an English Apache-2.0 header.
+- `smoke-agent-surface.mjs` pins the Agent control surface: `termux-os-sdk` on PATH, pure `--json`
+  stdout, `service`, `restore`/`rollback`/`uninstall`, development backups, `dev status`, and the
+  en/ja/zh-Hant translation of the Development/Restore/backup WebUI.

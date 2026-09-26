@@ -482,6 +482,12 @@ UPDATE_ID=""
 PREVIOUS_BUILD=""
 CANDIDATE_BUILD=""
 CANDIDATE_DIR=""
+# upgrade | same_version_replacement | already_current | rollback — what this run means for last-good.
+UPDATE_OUTCOME=""
+PREVIOUS_VERSION=""
+CANDIDATE_VERSION=""
+PREVIOUS_SHA=""
+CANDIDATE_SHA=""
 OLD_RUNTIME=""
 SWAPPED=0
 UPDATE_ACTIVE=0
@@ -493,7 +499,9 @@ write_state() {
   mkdir -p "$UPDATE_DIR"
   STATE_FILE="$UPDATE_DIR/state.v1.json" UPDATE_ID="$UPDATE_ID" PREVIOUS_BUILD="$PREVIOUS_BUILD" \
     CANDIDATE_BUILD="$CANDIDATE_BUILD" UPDATE_STAGE="$stage" UPDATE_STATUS="$status" \
-    UPDATE_MESSAGE="$message" UPDATE_ROLLBACK="$rollback" node <<'NODE'
+    UPDATE_MESSAGE="$message" UPDATE_ROLLBACK="$rollback" UPDATE_OUTCOME="$UPDATE_OUTCOME" \
+    PREVIOUS_VERSION="$PREVIOUS_VERSION" CANDIDATE_VERSION="$CANDIDATE_VERSION" \
+    PREVIOUS_SHA="$PREVIOUS_SHA" CANDIDATE_SHA="$CANDIDATE_SHA" node <<'NODE'
 const fs = require('fs');
 const p = process.env.STATE_FILE;
 let previous = null;
@@ -503,6 +511,11 @@ const state = {
   update_id: process.env.UPDATE_ID,
   previous_build: process.env.PREVIOUS_BUILD || null,
   candidate_build: process.env.CANDIDATE_BUILD || null,
+  outcome: process.env.UPDATE_OUTCOME || null,
+  previous_version: process.env.PREVIOUS_VERSION || null,
+  candidate_version: process.env.CANDIDATE_VERSION || null,
+  previous_archive_sha256: process.env.PREVIOUS_SHA || null,
+  candidate_archive_sha256: process.env.CANDIDATE_SHA || null,
   stage: process.env.UPDATE_STAGE,
   status: process.env.UPDATE_STATUS,
   message: process.env.UPDATE_MESSAGE || null,
@@ -520,7 +533,8 @@ write_preflight_result() {
   local status="$1" message="${2:-}" archive="${3:-}"
   PREFLIGHT_FILE="$UPDATE_DIR/preflight.v1.json" PREFLIGHT_ID="$UPDATE_ID" \
     PREFLIGHT_STATUS="$status" PREFLIGHT_MESSAGE="$message" PREFLIGHT_BUILD="$CANDIDATE_BUILD" \
-    PREFLIGHT_ARCHIVE="$archive" node <<'NODE'
+    PREFLIGHT_ARCHIVE="$archive" PREFLIGHT_OUTCOME="$UPDATE_OUTCOME" \
+    PREFLIGHT_CURRENT_VERSION="$PREVIOUS_VERSION" PREFLIGHT_CANDIDATE_VERSION="$CANDIDATE_VERSION" node <<'NODE'
 const fs = require('fs');
 const file = process.env.PREFLIGHT_FILE;
 const archive = process.env.PREFLIGHT_ARCHIVE;
@@ -532,6 +546,11 @@ fs.writeFileSync(`${file}.tmp`, `${JSON.stringify({
   status: process.env.PREFLIGHT_STATUS,
   candidate_build: process.env.PREFLIGHT_BUILD || null,
   archive_sha256: sha256,
+  // What an update with this archive would mean: upgrade, same_version_replacement (last-good
+  // kept) or already_current (no-op while the running Framework is healthy).
+  outcome: process.env.PREFLIGHT_OUTCOME || null,
+  current_version: process.env.PREFLIGHT_CURRENT_VERSION || null,
+  candidate_version: process.env.PREFLIGHT_CANDIDATE_VERSION || null,
   message: process.env.PREFLIGHT_MESSAGE || null,
   checked_at: new Date().toISOString(),
 }, null, 2)}\n`);
@@ -548,6 +567,8 @@ const s = JSON.parse(fs.readFileSync(process.env.STATE_FILE, 'utf8'));
 fs.appendFileSync(process.env.HISTORY_FILE, `${JSON.stringify({
   schema: 'termux-os.framework-update-history.v1',
   update_id: s.update_id, previous_build: s.previous_build, candidate_build: s.candidate_build,
+  outcome: s.outcome ?? null, previous_version: s.previous_version ?? null, candidate_version: s.candidate_version ?? null,
+  previous_archive_sha256: s.previous_archive_sha256 ?? null, candidate_archive_sha256: s.candidate_archive_sha256 ?? null,
   result: process.env.RESULT, rollback: process.env.ROLLBACK === 'true',
   message: process.env.MESSAGE || null, at: new Date().toISOString(),
 })}\n`);
@@ -557,6 +578,29 @@ NODE
 state_field() {
   node -e 'const fs=require("fs");try{const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
     process.stdout.write(String(d[process.argv[2]]??""))}catch{}' "$UPDATE_DIR/state.v1.json" "$1"
+}
+
+json_file_field() {
+  node -e 'const fs=require("fs");try{const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    process.stdout.write(String(d[process.argv[2]]??""))}catch{}' "$1" "$2"
+}
+
+# The archive a runtime was installed from. Both update paths record it in the runtime itself:
+# the Registry installer writes .framework-release.json, and so does cmd_update below.
+current_archive_sha() { json_file_field "$RUNTIME/.framework-release.json" archive_sha256; }
+
+write_release_record() {
+  local root="$1" version="$2" sha="$3"
+  RELEASE_FILE="$root/.framework-release.json" RELEASE_VERSION="$version" RELEASE_SHA="$sha" node <<'NODE'
+const fs = require('fs');
+const file = process.env.RELEASE_FILE;
+fs.writeFileSync(`${file}.tmp`, `${JSON.stringify({
+  schema: 'termux-os.framework-release.v1', source: 'archive_update',
+  version: process.env.RELEASE_VERSION, kind: 'framework_archive',
+  archive_sha256: process.env.RELEASE_SHA, installed_at: new Date().toISOString(),
+}, null, 2)}\n`);
+fs.renameSync(`${file}.tmp`, file);
+NODE
 }
 
 save_previous_controller() {
@@ -738,11 +782,16 @@ cmd_preflight_update() {
     write_preflight_result failed "candidate validation failed" "$tarball"
     exit 1
   fi
-  if ! ensure_no_dev_mounts; then
+  CANDIDATE_VERSION="$(json_file_field "$CANDIDATE_DIR/package.json" version)"
+  PREVIOUS_VERSION="$(json_file_field "$RUNTIME/package.json" version)"
+  if [ "$CANDIDATE_VERSION" != "$PREVIOUS_VERSION" ]; then UPDATE_OUTCOME=upgrade
+  elif [ "$(current_archive_sha)" = "$(archive_sha "$tarball")" ]; then UPDATE_OUTCOME=already_current
+  else UPDATE_OUTCOME=same_version_replacement; fi
+  if [ "$UPDATE_OUTCOME" != already_current ] && ! ensure_no_dev_mounts; then
     write_preflight_result failed "active Dev Runtime prevents update" "$tarball"
     exit 1
   fi
-  write_preflight_result success "candidate preflight passed" "$tarball"
+  write_preflight_result success "candidate preflight passed ($UPDATE_OUTCOME)" "$tarball"
   rm -rf "$STAGE_ROOT/$UPDATE_ID"
 }
 
@@ -768,13 +817,16 @@ cmd_backup() {
   mv "$tar_tmp" "$tar_final"
   printf '%s  %s\n' "$sha" "$(basename "$tar_final")" > "$tar_final.sha256"
   LAST_GOOD_META="$PERSIST/backups/last-good.json" LAST_GOOD_BUILD="$build" \
-    LAST_GOOD_SHA="$sha" node <<'NODE'
+    LAST_GOOD_SHA="$sha" LAST_GOOD_VERSION="$(json_file_field "$RUNTIME/package.json" version)" \
+    LAST_GOOD_RELEASE_SHA="$(current_archive_sha)" node <<'NODE'
 const fs = require('fs');
 const p = process.env.LAST_GOOD_META;
 const d = {
   schema: 'termux-os.framework-last-good.v1',
   created_at: new Date().toISOString(),
   deploy_id: process.env.LAST_GOOD_BUILD,
+  version: process.env.LAST_GOOD_VERSION || null,
+  release_archive_sha256: process.env.LAST_GOOD_RELEASE_SHA || null,
   archive_sha256: process.env.LAST_GOOD_SHA,
   health: 'passed',
 };
@@ -872,7 +924,28 @@ cmd_update() {
   save_previous_controller || die "無法保存當前 controller"
 
   preflight_candidate "$tarball" "$sidecar" || die "candidate preflight 失敗"
-  [ "$CANDIDATE_BUILD" != "$PREVIOUS_BUILD" ] || say "同 build 更新：仍執行完整驗證"
+  CANDIDATE_VERSION="$(json_file_field "$CANDIDATE_DIR/package.json" version)"
+  PREVIOUS_VERSION="$(json_file_field "$RUNTIME/package.json" version)"
+  CANDIDATE_SHA="$(archive_sha "$tarball")"
+  PREVIOUS_SHA="$(current_archive_sha)"
+
+  # Same version is not a new rollback generation. The exact archive already running (and
+  # healthy) is a no-op: no restart, no reinstall, last-good untouched. A different build of the
+  # same version is still allowed for Framework development, but it never rotates last-good.
+  if [ -n "$CANDIDATE_VERSION" ] && [ "$CANDIDATE_VERSION" = "$PREVIOUS_VERSION" ]; then
+    if [ -n "$PREVIOUS_SHA" ] && [ "$PREVIOUS_SHA" = "$CANDIDATE_SHA" ] && core_check "$PREVIOUS_BUILD" 1 >/dev/null 2>&1; then
+      UPDATE_OUTCOME=already_current
+      write_state complete success "already_current: $CANDIDATE_VERSION archive $CANDIDATE_SHA is running" false
+      append_history success false "already_current; nothing changed"
+      UPDATE_SUCCESS=1
+      say "already_current: $CANDIDATE_VERSION (${CANDIDATE_SHA:0:12}) is the running archive; nothing changed"
+      return 0
+    fi
+    UPDATE_OUTCOME=same_version_replacement
+    say "same_version_replacement: $PREVIOUS_VERSION ${PREVIOUS_SHA:0:12} → ${CANDIDATE_SHA:0:12}; last-good is kept"
+  else
+    UPDATE_OUTCOME=upgrade
+  fi
   ensure_no_dev_mounts || die "Dev Runtime active，更新未動現場"
   snapshot_boundaries "$UPDATE_DIR/$UPDATE_ID.before"
 
@@ -880,7 +953,9 @@ cmd_update() {
   # Framework 連自己的更新通道都用不了，只能開 shell 手動救——而使用者沒有 shell。
   # 保留既有 last-good 不覆蓋（不能拿壞掉的版本蓋掉已知good），但更新照常進行。
   write_state last_good running "保存健康舊版本" false
-  if ( cmd_backup ); then
+  if [ "$UPDATE_OUTCOME" = same_version_replacement ] && [ -f "$PERSIST/backups/last-good.tar.gz" ]; then
+    say "same version: last-good stays $(last_good_build) ($(last_good_field version))"
+  elif ( cmd_backup ); then
     :
   else
     if [ -f "$PERSIST/backups/last-good.tar.gz" ]; then
@@ -893,6 +968,7 @@ cmd_update() {
 
   write_state switch running "停止並原子切換 runtime" false
   switch_candidate || die "runtime 原子切換失敗"
+  write_release_record "$RUNTIME" "$CANDIDATE_VERSION" "$CANDIDATE_SHA"
 
   write_state start running "啟動 candidate" false
   start_runtime || die "candidate 啟動失敗"
@@ -905,8 +981,8 @@ cmd_update() {
       die "Installed/Persistent/Observations 邊界在更新中發生變化"; }
 
   verify_private_controller || die "private controller verification failed"
-  write_state complete success "Framework update 完成" false
-  append_history success false "post-check passed"
+  write_state complete success "Framework update 完成 ($UPDATE_OUTCOME)" false
+  append_history success false "post-check passed; $UPDATE_OUTCOME"
   UPDATE_SUCCESS=1
   rm -rf "$OLD_RUNTIME"
   say "update success: $PREVIOUS_BUILD → $CANDIDATE_BUILD"
@@ -951,6 +1027,7 @@ cmd_rollback() {
   acquire_update_lock || die "無法取得 Framework update lock"
   UPDATE_ID="rollback-$(date +%Y%m%d-%H%M%S)-$$"
   PREVIOUS_BUILD="$(current_build)"
+  UPDATE_OUTCOME=rollback
   UPDATE_ACTIVE=1
   trap update_exit EXIT
   trap 'exit 130' INT TERM HUP

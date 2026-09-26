@@ -13,9 +13,45 @@ termux-os-sdk dev start org.example.app.my-app     # hot reload while you edit
 cd "$(termux-os-sdk dev status org.example.app.my-app --json | node -pe 'JSON.parse(require("fs").readFileSync(0)).worktree')"
 # edit web/, test in Chrome at http://127.0.0.1:8980/packages/org.example.app.my-app/
 git switch -c feature/x && git commit -am "…"     # the installed work tree is the Git repository
+termux-os-sdk test org.example.app.my-app --json
+termux-os-sdk verify-device org.example.app.my-app --dev --json
 termux-os-sdk release org.example.app.my-app       # builds from that same work tree
 termux-os-sdk install /absolute/path/to/release.tar.gz   # first official Release (same version)
 ```
+
+`termux-os-sdk` is on `PATH`: every Framework start links `$PREFIX/bin/termux-os-sdk` to the
+active Framework's `sdk/termux-os-sdk`, so it follows updates and rollbacks and never goes stale.
+A file of that name that Framework did not create is left alone (reported as a collision in
+`/api/access-info`).
+
+### The Agent control surface
+
+Framework lifecycle goes through the SDK; source history goes through `git`; GitHub goes through
+`git`/`gh`. An Agent never needs `curl`, `scripts/package-manager.mjs`, or `scripts/package-job.mjs`.
+
+| Need | Command |
+| --- | --- |
+| Everything about one Package (state, work tree, Git lineage, watcher, last reload, rollback, services, backups) | `termux-os-sdk dev status <id> --json` |
+| Watch / reload / stop watching | `termux-os-sdk dev start\|reload\|stop <id>` |
+| Enter Development on an official Package | `termux-os-sdk dev activate <id>` |
+| Stage services | `termux-os-sdk service list [<id>]`, `service status\|start\|stop\|restart\|logs <service-id>` |
+| Back up / list / restore the whole work tree (`.git` included) | `termux-os-sdk dev backup\|backups <id>`, `dev restore-backup <id> <backup>` |
+| Return to the verified official Release | `termux-os-sdk restore <id>` |
+| Switch to the previous installed Release | `termux-os-sdk rollback <id>` |
+| Uninstall (keeps `config/`) | `termux-os-sdk uninstall <id>` |
+
+`restore`, `uninstall`, and `dev restore-backup` refuse with `development_backup_required` (or
+`local_history_present`) when they would destroy local history. Choose explicitly:
+`--preserve-development` backs the work tree up first; `--force-discard` discards it. These are
+the same guards the WebUI uses; the SDK adds no safety decision of its own.
+
+`install`, `restore`, `rollback`, and `dev restore-backup` replace the version directory atomically,
+so a shell that was inside the old work tree is left in a deleted directory. Re-enter it afterwards:
+`cd "$(termux-os-sdk dev status <id> --json | node -pe 'JSON.parse(require("fs").readFileSync(0)).worktree')"`.
+
+With `--json`, stdout is exactly one JSON object and every log line goes to stderr, so
+`OUT="$(termux-os-sdk … --json)"` can be parsed directly. Failures carry a stable `code` and a
+concrete `fix`. There is intentionally no `termux-os-sdk git …`, `branch`, or `push`: use Git.
 
 `new --dev` creates a *development-only* Installed Package: `~/.termux-os/packages/<id>/versions/<v>/`
 is its one Git work tree (a local baseline commit, a repo-local Git identity — a marked placeholder

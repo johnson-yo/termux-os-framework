@@ -7,6 +7,7 @@
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
 
+import { ensureSdkShim } from './system/sdk-shim.mjs';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -1818,7 +1819,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
   {
-    const m = url.match(/^\/api\/admin\/package-manager\/packages\/([\w.@-]+)\/(rollback|uninstall|restore|restore-backup)$/);
+    const m = url.match(/^\/api\/admin\/package-manager\/packages\/([\w.@-]+)\/(rollback|uninstall|restore|restore-backup|backup)$/);
     if (m && req.method === 'POST') {
       try {
         const body = await readBody(req);
@@ -2808,6 +2809,7 @@ const server = http.createServer(async (req, res) => {
         port: PORT,
         health: 'ok',   // 這個請求本身能被回答，就說明 framework 活著
       }),
+      sdk_command: { status: SDK_SHIM.status, link: SDK_SHIM.link ?? null, reason: SDK_SHIM.reason ?? null },
     });
   }
 
@@ -2990,8 +2992,14 @@ server.on('upgrade', (req, socket, head) => {
   });
 });
 
+let SDK_SHIM = { status: 'pending' };
 server.listen(PORT, HOST, () => {
   controlPlaneListening = true;
   console.log(`termux-os-framework listening on http://${HOST}:${PORT} (config: ${CONFIG_PATH})`);
+  // Every start (install, update, rollback) re-asserts `termux-os-sdk` on PATH for this Framework.
+  SDK_SHIM = ensureSdkShim({ frameworkRoot: ROOT });
+  if (!['current', 'skipped', 'disabled'].includes(SDK_SHIM.status)) {
+    console.log(`[sdk] termux-os-sdk on PATH: ${SDK_SHIM.status}${SDK_SHIM.reason ? ` (${SDK_SHIM.reason})` : ''} ${SDK_SHIM.link ?? ''}`);
+  }
   setImmediate(beginStartupRestore);
 });

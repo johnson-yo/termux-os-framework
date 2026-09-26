@@ -16,11 +16,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { installedRoot, ACTIVE_FILENAME, ACTIVE_SCHEMA } from './installed-root.mjs';
 import { writeDevelopment } from './provenance.mjs';
+import { PLACEHOLDER_IDENTITY } from './git-state.mjs';
 
+export { PLACEHOLDER_IDENTITY };
 export const SOURCE_KIND_DEVELOPMENT = 'development';
-export const PLACEHOLDER_IDENTITY = Object.freeze({
-  name: 'Termux-OS Local Developer', email: 'termux-os-local@localhost.invalid',
-});
 
 const git = (dir, args, env = {}) => execFileSync('git', ['-C', dir, ...args], {
   encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, LC_ALL: 'C', ...env },

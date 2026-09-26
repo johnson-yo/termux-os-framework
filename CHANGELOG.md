@@ -2,6 +2,44 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.16
+
+The first public release with the complete on-device development loop. It includes everything
+listed under 0.3.13, 0.3.14 and 0.3.15, which were device-validated development milestones and
+were not published separately: a resilient Dev Runtime, sticky Development provenance with
+protected local history, and on-phone zero-create. This release finishes the Agent control
+surface and makes Framework updates keep a real rollback generation.
+
+- `termux-os-sdk` is on `PATH`: every Framework start links `$PREFIX/bin/termux-os-sdk` to the
+  active Framework's SDK, so it follows updates and rollbacks and never holds a stale copy. A file
+  of that name that Framework did not create is reported as a collision and left alone; no shell
+  rc file is written. The executable resolves its own symlink.
+- `--json` is machine-readable for every SDK command: stdout is exactly one JSON object; stage
+  banners, builder output, doctor and test child output go to stderr. `--json` and the protection
+  flags are boolean, so `--json <package-id>` no longer swallows the ID.
+- `termux-os-sdk service list [<package-id>]` and `service status|start|stop|restart|logs
+  <service-id>` control Stage services through the existing API, with a post-check after every
+  change and stable codes (`service_not_found`, `service_postcheck_failed`).
+- `termux-os-sdk restore|rollback|uninstall <package-id>` and `termux-os-sdk dev backup|backups|
+  restore-backup` run the same Package jobs and Task04 guards the WebUI uses, with
+  `--preserve-development` / `--force-discard`; refusals keep the installer's stable codes. A
+  manual development backup is a Package job (`backup`).
+- `termux-os-sdk dev status <id> --json` is the single Agent status: state, provenance, work tree,
+  version, Git branch/HEAD/released HEAD/commits ahead/stash/local refs, watcher, last reload,
+  rollback target, live services with PIDs, and the backup count.
+- Entering Development makes `git commit` work at once: with no Git identity, a marked placeholder
+  is written to that repository's `.git/config` (an official Release's `.git/config` has none).
+- Framework update: the same version is never a new rollback generation. The exact running
+  archive is `already_current` (no restart, no reinstall); a different build of the same version
+  is `same_version_replacement` and keeps last-good; a failed replacement restores the previous
+  build and leaves last-good untouched. Both the upload path and the Registry installer record the
+  outcome and the old and new archive SHA-256.
+- WebUI: the Development / Restore / backup / uninstall copy is translated into English, Japanese
+  and Traditional Chinese (`tf()` templates instead of glued sentences); dialog titles, buttons and
+  notes now pass through translation.
+- Documentation: the Agent control-surface table, phone-first flow with test and verify, and the
+  GitHub responsibility boundary (credentials stay in the developer's Git/gh environment).
+
 ## 0.3.15
 
 - Add on-device zero-create: `termux-os-sdk new --type app --template web --dev`

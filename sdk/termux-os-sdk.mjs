@@ -7,10 +7,12 @@
  * [PROTOCOL]: Keep this English header synchronized with behavior and public contracts.
  */
 
-import { parseArgs } from './lib/util.mjs';
+import { enterJsonMode, parseArgs } from './lib/util.mjs';
 
 const [cmd, ...rest] = process.argv.slice(2);
 const { flags, pos } = parseArgs(rest);
+// --json: stdout carries exactly one JSON object; every log line goes to stderr.
+if (flags.json) enterJsonMode();
 
 const HELP = `termux-os-sdk — Extension Package SDK
 
@@ -33,7 +35,12 @@ http://127.0.0.1:8980. For another device, use a private
                                        Generate source in a Git-oriented source root;
                                        legacy ~/termux-os-dev/packages is not used
   dev start|status|reload|logs|stop <package-id>
-                                       Watch/reload the one active worktree
+                                       Watch/reload the one active worktree; dev status
+                                       is the single Agent status (state, work tree, Git,
+                                       watcher, reload, rollback, services)
+  dev backup|backups <package-id>      Back up / list the whole work tree (.git included)
+  dev restore-backup <package-id> <backup> [--preserve-development|--force-discard]
+                                       Restore a development backup
   dev activate <package-id>            Mark the installed Package as being developed
                                        (sticky; only a verified official restore/install ends it)
   dev sync <package-id> --connection <c> [--source <repo>]
@@ -53,8 +60,24 @@ http://127.0.0.1:8980. For another device, use a private
                                        installed mode binds exact Release identity
   handoff <package-id>                 Generate current-facts handoff material
 
-Every command exits zero only on success. --json emits one machine-readable
-object. Failures include a stable code and a concrete next step.`;
+Installed Package lifecycle (the same jobs and guards as the WebUI):
+  restore <package-id> [--preserve-development|--force-discard]
+                                       Restore the verified official Release
+  rollback <package-id>                Switch to the previous installed Release
+  uninstall <package-id> [--preserve-development|--force-discard]
+                                       Uninstall; config/ is kept
+
+Stage services:
+  service list [<package-id>]          List services (optionally one Package's)
+  service status|start|stop|restart <service-id>
+                                       Control a service; every change is post-checked
+  service logs <service-id> [--lines N]
+
+Source history is plain git (branch, commit, push); the SDK does not wrap it.
+
+Every command exits zero only on success. With --json, stdout is exactly one
+JSON object (logs go to stderr). Failures include a stable code and a
+concrete next step.`;
 
 async function main() {
   switch (cmd) {
@@ -73,15 +96,24 @@ async function main() {
     case 'install': return (await import('./lib/flow.mjs')).cmdInstall(flags, pos);
     case 'verify-device': return (await import('./lib/verify.mjs')).cmdVerifyDevice(flags, pos);
     case 'handoff': return (await import('./lib/flow.mjs')).cmdHandoff(flags, pos);
-    case 'help': case undefined: case '--help': console.log(HELP); return;
-    default:
+    case 'restore': return (await import('./lib/lifecycle.mjs')).cmdRestore(flags, pos);
+    case 'rollback': return (await import('./lib/lifecycle.mjs')).cmdRollback(flags, pos);
+    case 'uninstall': return (await import('./lib/lifecycle.mjs')).cmdUninstall(flags, pos);
+    case 'service': return (await import('./lib/service.mjs')).cmdService(flags, pos);
+    case 'help': case undefined: case '--help':
+      if (flags.json) return (await import('./lib/util.mjs')).emit({ ok: true, help: HELP }, flags, () => {});
+      console.log(HELP); return;
+    default: {
+      const { fail } = await import('./lib/util.mjs');
+      if (flags.json) return fail(flags, 'unknown_command', cmd, 'Run termux-os-sdk help.');
       console.error(`✗ unknown_command: ${cmd}\n`);
       console.log(HELP);
       process.exit(1);
+    }
   }
 }
 
-main().catch((e) => {
-  console.error(JSON.stringify({ ok: false, code: 'sdk_internal_error', detail: String(e?.stack ?? e) }));
-  process.exit(1);
+main().catch(async (e) => {
+  const { fail } = await import('./lib/util.mjs');
+  fail(flags, 'sdk_internal_error', String(e?.stack ?? e), 'Report this SDK bug with the command line.');
 });

@@ -1,3 +1,10 @@
 #!/usr/bin/env bash
 # Extensionless executable shim; the implementation remains an ES module.
-exec node "$(dirname "$0")/termux-os-sdk.mjs" "$@"
+# It may be reached through $PREFIX/bin/termux-os-sdk (a symlink), so resolve the link
+# to find the Framework's sdk/ directory instead of trusting $0's own directory.
+self="$0"
+while [ -L "$self" ]; do
+  target="$(readlink "$self")"
+  case "$target" in /*) self="$target" ;; *) self="$(dirname "$self")/$target" ;; esac
+done
+exec node "$(cd "$(dirname "$self")" && pwd)/termux-os-sdk.mjs" "$@"

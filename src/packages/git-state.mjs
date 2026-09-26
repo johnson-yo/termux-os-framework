@@ -144,6 +144,30 @@ export function packageGitIdentity(dir) {
  *
  * Deliberately not called from the watcher: it runs several Git commands.
  */
+/** The identity used when a phone has no Git identity at all; never written to a tracked file. */
+export const PLACEHOLDER_IDENTITY = Object.freeze({
+  name: 'Termux-OS Local Developer', email: 'termux-os-local@localhost.invalid',
+});
+
+/**
+ * Make `git commit` work in this repository. An effective identity (repository or global) is left
+ * alone; only when there is none is a clearly marked placeholder written to this repository's own
+ * `.git/config`. An official Release's `.git/config` carries no identity, so re-entering
+ * Development on a phone without a global identity needs this just as zero-create does.
+ */
+export function ensureCommitIdentity(dir) {
+  const get = (key) => {
+    try { return execFileSync('git', ['-C', dir, 'config', key], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+    catch { return ''; }
+  };
+  if (get('user.name') && get('user.email')) return { kind: 'existing' };
+  try {
+    execFileSync('git', ['-C', dir, 'config', 'user.name', PLACEHOLDER_IDENTITY.name], { stdio: 'ignore' });
+    execFileSync('git', ['-C', dir, 'config', 'user.email', PLACEHOLDER_IDENTITY.email], { stdio: 'ignore' });
+    return { kind: 'placeholder' };
+  } catch { return { kind: 'unavailable' }; }
+}
+
 export function gitHistoryScan(dir, releasedHead) {
   const out = {
     available: false, reason: null, worktree: 'unknown', changes: [], ignored: [],

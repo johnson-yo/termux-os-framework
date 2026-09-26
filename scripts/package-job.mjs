@@ -47,6 +47,7 @@ const stageFor = {
   uninstall: 'uninstalling',
   restore: 'restoring',
   restore_backup: 'restoring_backup',
+  backup: 'backing_up',
 };
 
 let lockHeld = false;
@@ -112,7 +113,8 @@ try {
     ];
     exitCode = await runOne(job.action === 'restore_backup'
       ? ['restore-development-backup', job.target.package_id, job.target.backup, ...protection]
-      : [job.action, job.target.package_id, ...protection]);
+      : job.action === 'backup' ? ['development-backup', job.target.package_id]
+        : [job.action, job.target.package_id, ...protection]);
   } else if (job.action === 'check') {
     exitCode = await runOne(['check', upload.archive_path]);
   } else {

@@ -18,7 +18,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { gitHistoryScan, packageGitIdentity, packageGitState, GIT_STATE } from './git-state.mjs';
+import { ensureCommitIdentity, gitHistoryScan, packageGitIdentity, packageGitState, GIT_STATE } from './git-state.mjs';
 
 export const PROVENANCE = Object.freeze({ OFFICIAL: 'official', DEVELOPMENT: 'development' });
 export const PACKAGE_STATE = Object.freeze({
@@ -185,5 +185,7 @@ export function activateDevelopment({ id, versionRoot, packageRoot, active, conf
     activated_from_branch: git.branch,
     activated_head: git.head,
   });
-  return { ok: true, development };
+  // Development means committing here; make that possible before the first edit.
+  const identity = ensureCommitIdentity(versionRoot);
+  return { ok: true, development, git_identity: identity.kind };
 }

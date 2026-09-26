@@ -1,4 +1,3 @@
-
 #
 # Keep this list explicit: adding a file to the Framework public surface is a
 # One repository-relative file per line. Local development files may remain
@@ -284,3 +283,7 @@ web/admin/setup.html
 web/admin/setup.js
 web/admin/style.css
 web/admin/sw.js
+sdk/lib/lifecycle.mjs
+sdk/lib/service.mjs
+src/system/sdk-shim.mjs
+scripts/smoke-agent-surface.mjs

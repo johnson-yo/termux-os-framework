@@ -79,6 +79,7 @@ node scripts/smoke-asset-payload-v2.mjs
 node scripts/smoke-dev-runtime-resilience.mjs
 node scripts/smoke-dev-provenance.mjs
 node scripts/smoke-zero-create.mjs
+node scripts/smoke-agent-surface.mjs
 
 node scripts/extract-ui-strings.mjs --check
 node scripts/check-publication.mjs

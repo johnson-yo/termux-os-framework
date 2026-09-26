@@ -68,3 +68,7 @@ delete confirmation, and deletion. Core may provide generic path, transfer,
 integrity, and atomic-storage primitives, but it must not turn `optional`,
 provider load state, or `.models` declarations into a lifecycle permission check.
 Deleting payload bytes must be separate from unregistering the Asset declaration.
+
+Entering Development (zero-create or `activateDevelopment`) calls `ensureCommitIdentity`
+(`git-state.mjs`): with no effective Git identity it writes the marked placeholder to that repository's
+own `.git/config`, because an official Release's `.git/config` carries none.

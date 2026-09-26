@@ -23,7 +23,7 @@ import {
 const JOB_SCHEMA = 'termux-os.package-job.v1';
 const UPLOAD_SCHEMA = 'termux-os.package-upload.v1';
 const SNAPSHOT_SCHEMA = 'termux-os.package-manager.v1';
-const ACTIONS = new Set(['check', 'install', 'rollback', 'uninstall', 'restore', 'restore_backup']);
+const ACTIONS = new Set(['check', 'install', 'rollback', 'uninstall', 'restore', 'restore_backup', 'backup']);
 const ID_RE = /^[\w.@-]+$/;
 const INSTALL_SOURCE = Object.freeze({ LOCAL_FILE: 'local_file', REGISTRY: 'registry' });
 
