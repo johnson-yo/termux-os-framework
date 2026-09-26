@@ -73,9 +73,11 @@ const verifyLegacyFiles = (payload, { allowMissing = false } = {}) => {
   const walk = (dir) => {
     for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
       const target = path.join(dir, item.name);
+      // ⚠ One test per entry: a tracked regular file must fall through untouched. The previous
+      // three-branch chain sent every tracked file into its last branch, so each legacy removal
+      // reported its own files as untracked and no legacy payload could ever be deleted.
       if (item.isDirectory()) walk(target);
-      else if (item.isFile() && !expected.has(target)) unknown.push(path.relative(root, target));
-      else if (!item.isDirectory()) unknown.push(path.relative(root, target));
+      else if (!item.isFile() || !expected.has(target)) unknown.push(path.relative(root, target));
     }
   };
   if (fs.existsSync(root)) walk(root);
@@ -232,6 +234,23 @@ if (process.argv.includes('--self-test')
     && extra.extra_detach?.includes('stale\u0000generic'));
   const done = deletePayload(payloadId, { expectedGeneration: blocked.actual_generation ?? 1, detach: ['model.raw\u0000generic'] });
   test('explicit detach allows package-provisioned bytes to be deleted', done.ok && !fs.existsSync(payloadRoot));
+  {
+    // A legacy payload holding exactly its own files is deletable; an unknown file still blocks it.
+    const legacyBytes = Buffer.from('legacy');
+    const legacyFiles = [{ path: 'model.bin', size: legacyBytes.length, sha256: createHash('sha256').update(legacyBytes).digest('hex') }];
+    const legacyRoot = path.join(process.env.SHARED_ASSET_STORE, 'old.pkg', '1.0.0', 'generic', 'raw');
+    fs.mkdirSync(legacyRoot, { recursive: true });
+    fs.writeFileSync(path.join(legacyRoot, 'model.bin'), legacyBytes);
+    fs.writeFileSync(path.join(legacyRoot, 'stray.txt'), 'not ours');
+    const legacyId = recordPayload({ files: legacyFiles, layout: 'legacy', storagePath: legacyRoot }).payload.payload_id;
+    const guarded = deletePayload(legacyId, { detach: [] });
+    test('an unknown file in a legacy payload still blocks its deletion',
+      guarded.error === 'legacy_untracked_entries' && fs.existsSync(path.join(legacyRoot, 'model.bin')));
+    fs.rmSync(path.join(legacyRoot, 'stray.txt'));
+    const removed = deletePayload(legacyId, { detach: [] });
+    test('a legacy payload holding exactly its own files is deleted, not reported as untracked',
+      removed.ok === true && !fs.existsSync(path.join(legacyRoot, 'model.bin')));
+  }
   fs.rmSync(root, { recursive: true, force: true });
   process.exit(failures ? 1 : 0);
 }

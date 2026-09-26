@@ -2,6 +2,12 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.12
+
+- Fix legacy payload removal: every tracked file was reported as an untracked
+  entry, so no legacy-layout payload could be deleted. A genuinely unknown file
+  still blocks the removal.
+
 ## 0.3.11
 
 - Add `assets.provides[].target: "device"`: an Asset with one variant per device
