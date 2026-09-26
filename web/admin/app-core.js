@@ -1277,4 +1277,48 @@ function confirmAction({ title, label, details, acknowledgement = null }) {
   });
 }
 
+/**
+ * A confirmation with several explicit outcomes (for example "back up, then restore" versus
+ * "discard and restore"). There is deliberately no default choice: the dialog opens with focus
+ * on Cancel, and each outcome is its own labelled button. Resolves to the chosen value or null.
+ */
+function chooseAction({ title, details = [], note = null, choices }) {
+  let dialog = $('choice-dialog');
+  if (!dialog) {
+    dialog = document.createElement('dialog');
+    dialog.id = 'choice-dialog';
+    dialog.className = 'confirm-dialog';
+    document.body.append(dialog);
+  }
+  const form = document.createElement('form');
+  form.method = 'dialog';
+  const heading = document.createElement('h2'); heading.textContent = title;
+  const rows = document.createElement('div'); rows.className = 'confirm-details';
+  rows.replaceChildren(...details.map(([key, value]) => valueRow(key, value)));
+  form.append(heading, rows);
+  if (note) { const p = document.createElement('p'); p.className = 'alert warning'; p.textContent = note; form.append(p); }
+  const row = document.createElement('div'); row.className = 'button-row choice-row';
+  const cancel = document.createElement('button'); cancel.value = 'cancel'; cancel.textContent = tr('取消');
+  cancel.className = buttonClass('');
+  row.append(cancel);
+  for (const choice of choices) {
+    const button = document.createElement('button');
+    button.value = choice.value;
+    button.textContent = tr(choice.label);
+    button.className = buttonClass(choice.variant ?? '');
+    button.dataset.choice = choice.value;
+    row.append(button);
+  }
+  form.append(row);
+  dialog.replaceChildren(form);
+  return new Promise((resolve) => {
+    dialog.addEventListener('close', () => {
+      resolve(choices.some((c) => c.value === dialog.returnValue) ? dialog.returnValue : null);
+    }, { once: true });
+    dialog.returnValue = '';
+    dialog.showModal();
+    cancel.focus();
+  });
+}
+
 const jobLabel = (job) => job ? `${job.action} · ${job.stage} · ${job.status}` : 'n/a';

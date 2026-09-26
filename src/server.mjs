@@ -1818,7 +1818,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
   {
-    const m = url.match(/^\/api\/admin\/package-manager\/packages\/([\w.@-]+)\/(rollback|uninstall)$/);
+    const m = url.match(/^\/api\/admin\/package-manager\/packages\/([\w.@-]+)\/(rollback|uninstall|restore|restore-backup)$/);
     if (m && req.method === 'POST') {
       try {
         const body = await readBody(req);
@@ -1859,9 +1859,14 @@ const server = http.createServer(async (req, res) => {
             );
           }
         }
-        const job = startPackageJob(m[2], {
+        // restore / restore-backup / uninstall carry the local-history choice made in the dialog;
+        // without one the installer refuses when history is present.
+        const action = m[2] === 'restore-backup' ? 'restore_backup' : m[2];
+        const job = startPackageJob(action, {
           package_id: item.id,
-          ...(m[2] === 'uninstall' && (body?.preserve_development === true || body?.force_discard === true)
+          ...(action === 'restore_backup' ? { backup: body?.backup } : {}),
+          ...(['uninstall', 'restore', 'restore_backup'].includes(action)
+            && (body?.preserve_development === true || body?.force_discard === true)
             ? { options: { preserve_development: body.preserve_development === true, force_discard: body.force_discard === true } } : {}),
         });
         return json(res, 202, { ok: true, job });

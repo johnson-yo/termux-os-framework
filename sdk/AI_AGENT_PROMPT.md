@@ -16,16 +16,23 @@ user for the feature request before editing.]
    `<framework-root>/sdk/termux-os-sdk`.
 3. Run `termux-os-sdk context --json` and inspect the current Package, Capability,
    port, runtime, and target contracts before designing the feature.
-4. Inspect existing Packages first. If the request extends an existing Package,
-   modify that Package instead of creating a second one.
-5. If a new Package is required, choose exactly one primary type:
+4. Ask first: am I already in an installed active work tree
+   (`~/.termux-os/packages/<id>/versions/<v>/`, see `termux-os-sdk dev status <id> --json` →
+   `worktree`)? If so, that directory is the source: edit and commit there. Do not create a host
+   repository or use `dev sync` on the phone.
+5. Inspect existing Packages first. If the request extends an existing Package,
+   modify that Package instead of creating a second one. If it is official, enter Development
+   explicitly (`termux-os-sdk dev activate <id>`) only when the user asked for the change.
+6. If a new Package is required, choose exactly one primary type:
    `service`, `app`, `adapter`, or `asset`. Use `termux-os-sdk choose` when the
-   boundary is not obvious.
+   boundary is not obvious. On a phone, a Web App starts with
+   `termux-os-sdk new --type app --template web --dev --id <id> --name "<Name>"`.
 
 ## Keep the boundary clean
 
-- Develop Package source in its own Git repository or under
-  `~/termux-os-sources/`. Never add product logic or Package source to Framework Core. The retired
+- On a phone the installed active work tree is the Package's Git repository. Elsewhere, develop in
+  the Package's own repository or under `~/termux-os-sources/`. Never add product logic or Package
+  source to Framework Core. The retired
   `~/termux-os-dev/packages/` path is report-only and must not be loaded or watched.
 - Core owns lifecycle, authentication, administration, port assignment, and SDK
   contracts. Audio, speech, models, vendor runtimes, device bridges, workflows,
@@ -76,8 +83,10 @@ user for the feature request before editing.]
 3. Add a fast isolated `test/self-test.mjs`. Use fixtures and temporary
    directories; do not require a real device, network account, model, or user
    data.
-4. For device iteration, use `termux-os-sdk dev sync <id> --connection <name> --source <repo>`;
-   Dev Runtime reloads the one active Installed Root worktree and is not release evidence.
+4. Standard order on the phone: inspect/status → locate the active work tree → `dev activate` if the
+   Package is official and the user asked for a change → `dev start` → edit/test → Chrome and
+   `verify-device --dev` → `git commit`. Dev Runtime reloads that work tree; it is not release
+   evidence. (`dev sync` exists only for a source repository on another machine.)
 5. Run:
 
    ```sh
@@ -90,7 +99,9 @@ user for the feature request before editing.]
    ```
 
 6. Release only through the deterministic Source → Release → verify → target
-   check → immutable Installed Root flow. Never edit an Installed version.
+   check → immutable Installed Root flow. Edit an installed version only while it is in
+   Development; restore, update, and uninstall refuse to destroy its local history unless told to
+   back it up (`--preserve-development`) or discard it (`--force-discard`).
 7. Release readiness comes from the self-test, doctor, immutable release
    verification, and Device Verify. User review is external feedback, not a
    Package feature, page, document, endpoint, or runtime status.

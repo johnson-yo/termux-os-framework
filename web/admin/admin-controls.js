@@ -801,34 +801,44 @@ async function startPackageUpgrade(item) {
   });
 }
 
-/** Start Dev Runtime on the installed active worktree; never create a second source copy. */
 /**
- * ⚠ 进入开发模式必须先确认。它不是一个查看动作：从这一刻起，已安装目录里的任何改动
- * 都会被热重载进运行中的服务，Framework 更新也会被挡住，直到停止开发。按钮与「更新」
- * 「回滚」挨在一排，一次误点就能让一个正常使用的包悄悄进入另一种运行方式。
+ * Development has two independent parts and the card treats them separately:
+ *   provenance — sticky; entering it is an explicit, confirmed act; there is no switch back
+ *                (only a verified official restore or install makes the Package official again);
+ *   watcher    — runtime only; start/stop freely.
+ * The installed work tree is the only source: nothing is copied, synced, or mounted.
  */
 async function startPackageDev(item) {
-  const accepted = await confirmAction({
-    title: `进入开发模式 · ${packageAdminName(item)}`,
-    label: '进入开发模式',
-    details: [
-      ['Package ID', item.id],
-      ['当前版本', item.version],
-      ['监视目录', item.installed_dir ?? 'n/a'],
-      ['影响', '目录内的改动会立即热重载进运行中的服务；Framework 更新在停止开发前不可用。'],
-      ['退出', '在这张卡片上点「停止开发」。已装版本与数据不受影响。'],
-    ],
-    acknowledgement: '我知道这是开发者功能，普通使用不需要它。',
-  });
-  if (!accepted) return;
-  try {
-    await apiData('/api/dev/packages', {
-      method: 'POST',
-      body: JSON.stringify({ package_id: item.id }),
+  const state = item.install_safety?.state;
+  if (state !== 'development') {
+    const accepted = await confirmAction({
+      title: `进入开发 · ${packageAdminName(item)}`,
+      label: '进入开发',
+      details: [
+        ['Package ID', item.id],
+        ['当前版本', item.version],
+        ['工作目录', item.worktree ?? item.installed_dir ?? 'n/a'],
+        ['之后', '这个 Package 会保留为 Development 状态。不能用开关直接变回 Official；恢复正式版需要 Restore 或重新安装正式 Release。'],
+        ['热重载', '同时开始监视工作目录：保存即重新载入，Framework 更新在停止监视前不可用。'],
+      ],
+      acknowledgement: '我知道开发状态不会自动退出。',
     });
-    packageNotice = { kind: 'good', text: `已开始监视 ${item.id} 的唯一 active worktree；主机代码请用 SDK dev sync 推送。` };
+    if (!accepted) return;
+    try {
+      await apiData(`/api/dev/packages/${encodeURIComponent(item.id)}/development/activate`, { method: 'POST', body: '{}' });
+    } catch (error) {
+      const code = error?.data?.error_code ?? error?.data?.error ?? String(error?.message ?? error);
+      packageNotice = { kind: 'bad', text: code === 'development_lineage_unavailable'
+        ? `${packageAdminName(item)} 没有可验证的 Git 基线（不是带 Git 的 Release 安装的），不能原地开发。`
+        : `进入开发：${code}` };
+      return loadPackageManager();
+    }
+  }
+  try {
+    await apiData('/api/dev/packages', { method: 'POST', body: JSON.stringify({ package_id: item.id }) });
+    packageNotice = { kind: 'good', text: `${packageAdminName(item)} 开发中，正在监视 ${item.worktree ?? item.installed_dir}。直接在这个目录修改与提交。` };
   } catch (error) {
-    packageNotice = { kind: 'bad', text: `启动 Dev Runtime：${error.message ?? error}` };
+    packageNotice = { kind: 'bad', text: `开始监视：${error.message ?? error}` };
   }
   return loadPackageManager();
 }
@@ -836,15 +846,157 @@ async function startPackageDev(item) {
 async function stopPackageDev(item) {
   try {
     await apiData(`/api/dev/packages/${encodeURIComponent(item.id)}/stop`, { method: 'POST', body: '{}' });
-    packageNotice = { kind: 'good', text: `已停止开发模式：${item.id}。` };
+    packageNotice = { kind: 'good', text: `已停止监视 ${item.id}。开发状态与工作目录不变。` };
   } catch (error) {
-    packageNotice = { kind: 'bad', text: `停止开发模式：${error.message ?? error}` };
+    packageNotice = { kind: 'bad', text: `停止监视：${error.message ?? error}` };
   }
   return loadPackageManager();
 }
 
+/** Plain-language local history for dialogs; no Git plumbing beyond counts. */
+function localHistoryRows(item) {
+  const s = item.install_safety ?? {};
+  const branches = (s.local_refs ?? []).filter((ref) => String(ref.ref).startsWith('refs/heads/'));
+  return [
+    ['当前分支', s.branch ?? (s.detached ? '游离 HEAD' : 'n/a')],
+    ['本地提交', `${s.commits_ahead ?? 0} 个`],
+    ['有未发布提交的分支', branches.length ? branches.map((b) => `${String(b.ref).replace('refs/heads/', '')}（${b.commits ?? '?'}）`).join('、') : '无'],
+    ['stash', `${s.stash_count ?? 0} 个`],
+    ['未提交的修改', `${s.worktree_changes ?? 0} 个文件`],
+  ];
+}
+
+/**
+ * Any operation that replaces or removes the work tree: when local history or Development is
+ * present, ask which of two explicit outcomes to take; otherwise a plain confirmation.
+ */
+async function protectedChoice(item, { title, verb, details }) {
+  if (!item.install_safety?.dirty) {
+    const ok = await confirmAction({ title, label: verb, details });
+    return ok ? {} : null;
+  }
+  const choice = await chooseAction({
+    title,
+    details: [...details, ...localHistoryRows(item)],
+    note: '这里有只存在于本机的开发内容。备份会保存完整工作目录（含 .git、分支、stash），之后可以在「开发备份」里恢复。',
+    choices: [
+      { value: 'preserve', label: `备份开发内容后${verb}`, variant: 'primary' },
+      { value: 'force', label: `强制丢弃并${verb}`, variant: 'danger-text' },
+    ],
+  });
+  if (choice === 'preserve') return { preserve_development: true };
+  if (choice === 'force') return { force_discard: true };
+  return null;
+}
+
+async function startLifecycleJob(item, action, body, doneText) {
+  try {
+    const response = await api(`/api/admin/package-manager/packages/${encodeURIComponent(item.id)}/${action}`, {
+      method: 'POST', body: JSON.stringify({ confirm_package_id: item.id, ...body }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail ?? result.error);
+    packageNotice = { kind: 'good', text: `${doneText}：${jobLabel(result.job)}。Framework 可能会重启，页面会重新连接并显示结果。` };
+  } catch (error) {
+    packageNotice = { kind: 'bad', text: String(error?.message ?? error) };
+  }
+  await loadPackageManager();
+}
+
+async function startRestoreOfficial(item) {
+  const options = await protectedChoice(item, {
+    title: `恢复正式版 · ${packageAdminName(item)}`,
+    verb: '恢复',
+    details: [
+      ['Package ID', item.id],
+      ['恢复到', `${item.version} 的已验证 Release`],
+      ['配置 / 数据', '保留'],
+    ],
+  });
+  if (options) await startLifecycleJob(item, 'restore', options, '已开始恢复正式版');
+}
+
+async function startBackupRestore(item, backup) {
+  const options = await protectedChoice(item, {
+    title: `从开发备份恢复 · ${packageAdminName(item)}`,
+    verb: '恢复',
+    details: [
+      ['备份', backup.name],
+      ['创建于', backup.created_at],
+      ['分支 / HEAD', `${backup.branch ?? '游离'} @ ${String(backup.head ?? '').slice(0, 7)}`],
+      ['stash', `${backup.stash_count ?? 0} 个`],
+    ],
+  });
+  if (options) await startLifecycleJob(item, 'restore-backup', { ...options, backup: backup.name }, '已开始从备份恢复');
+}
+
+/** The Development panel: state, work tree, restore, and backups (loaded when opened). */
+function developmentPanel(item) {
+  const s = item.install_safety ?? {};
+  const panel = document.createElement('details'); panel.className = 'inline-details development-panel';
+  panel.dataset.state = s.state ?? 'unknown';
+  panel.append(Object.assign(document.createElement('summary'), {
+    textContent: `开发与恢复 · 开发备份：${item.development_backups ?? 0}`,
+  }));
+  const body = document.createElement('div'); body.className = 'development-body';
+  body.append(valueRow('状态', stateLabel(s.state)), valueRow('工作目录', item.worktree ?? item.installed_dir ?? 'n/a'));
+  if (item.development_only) body.append(text('p', '这个 Package 从未发布过正式 Release：没有可恢复的正式版。', 'note'));
+  const row = document.createElement('div'); row.className = 'button-row';
+  row.append(actionButton('恢复正式版', '', () => startRestoreOfficial(item),
+    !canWrite() || !item.restorable || s.state === 'official'));
+  body.append(row);
+  const list = document.createElement('div'); list.className = 'development-backups';
+  body.append(text('b', '开发备份'), list);
+  panel.append(body);
+  panel.addEventListener('toggle', async () => {
+    if (!panel.open || list.dataset.loaded) return;
+    list.dataset.loaded = '1';
+    try {
+      const data = await apiData(`/api/dev/packages/${encodeURIComponent(item.id)}/development/backups`);
+      const backups = data.backups ?? [];
+      if (!backups.length) { list.append(text('p', '还没有开发备份。', 'empty')); return; }
+      for (const backup of backups) {
+        const entry = document.createElement('div'); entry.className = 'development-backup';
+        entry.append(text('small', `${backup.created_at} · ${backup.version} · ${backup.branch ?? '游离'} @ ${String(backup.head ?? '').slice(0, 7)} · ${backup.reason} · stash ${backup.stash_count ?? 0}`));
+        entry.append(actionButton('恢复', '', () => startBackupRestore(item, backup),
+          !canWrite() || backup.version !== item.version));
+        list.append(entry);
+      }
+    } catch (error) { list.append(text('p', `读取开发备份：${error.message ?? error}`, 'alert error')); }
+  });
+  return panel;
+}
+
+const STATE_LABELS = { official: 'Official', development: 'Development', modified: 'Modified', unknown: 'Unknown', conflicted: 'Conflict' };
+const stateLabel = (state) => STATE_LABELS[state] ?? 'Unknown';
+
+/** One short line: what the work tree holds right now, for development and modified Packages. */
+function developmentSummary(item) {
+  const s = item.install_safety ?? {};
+  if (!['development', 'modified'].includes(s.state)) return null;
+  const parts = [s.state === 'development' ? '开发中' : '已修改（未进入开发）'];
+  if (s.head) parts.push(`${s.branch ?? '游离 HEAD'} / HEAD ${String(s.head).slice(0, 7)}`);
+  const branches = (s.local_refs ?? []).filter((ref) => String(ref.ref).startsWith('refs/heads/')).length;
+  const counts = [];
+  if (s.commits_ahead) counts.push(`${s.commits_ahead} 个本地提交`);
+  if (branches) counts.push(`${branches} 个分支有未发布提交`);
+  if (s.stash_count) counts.push(`${s.stash_count} 个 stash`);
+  if (s.worktree_changes) counts.push(`${s.worktree_changes} 个未提交文件`);
+  parts.push(counts.length ? counts.join(' · ') : '尚未修改');
+  return parts.join(' · ');
+}
+
 async function startInstalledAction(item, action) {
   const rollback = action === 'rollback';
+  if (!rollback && item.install_safety?.dirty) {
+    const options = await protectedChoice(item, {
+      title: `卸载 ${packageAdminName(item)}`,
+      verb: '卸载',
+      details: [['Package ID', item.id], ['当前版本', item.version], ['配置', '保留（重新安装时可继续使用）']],
+    });
+    if (options) await startLifecycleJob(item, 'uninstall', options, '已开始卸载');
+    return;
+  }
   const accepted = await confirmAction({
     title: rollback ? `Roll back ${item.name}` : `Uninstall ${item.name}`,
     label: rollback ? 'Roll back' : 'Uninstall',
@@ -1100,9 +1252,13 @@ function renderPackageCard(item) {
     sourceRow.append(source); card.append(sourceRow);
   }
   const tags = document.createElement('div'); tags.className = 'package-tags';
-  tags.append(text('span', item.version, 'package-tag'), text('span', item.target ?? 'generic', 'package-tag'));
+  const stateTag = text('span', stateLabel(item.install_safety?.state), `package-tag package-state state-${item.install_safety?.state ?? 'unknown'}`);
+  stateTag.dataset.state = item.install_safety?.state ?? 'unknown';
+  tags.append(stateTag, text('span', item.version, 'package-tag'), text('span', item.target ?? 'generic', 'package-tag'));
   for (const type of item.types ?? []) tags.append(text('span', type, 'package-tag'));
   card.append(tags);
+  const devLine = developmentSummary(item);
+  if (devLine) card.append(text('p', devLine, 'package-development-summary'));
   const meta = document.createElement('div'); meta.className = 'package-meta';
   meta.append(valueRow('运行时', item.runtime ?? 'n/a'), valueRow('API 端口', item.ports?.length ? item.ports.map((p) => `${p.id}:${p.port}`).join(', ') : 'none'));
   card.append(meta);
@@ -1121,9 +1277,11 @@ function renderPackageCard(item) {
   actions.append(packageSettingLink(item));
   actions.append(actionButton('更新', 'primary',
     () => startPackageUpgrade(item), !canWrite() || !upgrade));
+  // Watcher only: there is no "leave Development" switch; that is a restore (see the panel below).
   actions.append(item.dev_watching
-    ? actionButton('停止开发', 'primary', () => stopPackageDev(item), !canWrite())
-    : actionButton('开发', '', () => startPackageDev(item), !canWrite() || !item.installed_dir));
+    ? actionButton('停止监视', 'primary', () => stopPackageDev(item), !canWrite())
+    : actionButton(item.install_safety?.state === 'development' ? '开始监视' : '开发', '',
+      () => startPackageDev(item), !canWrite() || !item.installed_dir));
   actions.append(actionButton('回滚', '',
     () => startInstalledAction(item, 'rollback'), !canWrite() || !item.previous_version));
   actions.append(actionButton('卸载', 'danger-text',
@@ -1131,8 +1289,9 @@ function renderPackageCard(item) {
   card.append(actions);
   const details = document.createElement('details'); details.className = 'inline-details';
   details.append(Object.assign(document.createElement('summary'), { textContent: '版本详情' }),
-    text('small', `SHA ${item.archive_sha256 ?? 'n/a'} · installed ${item.installed_at ?? 'n/a'}`));
+    text('small', `SHA ${item.archive_sha256 ?? (item.development_only ? '尚无正式 Release' : 'n/a')} · installed ${item.installed_at ?? 'n/a'}`));
   card.append(details);
+  card.append(developmentPanel(item));
   return card;
 }
 

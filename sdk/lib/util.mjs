@@ -94,12 +94,33 @@ export function sdkMetaDir(dir) {
   return path.join(parent, `${path.basename(dir)}.sdk`);
 }
 
-export function packageDir(id, { source = null } = {}) {
+/** The installed active version directory of a Package on this device, or null. */
+export function installedWorktree(id) {
+  const root = process.env.PACKAGES_INSTALLED_DIR || path.join(os.homedir(), '.termux-os/packages');
+  try {
+    const active = JSON.parse(fs.readFileSync(path.join(root, id, 'active.json'), 'utf8'));
+    const dir = path.join(root, id, 'versions', active.active_version);
+    return fs.existsSync(path.join(dir, 'termux-os.package.json'))
+      ? { dir, packageRoot: path.join(root, id), development: fs.existsSync(path.join(root, id, '.development')) } : null;
+  } catch { return null; }
+}
+
+/**
+ * Where a Package's source is. On a phone the installed active worktree is the source: it wins
+ * whenever the Package is in Development or no separate source repository exists. A source
+ * repository under the source root is used only when it exists and the installed copy is not
+ * being developed; `--source` and `--from-active` state the choice explicitly.
+ */
+export function packageDir(id, { source = null, fromActive = false } = {}) {
   if (source) return path.resolve(source);
+  const installed = installedWorktree(id);
+  if (fromActive && installed) return installed.dir;
   try {
     if (readManifest(process.cwd()).id === id) return process.cwd();
   } catch { /* The current directory is not this package. */ }
-  return path.join(SOURCE_ROOT, id);
+  const sourceDir = path.join(SOURCE_ROOT, id);
+  if (installed && (installed.development || !fs.existsSync(sourceDir))) return installed.dir;
+  return sourceDir;
 }
 
 export function listSourcePackages() {

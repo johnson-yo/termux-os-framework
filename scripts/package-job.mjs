@@ -45,6 +45,8 @@ const stageFor = {
   install: 'installing',
   rollback: 'rolling_back',
   uninstall: 'uninstalling',
+  restore: 'restoring',
+  restore_backup: 'restoring_backup',
 };
 
 let lockHeld = false;
@@ -104,9 +106,13 @@ try {
   };
 
   if (!uploads.length) {
-    exitCode = await runOne([job.action, job.target.package_id,
+    const protection = [
       ...(job.target.options?.preserve_development === true ? ['--preserve-development'] : []),
-      ...(job.target.options?.force_discard === true ? ['--force-discard'] : [])]);
+      ...(job.target.options?.force_discard === true ? ['--force-discard'] : []),
+    ];
+    exitCode = await runOne(job.action === 'restore_backup'
+      ? ['restore-development-backup', job.target.package_id, job.target.backup, ...protection]
+      : [job.action, job.target.package_id, ...protection]);
   } else if (job.action === 'check') {
     exitCode = await runOne(['check', upload.archive_path]);
   } else {

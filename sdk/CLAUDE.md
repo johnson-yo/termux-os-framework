@@ -5,11 +5,14 @@ The SDK creates and operates independent Extension Package Git repositories. It 
 worktree or runtime instance.
 
 - Use the current Package repository when its manifest matches the requested ID.
+- On a phone the installed active worktree is the source whenever the Package is in Development or
+  has no separate source repository (`util.packageDir`); `new --dev` creates such a Package directly
+  (`src/packages/zero-create.mjs`), and `release --from-active` forces it.
 - Otherwise use `TERMUX_OS_SOURCE_ROOT` or `~/termux-os-sources/`. The old
   `TERMUX_OS_DEV_ROOT` / `~/termux-os-dev/packages/` locations are legacy inputs for detection and
   safe archive only; no SDK command loads, watches, or syncs from them.
-- Use `termux-os-sdk dev sync <id> --connection <name> --source <repo>` for host-to-device
-  development. It previews the target, transfers only the selected Git repository, atomically
+- Remote / advanced: `termux-os-sdk dev sync <id> --connection <name> --source <repo>` for a
+  source repository on another machine. It previews the target, transfers only the selected Git repository, atomically
   replaces the installed active worktree, and reloads that same Package ID.
 - Delegate release and installation to the Core Package Manager; do not duplicate its rules.
 - Return non-zero on failure and include a stable error code plus a concrete next step.

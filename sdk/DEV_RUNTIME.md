@@ -25,7 +25,9 @@ termux-os-sdk dev logs   <package-id>   # logs of the Package's own services
 ```
 
 The Package must already be installed: `dev` acts on the one installed copy, using its service
-ids, ports, URL, configuration and data. Nothing is duplicated, shadowed, or namespaced.
+ids, ports, URL, configuration and data. Nothing is duplicated, shadowed, or namespaced. On a phone,
+`termux-os-sdk new --type app --template web --dev …` creates such a Package directly as a
+development-only install (see [Local device development](LOCAL_DEVICE_DEVELOPMENT.md)).
 
 ## Change detection and reload
 
@@ -48,7 +50,7 @@ previous runtime keeps serving, `dev status` reports `last_reload_result: "faile
 A page opened while the Package is watched keeps a slow poll through `dev stop` and reloads itself
 when the next `dev start` begins.
 
-For host-to-device iteration, use the formal sync path before starting the watcher:
+Remote / advanced — for a source repository on another machine, sync before starting the watcher:
 
 ```sh
 termux-os-sdk dev sync <package-id> --connection <name> --source /absolute/path/to/repository

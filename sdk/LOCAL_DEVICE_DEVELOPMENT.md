@@ -1,36 +1,49 @@
 # Local device development
 
-The supported workflow has one source repository on the host and one active Installed Root worktree
-on the device:
+On a phone, the installed active work tree **is** the source. One Git repository serves as source,
+runtime, watch target, and release input:
 
 ```text
-host Git repository → dev sync → phone active worktree → Framework reload
+~/.termux-os/packages/<id>/
+├─ active.json
+├─ versions/<version>/   ← the one work tree: .git, manifest, package.mjs, web/
+├─ config/               ← Package settings (outside the work tree, kept across updates)
+├─ .development/         ← Development provenance (outside the work tree)
+└─ archive/              ← official Release archives, once there is one
 ```
 
-Create or select the source repository under `~/termux-os-sources/` (or pass `--source` explicitly),
-then preview and sync it:
+## Primary flow: zero-create on the phone
 
 ```sh
-termux-os-sdk status <package-id> --connection <name> --json
-termux-os-sdk dev sync <package-id> \
-  --connection <name> --source /absolute/path/to/repository
-termux-os-sdk dev status <package-id> --connection <name> --json
+termux-os-sdk new --type app --template web --dev --id <package-id> --name "<Name>"
+termux-os-sdk dev start <package-id>
+termux-os-sdk dev status <package-id> --json      # .worktree is where to edit and commit
+# edit, check Chrome, git branch/commit in that work tree
+termux-os-sdk release <package-id>                # built from the same work tree
+termux-os-sdk install <absolute-release.tar.gz>   # first official Release
 ```
 
-The sync checks the Package ID and version, stages a compact shallow Git worktree containing the
-current `HEAD`, branch/index identity, and exact dirty source files, then excludes unrelated Git
-history plus `.sdk`, `tmp`, `backup`, and local backup artifacts. It transfers only the selected
-source tree, swaps the active version atomically, and reloads the same Package ID. `config/`,
-persistent data, assets, and the rollback archive are not part of the source sync. A failed swap or
-reload restores the previous active tree.
+`new --dev` needs no Release, install, or Framework restart: it writes the Installed Root, makes a
+local baseline commit, records Development provenance, and asks the running Framework to load the
+Package. The baseline commit is local history, not a release: `restore` answers
+`official_baseline_unavailable` and `rollback` answers `no_previous_release` until an official
+Release is installed. Installing a Release built from the current HEAD backs up the development
+history (branches, commits, stash) and makes the Package official at the same version.
 
-`~/termux-os-dev/packages/` and `TERMUX_OS_DEV_ROOT` are retired legacy locations. Framework and
-SDK report them and provide `legacy-archive`, but never load, watch, or silently delete their
-contents. `previous`, `archive`, and runtime generations are recovery/cache material, not active
-Package instances. Resolve any duplicate or legacy conflict before a write operation.
+## Changing an official Package
+
+Enter Development explicitly — `termux-os-sdk dev activate <package-id>` or the Develop action in the
+Package Manager — then `dev start` and edit the same installed work tree. Development is sticky; only a
+verified official restore or install ends it. See [Dev Runtime](DEV_RUNTIME.md).
+
+## Remote / advanced: source on another machine
+
+`host Git repository → dev sync → phone active worktree` remains available for a source repository
+kept elsewhere (`termux-os-sdk dev sync <id> --connection <name> --source <repo>`, and the SSHFS
+view `dev-mount`). It is not needed on the phone and does not shape the local flow.
+
+`~/termux-os-dev/packages/` and `TERMUX_OS_DEV_ROOT` are retired legacy locations. Framework and SDK
+report them and provide `legacy-archive`, but never load, watch, or silently delete their contents.
 
 Do not put a phone address, SSH alias, or token in Package source. Models remain in
 `/sdcard/termux-os/models/`; Package code and private state remain in Termux-private storage.
-
-When a Package needs an Android application or hardware feature, use an adapter contract. Do not
-make that application a Framework startup dependency.

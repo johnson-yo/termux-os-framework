@@ -2,6 +2,33 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.15
+
+- Add on-device zero-create: `termux-os-sdk new --type app --template web --dev`
+  creates a development-only Installed Package whose active version directory
+  is the one Git work tree (local baseline commit, repo-local identity — a
+  marked placeholder without a global Git identity) and asks the running
+  Framework to load it. No source repository elsewhere, no Release archive, no
+  install, no Framework restart.
+- Development-only Packages are first-class: `active.json` carries
+  `source_kind: "development"` with no archive SHA; state is `development`
+  with `head_relation: no-official-baseline`; `restore` answers
+  `official_baseline_unavailable` and `rollback` `no_previous_release`.
+- `termux-os-sdk release` builds from the installed work tree when the Package
+  is in Development or has no separate source (`--from-active` forces it), and
+  the first verified Release may carry the same version (officialization). The
+  SDK backs the development history up automatically only when the archive was
+  built from the current Development HEAD.
+- Add `--template web`: a static page, a no-op backend, and a self-test; no
+  service, worker, or port.
+- Package Manager WebUI shows Official / Development / Modified / Unknown /
+  Conflict, a short local-history line, explicit entry into Development (no
+  exit toggle), restore-to-official and uninstall dialogs with "back up" or "discard"
+  outcomes, and the development backup list with restore.
+- `dev status` reports `worktree` and `development_only`; `verify-device --dev`
+  runs against the installed work tree of a Package in Development.
+- Documentation is phone-first; host `dev sync` and SSHFS are remote/advanced.
+
 ## 0.3.14
 
 - Add Development provenance: an explicit, sticky `activate-development` (CLI,

@@ -92,8 +92,15 @@ export function packageStateSnapshot({ versionRoot, packageRoot, active, conflic
   const target = active?.active_target ?? 'generic';
   const release = releaseMetadata(packageRoot, active?.active_version, target);
   const releasedHead = release?.head ?? null;
+  // A development-only Package has no official baseline; its history is measured against the
+  // local baseline commit made at creation, which is never presented as a released commit.
+  const localBaseline = !releasedHead ? development?.local_baseline_head ?? null : null;
   let git;
-  if (history) git = gitHistoryScan(versionRoot, releasedHead);
+  if (history && localBaseline) {
+    const scan = gitHistoryScan(versionRoot, localBaseline);
+    git = { ...scan, released_head: null, local_baseline_head: localBaseline, official_baseline: false,
+      head_relation: scan.available ? 'no-official-baseline' : scan.head_relation };
+  } else if (history) git = { ...gitHistoryScan(versionRoot, releasedHead), official_baseline: Boolean(releasedHead) };
   else {
     const light = packageGitState(versionRoot);
     const identity = light.state === GIT_STATE.UNKNOWN ? {} : packageGitIdentity(versionRoot);
@@ -107,6 +114,7 @@ export function packageStateSnapshot({ versionRoot, packageRoot, active, conflic
       local_refs: [], stash_count: 0,
       local_history: light.state === GIT_STATE.UNKNOWN ? null
         : light.state === GIT_STATE.DEV || Boolean(releasedHead && identity.head && identity.head !== releasedHead),
+      official_baseline: Boolean(releasedHead),
     };
   }
   const reasons = [];
@@ -124,8 +132,10 @@ export function packageStateSnapshot({ versionRoot, packageRoot, active, conflic
   else { state = PACKAGE_STATE.OFFICIAL; reason = 'official_release'; }
 
   const detail = [];
+  if (development?.development_only && !releasedHead) detail.push('no official baseline');
   if (git.worktree !== 'unknown') detail.push(git.worktree === 'modified' ? `${git.changes.length} change(s)` : 'clean');
-  if (git.head_relation !== 'unknown') detail.push(git.head_relation);
+  if (git.head_relation !== 'unknown' && git.head_relation !== 'no-official-baseline') detail.push(git.head_relation);
+  if (localBaseline && git.commits_ahead) detail.push(`${git.commits_ahead} local commit(s)`);
   if (git.local_refs.length) detail.push(`${git.local_refs.length} local ref(s)`);
   if (git.stash_count) detail.push(`${git.stash_count} stash`);
   if (git.ignored?.length) detail.push(`⚠ ${git.ignored.length} ignored path(s)`);
@@ -138,6 +148,7 @@ export function packageStateSnapshot({ versionRoot, packageRoot, active, conflic
     state, reason, summary,
     provenance: development ? PROVENANCE.DEVELOPMENT : PROVENANCE.OFFICIAL,
     development,
+    development_only: Boolean(development?.development_only && !releasedHead),
     git,
     local_history_present: git.local_history === true,
     protection_required: Boolean(development) || git.local_history === true,

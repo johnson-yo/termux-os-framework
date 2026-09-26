@@ -5,8 +5,9 @@
 3. Keep configuration, data, and status paths explicit.
 4. Implement one isolated self-test and, when useful, one smoke test.
 5. Run `doctor` until it has no failures.
-6. Use `dev sync` to move the selected host Git repository into the one active device worktree,
-   then use Dev Runtime for reload iteration. Stop the watcher before release verification.
+6. Iterate on the one installed active worktree with Dev Runtime. On a phone that work tree is the
+   source (`new --dev`, or `dev activate` for an official Package); `dev sync` is only for a source
+   repository on another machine. Stop the watcher before release verification.
 7. Create and install an immutable release.
 8. Run the declared device verification hook.
 9. Generate the handoff and record the exact release, evidence, and known issues.

@@ -384,6 +384,16 @@ progress { width: min(280px, 100%); }
 .github-mark { width: 1rem; height: 1rem; fill: currentColor; }
 .package-tags { display: flex; flex-wrap: wrap; gap: 5px; }
 .package-tag { padding: 3px 7px; border-radius: 999px; background: #f0f3f5; color: var(--muted); font-size: .72rem; }
+.package-state { font-weight: 600; }
+.package-state.state-official { background: #e6f4ea; color: #137333; }
+.package-state.state-development { background: #fef3c7; color: #92400e; }
+.package-state.state-modified { background: #fde7e9; color: #a50e0e; }
+.package-state.state-conflicted { background: #fde7e9; color: #a50e0e; }
+.package-development-summary { margin: 8px 0 0; font-size: .8rem; color: #92400e; }
+.development-body { display: grid; gap: 8px; margin-top: 8px; }
+.development-backup { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 6px 0; border-top: 1px solid var(--line, #e3e7ea); }
+.choice-row { flex-wrap: wrap; }
 .package-meta { display: grid; gap: 0; margin-top: 10px; }
 .package-meta .value-row { min-height: 34px; padding: 6px 0; font-size: .78rem; }
 .package-card .button-row { margin-top: auto; padding-top: 11px; }

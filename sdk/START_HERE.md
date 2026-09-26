@@ -1,6 +1,31 @@
 # Extension Package SDK
 
-The SDK is the shortest supported path from an independent Package source repository to an immutable installed release.
+The SDK is the shortest supported path from an idea to a running Package and then to an immutable
+installed release. On a phone the primary flow needs nothing but Termux, Git, the Framework, and
+this SDK:
+
+## On-phone local development (start here)
+
+```sh
+termux-os-sdk new --type app --template web --dev \
+  --id org.example.app.my-app --name "My App"      # runnable at once; no release, no restart
+termux-os-sdk dev start org.example.app.my-app     # hot reload while you edit
+cd "$(termux-os-sdk dev status org.example.app.my-app --json | node -pe 'JSON.parse(require("fs").readFileSync(0)).worktree')"
+# edit web/, test in Chrome at http://127.0.0.1:8980/packages/org.example.app.my-app/
+git switch -c feature/x && git commit -am "…"     # the installed work tree is the Git repository
+termux-os-sdk release org.example.app.my-app       # builds from that same work tree
+termux-os-sdk install /absolute/path/to/release.tar.gz   # first official Release (same version)
+```
+
+`new --dev` creates a *development-only* Installed Package: `~/.termux-os/packages/<id>/versions/<v>/`
+is its one Git work tree (a local baseline commit, a repo-local Git identity — a marked placeholder
+when Git has no global identity), there is no official Release yet, and restore/rollback say so.
+The first `install` of a Release built from the current HEAD makes it official and backs up the
+development history automatically. To change an official Package later, enter Development
+explicitly (`termux-os-sdk dev activate <id>` or the Develop action in the Package Manager) and edit the same tree.
+
+Everything below describes the separate-source-repository workflow, which remains supported for
+larger projects and for development from another machine.
 
 For a public GitHub + Package Registry + phone-market release, read
 [Public Package publication](PUBLISHING.md) after this page. It explains the
@@ -50,9 +75,14 @@ loads or watches it.
 ```sh
 termux-os-sdk doctor org.example.service.demo
 termux-os-sdk test org.example.service.demo
+termux-os-sdk dev start org.example.service.demo
+```
+
+Remote / advanced — only when the source lives on another machine:
+
+```sh
 termux-os-sdk dev sync org.example.service.demo \
   --connection <name> --source /absolute/path/to/the/repository
-termux-os-sdk dev start org.example.service.demo
 ```
 
 `dev` watches the installed active worktree; it does not create a second Package. A sync is atomic,

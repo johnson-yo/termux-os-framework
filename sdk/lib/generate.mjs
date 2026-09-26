@@ -8,9 +8,13 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { FW_ROOT, defaultSourceRoot, emit, fail, sdkMetaDir } from './util.mjs';
+import os from 'node:os';
+import { FW_ROOT, defaultSourceRoot, emit, fail, sdkMetaDir, frameworkToken } from './util.mjs';
+import { resolveConnection, frameworkFetch } from './connection.mjs';
 
 const TYPES = ['service', 'app', 'adapter', 'asset'];
+// `web`: the smallest Web App — static page + no-op backend, no service, worker, or port.
+const TEMPLATES = { web: ['app'] };
 const MENU_PARENT = {
   service: '/admin/services',
   app: '/admin/applications',
@@ -34,6 +38,12 @@ export async function cmdNew(flags, pos) {
   if (flags.workspace !== undefined) {
     return fail(flags, 'retired_option', '--workspace', 'Use --out-dir or TERMUX_OS_SOURCE_ROOT; ~/termux-os-dev/packages is legacy only.');
   }
+  const template = flags.template ? String(flags.template) : null;
+  if (template && !TEMPLATES[template]?.includes(type)) {
+    return fail(flags, 'invalid_template', `--template ${template} is not available for --type ${type}`,
+      'Use --type app --template web for the smallest Web App.');
+  }
+  if (flags.dev) return createOnDevice(flags, { type, id, name, template });
   const sourceRoot = flags['out-dir'] ? path.dirname(path.resolve(String(flags['out-dir']))) : defaultSourceRoot();
   const dir = flags['out-dir'] ? path.resolve(String(flags['out-dir'])) : path.join(sourceRoot, id);
   const location = flags['out-dir'] ? `explicit --out-dir (${dir})`
@@ -45,7 +55,7 @@ export async function cmdNew(flags, pos) {
   const v = { ID: id, NAME: name, TYPE: type, SHORT: short,
     SERVICE_ID: type === 'app' ? `app.${short}` : short };
 
-  const files = { ...commonFiles(v), ...extraFiles[type](v) };
+  const files = packageFiles(v, template);
   for (const [rel, content] of Object.entries(files)) {
     // `.sdk/` 是開發痕跡不是包的內容：它落在工作樹之外，否則 `new` 生成的包
     // 在第一秒就已經是 dev 了。
@@ -77,6 +87,85 @@ export async function cmdNew(flags, pos) {
     console.log(`✓ Generated ${o.type} Package: ${o.id}\n  Location: ${o.location}\n  ${o.dir}\n`);
     console.log(o.files.map((f) => `  ${f}`).join('\n'));
     console.log(`\nNext:\n${o.next.map((n) => `  ${n}`).join('\n')}`);
+  });
+}
+
+function packageFiles(v, template = null) {
+  const w = { ...v, WEB: template === 'web' };
+  return { ...commonFiles(w), ...(w.WEB ? webExtras(w) : extraFiles[w.TYPE](w)) };
+}
+
+/**
+ * `new --dev`: create the Package directly as a development-only Installed Package on this
+ * device. The active version directory is the one Git work tree — no source repository elsewhere,
+ * no Release archive, no install, no Framework restart. The running Framework is asked to load it.
+ */
+async function createOnDevice(flags, { type, id, name, template }) {
+  const { createDevelopmentPackage } = await import(path.join(FW_ROOT, 'src/packages/zero-create.mjs'));
+  const { installedRoot } = await import(path.join(FW_ROOT, 'src/packages/installed-root.mjs'));
+  const { validateManifest } = await import(path.join(FW_ROOT, 'src/packages/manifest.mjs'));
+  const started = Date.now();
+  const short = id.split('.').pop();
+  const v = { ID: id, NAME: name, TYPE: type, SHORT: short, SERVICE_ID: type === 'app' ? `app.${short}` : short };
+  const files = packageFiles(v, template);
+  const check = validateManifest(JSON.parse(files['termux-os.package.json']));
+  if (!check.ok) return fail(flags, 'generated_manifest_invalid', check.errors.join('; '), 'Report an SDK generator defect.');
+  const root = installedRoot();
+  const stagingParent = fs.mkdtempSync(path.join(os.tmpdir(), 'termux-os-new-'));
+  const staging = path.join(stagingParent, id);
+  const meta = [];
+  for (const [rel, content] of Object.entries(files)) {
+    // `.sdk/` is development metadata: it lands beside versions/, never in the work tree.
+    if (rel.startsWith('.sdk/')) { meta.push([rel.slice('.sdk/'.length), content]); continue; }
+    const p = path.join(staging, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, content);
+  }
+  fs.chmodSync(path.join(staging, 'scripts/smoke.sh'), 0o755);
+  const created = createDevelopmentPackage({ id, staging, root });
+  fs.rmSync(stagingParent, { recursive: true, force: true });
+  if (!created.ok) {
+    return fail(flags, created.code, created.detail, created.code === 'package_already_installed'
+      ? `Inspect it with: termux-os-sdk dev status ${id}` : 'Nothing was left behind; fix the reported cause and retry.');
+  }
+  for (const [rel, content] of meta) {
+    const p = path.join(created.package_root, '.sdk', rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, content);
+  }
+  const createdMs = Date.now() - started;
+  // Load it into the running Framework through the Dev reload transaction (no restart).
+  const conn = resolveConnection(flags);
+  const token = frameworkToken();
+  let loaded = null;
+  let status = null;
+  if (conn.framework_url) {
+    try {
+      const r = await fetch(`${conn.framework_url}/api/dev/packages/${id}/reload`, {
+        method: 'POST', signal: AbortSignal.timeout(30000), headers: { Authorization: `Bearer ${token}` },
+      });
+      loaded = await r.json().catch(() => null);
+    } catch (error) { loaded = { ok: false, error: `framework unreachable: ${String(error?.cause?.code ?? error?.message ?? error)}` }; }
+    const s = await frameworkFetch(conn, `/api/dev/packages/${id}/status`, { token });
+    status = s.ok ? s.data : null;
+  }
+  const base = conn.framework_url ?? 'http://127.0.0.1:8980';
+  const out = {
+    ok: true, package_id: id, type, template: template ?? 'default',
+    state: status?.state ?? 'development', development_only: true,
+    version: created.version, worktree: created.worktree,
+    git: { branch: created.branch, head: created.head, identity: created.identity },
+    loaded: loaded?.ok === true, load_error: loaded?.ok ? null : (loaded?.detail ?? loaded?.error ?? 'Framework not reachable'),
+    package_url: `${base}/packages/${id}/`,
+    elapsed_ms: { create: createdMs, total: Date.now() - started },
+    next: [`cd ${created.worktree}`, `termux-os-sdk dev start ${id}`],
+  };
+  emit(out, flags, (o) => {
+    console.log(`✓ Created ${o.package_id} ${o.version} as a Development Package on this device.`);
+    console.log(`  Work tree : ${o.worktree}   (the only source; edit and commit here)`);
+    console.log(`  Git       : ${o.git.branch} @ ${o.git.head.slice(0, 12)}${o.git.identity === 'placeholder' ? '  (placeholder identity — set user.name/user.email before pushing)' : ''}`);
+    console.log(`  Open      : ${o.package_url}${o.loaded ? '' : `   (not loaded yet: ${o.load_error})`}`);
+    console.log(`Next: termux-os-sdk dev start ${o.package_id}`);
   });
 }
 
@@ -132,9 +221,9 @@ function manifestJson(v) {
     admin: { title: v.NAME },
     verification: { device: { command: 'node scripts/verify-device.mjs', timeout_ms: 30000, requires_running: false } },
     components: {
-      services: v.TYPE === 'service' ? [v.SERVICE_ID] : v.TYPE === 'app' ? [v.SERVICE_ID] : [],
+      services: v.WEB ? [] : v.TYPE === 'service' ? [v.SERVICE_ID] : v.TYPE === 'app' ? [v.SERVICE_ID] : [],
       actions: v.TYPE === 'adapter' ? [`${v.SHORT}.probe`, `${v.SHORT}.echo`] : [],
-      apps: v.TYPE === 'app' ? [v.SHORT] : [],
+      apps: v.TYPE === 'app' && !v.WEB ? [v.SHORT] : [],
       ...(v.TYPE === 'asset' ? { assets: [`model.${v.SHORT}`] } : {}),
     },
     capabilities: { provides: [], requires: [] },
@@ -210,6 +299,7 @@ The self-test passes, doctor has no failures, an immutable release is installed 
 }
 
 function webIndex(v) {
+  if (v.WEB) return webOnlyIndex(v);
   return `<!--
   SPDX-License-Identifier: Apache-2.0
   [INPUT]: Package status APIs and the Framework browser session.
@@ -255,6 +345,7 @@ ${v.TYPE === 'adapter' ? `  <section class="card">
 }
 
 function webApp(v) {
+  if (v.WEB) return webOnlyApp(v);
   return `/**
  * SPDX-License-Identifier: Apache-2.0
  * [INPUT]: Inputs documented by the generated module and its Package contracts.
@@ -342,6 +433,97 @@ node "$HERE/test/self-test.mjs" || fail=1
 echo "smoke: $([ $fail -eq 0 ] && echo ALL PASS || echo FAILED)"
 exit $fail
 `;
+}
+
+// ============================================================
+// Minimal Web App (--template web): a static page and a no-op backend.
+// ============================================================
+function webOnlyIndex(v) {
+  return `<!--
+  SPDX-License-Identifier: Apache-2.0
+  [INPUT]: The Framework browser session and this Package's own record.
+  [OUTPUT]: The Web App page, served straight from the Package work tree.
+  [POS]: web/index.html in the generated Web App.
+  [PROTOCOL]: Keep this English header synchronized with Package behavior.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${v.NAME}</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>${v.NAME} <a class="back" href="/admin">Back to administration</a></h1>
+  <section class="card">
+    <h2>Hello</h2>
+    <p id="greeting">This Web App runs from its own work tree. Edit web/index.html and save.</p>
+    <p id="meta" class="note">-</p>
+  </section>
+</main>
+<script src="/admin/session.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
+`;
+}
+
+function webOnlyApp(v) {
+  return `/**
+ * SPDX-License-Identifier: Apache-2.0
+ * [INPUT]: The Framework browser session (window.TermuxOS) and GET /api/packages/<id>.
+ * [OUTPUT]: The page's small dynamic part: this Package's name and version.
+ * [POS]: web/app.js in the generated Web App.
+ * [PROTOCOL]: Keep this English header synchronized with Package behavior.
+ */
+const pathPackageId = decodeURIComponent(location.pathname.split('/')[2] ?? '');
+const PACKAGE_ID = /^[\\w.@-]+$/.test(pathPackageId) ? pathPackageId : '${v.ID}';
+const $ = (id) => document.getElementById(id);
+
+window.TermuxOS.ready.then(async () => {
+  try {
+    const response = await window.TermuxOS.api('/api/packages/' + PACKAGE_ID);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail ?? result.error ?? \`HTTP \${response.status}\`);
+    $('meta').textContent = \`\${result.package?.manifest?.name ?? PACKAGE_ID} \${result.package?.manifest?.version ?? ''}\`;
+  } catch (e) { $('meta').textContent = String(e); }
+});
+`;
+}
+
+function webExtras(v) {
+  return {
+    'package.mjs': `/**
+ * SPDX-License-Identifier: Apache-2.0
+ * [INPUT]: The Framework Package context.
+ * [OUTPUT]: Nothing yet: a Web App needs no backend until it wants its own API.
+ * [POS]: package.mjs in the generated Web App.
+ * [PROTOCOL]: Add routes with context.routes.register(method, path, handler) when needed.
+ */
+export async function register() {}
+`,
+    'test/self-test.mjs': `// SPDX-License-Identifier: Apache-2.0
+// [INPUT]: This Package's files.
+// [OUTPUT]: PASS/FAIL lines and a truthful exit status.
+// [POS]: test/self-test.mjs in the generated Web App.
+// [PROTOCOL]: Fast, isolated, no network.
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+let fails = 0;
+const t = (name, ok) => { console.log(\`\${ok ? 'PASS' : 'FAIL'} \${name}\`); if (!ok) fails += 1; };
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'termux-os.package.json'), 'utf8'));
+t('manifest names this Package', manifest.id === '${v.ID}');
+t('the WebUI entry exists', fs.existsSync(path.join(root, manifest.entrypoints.webui)));
+const mod = await import(pathToFileURL(path.join(root, manifest.entrypoints.backend)).href);
+t('the backend exports register()', typeof mod.register === 'function');
+process.exit(fails ? 1 : 0);
+`,
+  };
 }
 
 // ============================================================
@@ -1001,6 +1183,7 @@ process.exit(fails ? 1 : 0);
 // ============================================================
 function verifyDeviceMjs(v) {
   const statusPath = v.TYPE === 'adapter' ? '/config' : '/status';
+  const statusCheck = v.WEB ? '' : `await check('${statusPath === '/status' ? 'status_api' : 'config_api'}', () => get('/api/packages/${v.ID}${statusPath}', true));\n`;
   return `#!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 // [INPUT]: FRAMEWORK_URL, TERMUX_OS_TOKEN, and the installed Framework HTTP API.
@@ -1022,8 +1205,7 @@ const get = async (p, auth) => {
 };
 
 await check('package_identity', () => get('/api/packages/${v.ID}', true));
-await check('${statusPath === '/status' ? 'status_api' : 'config_api'}', () => get('/api/packages/${v.ID}${statusPath}', true));
-// TODO: Add real device, data, configuration, and clean-stop checks.
+${statusCheck}// TODO: Add real device, data, configuration, and clean-stop checks.
 // Use degraded or skip for unavailable optional behavior; never invent a pass.
 
 const result = checks.some((c) => c.result === 'fail') ? 'fail' : 'pass';

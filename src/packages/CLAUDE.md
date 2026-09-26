@@ -17,6 +17,11 @@ refs, stash) and from the watcher (runtime only). Destructive operations consult
 a version directory; development backups live outside the Installed Root in
 `~/.termux-os/package-archives/<id>/`.
 
+A development-only Package (`zero-create.mjs`, `new --dev`) is an Installed Package whose
+`active.json` says `source_kind: "development"` with no archive SHA and no hashes; its first commit
+is a local baseline, never a release. Restore answers `official_baseline_unavailable`, rollback
+`no_previous_release`, and its first verified Release may carry the same version (officialization).
+
 Package loading is failure-isolated. Manifests, declared artifacts, targets, paths, and compatibility are validated before activation. HTTP routes and authenticated WebSocket routes are registered per Package and removed with the Package. Fixtures in `fixtures/` are test-only and must never load during normal empty-Core startup.
 
 Supervised Package services receive `TERMUX_OS_PORT_<ID>_HOST` and

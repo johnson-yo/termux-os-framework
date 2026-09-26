@@ -26,6 +26,9 @@ http://127.0.0.1:8980. For another device, use a private
   access [<package-id>]                Show local and LAN browser URLs
   inspect <package-id> [--json]        Inspect one Package source repository
   choose [--<question> yes|no] [--json] Choose the smallest Package type
+  new --type app --template web --id <id> --name <n> --dev
+                                       On this phone: create a runnable Development
+                                       Package; its installed work tree is the source
   new --type <t> --id <id> --name <n> [--out-dir <dir>]
                                        Generate source in a Git-oriented source root;
                                        legacy ~/termux-os-dev/packages is not used
@@ -42,7 +45,9 @@ http://127.0.0.1:8980. For another device, use a private
                                        Running/Verify truth and drift
   next <package-id> [--json]           Show the next evidence-producing step
   test <package-id> [--json]           Run only this Package's tests and doctor
-  release <package-id> [--target <t>] [--artifact-dir <d>]  doctor→test→pack→verify
+  release <package-id> [--target <t>] [--artifact-dir <d>] [--from-active]
+                                       doctor→test→pack→verify (from the installed work
+                                       tree when the Package is in Development)
   install <tar> [--connection <c>]     Transfer→check→install→check-installed
   verify-device <package-id> [--dev]   Run the declared device verification hook;
                                        installed mode binds exact Release identity

@@ -55,6 +55,7 @@ scripts/smoke-asset-payload-v2.mjs
 scripts/smoke-core-independence.sh
 scripts/smoke-dev-provenance.mjs
 scripts/smoke-dev-runtime-resilience.mjs
+scripts/smoke-zero-create.mjs
 scripts/smoke-framework-installer.sh
 scripts/smoke-framework-update-web.sh
 scripts/smoke-framework-update.sh
@@ -232,6 +233,7 @@ src/packages/provenance.mjs
 src/packages/reconcile.mjs
 src/packages/runtime-contract.mjs
 src/packages/version.mjs
+src/packages/zero-create.mjs
 src/packages/workspace-hash.mjs
 src/server.mjs
 src/stage/CLAUDE.md

@@ -35,6 +35,7 @@ import {
   activateDevelopment, readDevelopment, writeDevelopment, clearDevelopment, releaseMetadata,
   listDevelopmentBackups, developmentBackupRoot as backupRoot, DEVELOPMENT_BACKUP_SCHEMA as BACKUP_SCHEMA,
 } from '../src/packages/provenance.mjs';
+import { isDevelopmentOnly } from '../src/packages/zero-create.mjs';
 import { reconcilePackage, legacyWorkspaceCandidates } from '../src/packages/reconcile.mjs';
 import { acquirePackageLockSync } from '../src/packages/operation-lock.mjs';
 
@@ -819,7 +820,11 @@ async function cmdInstall(tarPath, shaPath, args = []) {
   // 同版本規則（§6.3）：任何已知版本槽（active 或 previous）都不許換內容
   // 023 §7.1：身份=id+version+**target**，故同版本不同 target 允許不同 hash
   const sameTarget = (prevActive?.active_target ?? TARGET_GENERIC) === (t.target?.id ?? TARGET_GENERIC);
-  if (prevActive?.active_version === version && sameTarget) {
+  // The one exception: a development-only Package has never had an official Release in any slot,
+  // so its first verified Release may carry the same version ("officialization"). The local
+  // history guard above has already required a backup or an explicit discard.
+  const officializing = prevActive?.active_version === version && sameTarget && isDevelopmentOnly(prevActive);
+  if (prevActive?.active_version === version && sameTarget && !officializing) {
     if (prevActive.archive_sha256 === sha256) {
       operationLock.release();
       console.log(`already installed ${id} ${version} (changed=false)`);
@@ -827,6 +832,7 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     }
     die(`same version ${version} + same target ${t.target?.id} with different hash refused (installed ${prevActive.archive_sha256}, archive ${sha256}); bump the version`);
   }
+  if (officializing) console.log(`officializing development-only ${id} ${version} with verified Release ${sha256.slice(0, 12)}…`);
   const knownHash = prevActive?.hashes?.[`${version}@${t.target?.id ?? TARGET_GENERIC}`];
   if (knownHash && knownHash !== sha256) {
     die(`version ${version} target ${t.target?.id} was previously installed with different hash (${knownHash}); bump the version`);
@@ -835,6 +841,7 @@ async function cmdInstall(tarPath, shaPath, args = []) {
   const staging = path.join(root, '.staging', `${id}-${Date.now()}`);
   const cleanup = () => fs.rmSync(path.join(root, '.staging'), { recursive: true, force: true });
   let assetsInstalled = [];
+  let officializeHeld = null;
   try {
     fs.mkdirSync(staging, { recursive: true });
     execFileSync('tar', ['-xzf', tarPath, '-C', staging]);
@@ -866,6 +873,11 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     });
 
     const versionDir = path.join(pkgDir, 'versions', version);
+    if (officializing) {
+      // The development tree occupies the same slot; hold it until the Release has passed post-check.
+      officializeHeld = `${versionDir}.officialize-held-${Date.now()}`;
+      fs.renameSync(versionDir, officializeHeld);
+    }
     fs.rmSync(versionDir, { recursive: true, force: true }); // 殘留半成品清掉（同版本不同 hash 已在上面擋）
     fs.mkdirSync(path.dirname(versionDir), { recursive: true });
     fs.renameSync(stagedPkg, versionDir);
@@ -875,8 +887,8 @@ async function cmdInstall(tarPath, shaPath, args = []) {
       schema: ACTIVE_SCHEMA, id,
       active_version: version,
       active_target: targetId,                                     // 023 §7.2
-      previous_version: prevActive?.active_version ?? null,
-      previous_target: prevActive?.active_target ?? (prevActive ? TARGET_GENERIC : null),
+      previous_version: officializing ? null : prevActive?.active_version ?? null,
+      previous_target: officializing ? null : prevActive?.active_target ?? (prevActive ? TARGET_GENERIC : null),
       archive_sha256: sha256,
       installed_at: new Date().toISOString(),
       // rollback 時還原對應 sha；鍵含 target（§7.1：同版本不同 target 是不同 Release）
@@ -893,6 +905,8 @@ async function cmdInstall(tarPath, shaPath, args = []) {
       const w = await waitPackageStatus(id, true);
       if (!w.ok) throw new Error(`post-install check failed: ${w.error}`);
     }
+
+    if (officializeHeld) { fs.rmSync(officializeHeld, { recursive: true, force: true }); officializeHeld = null; }
 
     // 只留 active+previous 兩個版本（§8）；必須在 post-install 成功後才修剪——
     // 否則 broken 更新會先剪掉可回退的舊版本目錄。
@@ -933,6 +947,12 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     cleanupAssetStages(assetsInstalled);
     cleanupAssetStagingParent();
     cleanup();
+    if (officializeHeld && fs.existsSync(officializeHeld)) {
+      const slot = path.join(pkgDir, 'versions', version);
+      fs.rmSync(slot, { recursive: true, force: true });
+      fs.renameSync(officializeHeld, slot);
+      console.error(`restored the development tree of ${id} ${version} after the failed officialization`);
+    }
     if (prevActive) {
       writeActive(id, prevActive);
       try {
@@ -1444,9 +1464,12 @@ async function cmdRestore(id, args = []) {
   const target = active.active_target ?? TARGET_GENERIC;
   const tar = archiveTarPath(pkgDir, version, target);
   if (!fs.existsSync(tar)) {
-    die(`no saved archive for ${id} ${archiveKey(version, target)}.\n`
-      + '  Only versions installed by a build that saves originals can be restored offline;\n'
-      + '  reinstall this version from the catalog to obtain one.');
+    operationLock.release();
+    refuse('official_baseline_unavailable', isDevelopmentOnly(active)
+      ? `${id} ${version} is development-only: it has never had an official Release, so there is nothing to restore. `
+        + 'Nothing was changed. Release and install it to create an official baseline.'
+      : `no saved official archive for ${id} ${archiveKey(version, target)}; nothing was changed. `
+        + 'Reinstall this version from the catalog to obtain one.');
   }
   const expected = active.hashes?.[archiveKey(version, target)] ?? active.archive_sha256 ?? null;
   const actual = sha256File(tar);
@@ -1626,7 +1649,7 @@ async function cmdRollback(id) {
   const active = readActive(id);
   if (!active) die(`${id} is not installed`);
   const prev = active.previous_version;
-  if (!prev) die(`${id} has no previous version to roll back to`);
+  if (!prev) { operationLock.release(); refuse('no_previous_release', `${id} has no previous Release to roll back to; nothing was changed`); }
   const prevDir = path.join(root, id, 'versions', prev);
   if (!fs.existsSync(prevDir)) die(`previous version directory missing: versions/${prev}`);
   let currentManifest = null;

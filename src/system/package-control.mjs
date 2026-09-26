@@ -12,7 +12,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolveInstalledPackages } from '../packages/installed-root.mjs';
-import { packageStateSnapshot } from '../packages/provenance.mjs';
+import { packageStateSnapshot, listDevelopmentBackups } from '../packages/provenance.mjs';
 import { getPackagePorts } from './port-registry.mjs';
 import { isPackageEnabled } from './package-settings.mjs';
 import { nodeExecutable } from './node-runtime.mjs';
@@ -23,7 +23,7 @@ import {
 const JOB_SCHEMA = 'termux-os.package-job.v1';
 const UPLOAD_SCHEMA = 'termux-os.package-upload.v1';
 const SNAPSHOT_SCHEMA = 'termux-os.package-manager.v1';
-const ACTIONS = new Set(['check', 'install', 'rollback', 'uninstall']);
+const ACTIONS = new Set(['check', 'install', 'rollback', 'uninstall', 'restore', 'restore_backup']);
 const ID_RE = /^[\w.@-]+$/;
 const INSTALL_SOURCE = Object.freeze({ LOCAL_FILE: 'local_file', REGISTRY: 'registry' });
 
@@ -102,6 +102,11 @@ function packageInstallSafety(versionRoot, packageRoot, active) {
     reason: ps.reason,
     summary: ps.summary,
     provenance: ps.provenance,
+    development_only: ps.development_only,
+    branch: git.branch,
+    detached: git.detached,
+    commits_ahead: git.commits_ahead ?? 0,
+    worktree_changes: git.changes?.length ?? 0,
     dirty: ps.protection_required,
     local_history_present: ps.local_history_present,
     protection_reasons: ps.protection_reasons,
@@ -310,6 +315,12 @@ export function recoverPackageJobs() {
   if (fs.existsSync(d.lock) && (!lock || !processAlive(lock.pid))) fs.rmSync(d.lock, { recursive: true, force: true });
 }
 
+function backupName(value) {
+  const name = String(value ?? '');
+  if (!/^[\w.@:-]+\.tar\.gz$/.test(name)) throw Object.assign(new Error('invalid development backup name'), { code: 'backup_not_found' });
+  return name;
+}
+
 function uninstallOptions(options) {
   if (options.preserve_development === true && options.force_discard === true) {
     throw Object.assign(new Error('choose either development backup or force discard, not both'), { code: 'dirty_options_conflict' });
@@ -353,8 +364,10 @@ export function startPackageJob(action, target) {
       package_id: packageId(target.package_id, 'package_id'),
       // Uninstall refuses to delete local history by default; the caller may ask for a backup first
       // or an explicit discard, never both.
-      ...(action === 'uninstall' && (target?.options?.preserve_development === true || target?.options?.force_discard === true)
+      ...(['uninstall', 'restore', 'restore_backup'].includes(action)
+        && (target?.options?.preserve_development === true || target?.options?.force_discard === true)
         ? { options: uninstallOptions(target.options) } : {}),
+      ...(action === 'restore_backup' ? { backup: backupName(target.backup) } : {}),
     };
   for (const id of normalized.upload_ids ?? (normalized.upload_id ? [normalized.upload_id] : [])) {
     if (!getPackageUpload(id, { internal: true })) {
@@ -435,6 +448,13 @@ export function packageManagerSnapshot(loaderPackages = []) {
       health: loaded?.status === 'loaded' ? 'available' : 'attention',
       webui: loaded?.status === 'loaded' ? `/packages/${id}/` : null,
       install_safety: installSafety,
+      // Development view for the card: where the one work tree is, how far it is from its
+      // baseline, whether an official Release can be restored, and how many backups exist.
+      worktree: dir,
+      development_only: installSafety.development_only,
+      restorable: fs.existsSync(path.join(packageRoot ?? path.join(config.installedRoot, id), 'archive',
+        `${active.active_version}@${active.active_target ?? 'generic'}.tar.gz`)),
+      development_backups: listDevelopmentBackups(id).length,
     };
   });
   return {

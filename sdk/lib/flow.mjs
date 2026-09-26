@@ -55,8 +55,12 @@ export async function cmdTest(flags, pos) {
 // Release delegates doctor, pack, and verify to their canonical implementations.
 export async function cmdRelease(flags, pos) {
   const id = pos[0];
-  if (!id) return fail(flags, 'missing_package_id', null, 'Usage: termux-os-sdk release <package-id> [--target <target>] [--artifact-dir <dir>]');
-  const dir = packageDir(id);
+  if (!id) return fail(flags, 'missing_package_id', null, 'Usage: termux-os-sdk release <package-id> [--target <target>] [--artifact-dir <dir>] [--from-active]');
+  // On a phone the Release is built from the installed active worktree itself.
+  const dir = packageDir(id, { fromActive: Boolean(flags['from-active']) });
+  if (flags['from-active'] && !dir.includes(`${path.sep}versions${path.sep}`)) {
+    return fail(flags, 'not_installed', id, 'There is no installed active worktree to release from.');
+  }
   if (!fs.existsSync(dir)) return fail(flags, 'package_not_found', dir, 'Run termux-os-sdk context.');
 
   stage('doctor');
@@ -179,8 +183,26 @@ export async function cmdInstall(flags, pos) {
       'Resolve the reported target or external requirement; do not bypass preflight.');
   }
 
+  /**
+   * First officialization of a Package developed here: when this artifact was built from exactly
+   * the HEAD the Development work tree has now, installing it is "release what I just made", and the
+   * development history is backed up automatically. Any other archive keeps the ordinary guard.
+   */
+  let protectionFlag = flags['preserve-development'] ? ' --preserve-development' : flags['force-discard'] ? ' --force-discard' : '';
+  if (!protectionFlag) {
+    let assetHead = null;
+    try { assetHead = JSON.parse(fs.readFileSync(`${tarAbs}.asset.json`, 'utf8')).head ?? null; } catch { /* Not built by the shallow-Git builder. */ }
+    const pkgGuess = base.replace(/-\d+\.\d+\.\d+.*$/, '');
+    const dev = assetHead ? await frameworkFetch(conn, `/api/dev/packages/${pkgGuess}/status`, { token: frameworkToken() }) : null;
+    if (dev?.ok && dev.data?.state === 'development' && dev.data?.git?.head === assetHead) {
+      protectionFlag = ' --preserve-development';
+      console.log(`note: ${base} was built from the current Development HEAD ${assetHead.slice(0, 12)}; `
+        + 'its development history is backed up before the official install.');
+    }
+  }
+
   stage('package-manager install');
-  if (transportExec(conn, `cd ${root} && node scripts/package-manager.mjs install ${devicePath}`, flags) !== 0) {
+  if (transportExec(conn, `cd ${root} && node scripts/package-manager.mjs install ${devicePath}${protectionFlag}`, flags) !== 0) {
     return fail(flags, 'install_failed', null, 'Inspect the installer output. The previous active version was restored automatically.');
   }
 

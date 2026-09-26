@@ -206,7 +206,8 @@ export function devStatus(id) {
   // state, state_reason, and state_summary come from the one shared snapshot so they cannot disagree.
   const ps = reconcile.package_state;
   return {
-    ok: true, package_id: id, version_dir: reconcile.active.path,
+    ok: true, package_id: id, version_dir: reconcile.active.path, worktree: reconcile.active.path,
+    development_only: ps?.development_only ?? false,
     state: reconcile.state, state_reason: reconcile.state_reason, state_summary: reconcile.state_summary,
     provenance: ps?.provenance ?? null, development: ps?.development ?? null,
     local_history_present: ps?.local_history_present ?? null, protection_required: ps?.protection_required ?? null,

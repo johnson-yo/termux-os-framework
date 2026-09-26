@@ -148,7 +148,7 @@ export function gitHistoryScan(dir, releasedHead) {
   const out = {
     available: false, reason: null, worktree: 'unknown', changes: [], ignored: [],
     head: null, released_head: releasedHead ?? null, branch: null, detached: false,
-    head_relation: 'unknown', local_refs: [], stash_count: 0, local_history: null,
+    head_relation: 'unknown', commits_ahead: 0, local_refs: [], stash_count: 0, local_history: null,
   };
   const state = packageGitState(dir);
   if (state.state === GIT_STATE.UNKNOWN) return { ...out, reason: state.reason, error: state.error };
@@ -171,6 +171,7 @@ export function gitHistoryScan(dir, releasedHead) {
     const listed = read(['rev-list', rev, '--not', releasedHead]);
     return listed === null ? null : listed.split('\n').filter(Boolean).length;
   };
+  out.commits_ahead = unreachable('HEAD') ?? 0;
   if (out.head === releasedHead) out.head_relation = 'at-release';
   else {
     let ancestor = false;
