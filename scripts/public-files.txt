@@ -53,6 +53,7 @@ scripts/reproducible-archive.py
 scripts/smoke-admin-shell.sh
 scripts/smoke-asset-payload-v2.mjs
 scripts/smoke-core-independence.sh
+scripts/smoke-dev-provenance.mjs
 scripts/smoke-dev-runtime-resilience.mjs
 scripts/smoke-framework-installer.sh
 scripts/smoke-framework-update-web.sh
@@ -227,6 +228,7 @@ src/packages/loader.mjs
 src/packages/model-declarations.mjs
 src/packages/manifest.mjs
 src/packages/operation-lock.mjs
+src/packages/provenance.mjs
 src/packages/reconcile.mjs
 src/packages/runtime-contract.mjs
 src/packages/version.mjs

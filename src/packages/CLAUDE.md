@@ -10,6 +10,13 @@ A reload is a transaction — preflight the candidate generation, swap, and rest
 record if `register()` fails — and it is the only code-reload path (Dev reload and Package restart
 share it). A generation isolates the module cache only; `configRoot` stays `<packageRoot>/config`.
 
+Package state has one source, `provenance.mjs`: provenance (official | development — sticky,
+explicitly activated, stored in `<packageRoot>/.development/`, cleared only by a verified official
+restore/install) is kept apart from Git truth (read live: work tree, HEAD vs released HEAD, local
+refs, stash) and from the watcher (runtime only). Destructive operations consult it before touching
+a version directory; development backups live outside the Installed Root in
+`~/.termux-os/package-archives/<id>/`.
+
 Package loading is failure-isolated. Manifests, declared artifacts, targets, paths, and compatibility are validated before activation. HTTP routes and authenticated WebSocket routes are registered per Package and removed with the Package. Fixtures in `fixtures/` are test-only and must never load during normal empty-Core startup.
 
 Supervised Package services receive `TERMUX_OS_PORT_<ID>_HOST` and

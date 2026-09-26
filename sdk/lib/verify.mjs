@@ -49,7 +49,8 @@ export async function cmdVerifyDevice(flags, pos) {
   if (p.status === 404 || !p.data?.package) return fail(flags, 'not_installed', id, 'Release and install the Package, or use --dev for source-repository iteration.');
   const pk = p.data.package;
   const dev = await frameworkFetch(conn, `/api/dev/packages/${id}/status`, { token: TOKEN });
-  if (dev.ok && ['dev', 'conflicted'].includes(dev.data?.reconcile?.state)) {
+  // Only an official, unmodified active tree can bind Release evidence.
+  if (dev.ok && ['development', 'modified', 'conflicted'].includes(dev.data?.reconcile?.state)) {
     return fail(flags, 'dev_active', `${id} active worktree is ${dev.data.reconcile.state}; installed verification cannot bind Release evidence.`,
       `Restore/reconcile ${id}, or use termux-os-sdk verify-device ${id} --dev for source-repository evidence.`);
   }

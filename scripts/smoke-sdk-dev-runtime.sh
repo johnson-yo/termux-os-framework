@@ -187,19 +187,19 @@ curl -s -H "$AUTH" $B/api/stage/services | grep -q "@" \
 echo "--- 9. watcher 不改 Git 狀態 ---"
 V=$WORK/installed/$ID/versions/0.1.0
 STATE() { node scripts/package-manager.mjs state $ID 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['state'])"; }
-[ "$(STATE)" = "release" ] && ok "clean package + watcher = release" || bad "clean+watcher 應為 release，實為 $(STATE)"
+[ "$(STATE)" = "official" ] && ok "clean package + watcher = official" || bad "clean+watcher 應為 official，實為 $(STATE)"
 $SDK dev stop $ID --json >/dev/null 2>&1 && ok "dev stop 成功" || bad "dev stop"
-[ "$(STATE)" = "release" ] && ok "dev stop 不改 Git 狀態" || bad "dev stop 後狀態變了"
+[ "$(STATE)" = "official" ] && ok "dev stop 不改 Git 狀態" || bad "dev stop 後狀態變了"
 
 echo "--- 10. 改檔即 dev；watcher 開關不影響判定 ---"
 echo "// smoke edit" >> "$V/package.mjs"
-[ "$(STATE)" = "dev" ] && ok "修改 active worktree → dev（無需任何命令）" || bad "改檔後應為 dev"
+[ "$(STATE)" = "modified" ] && ok "修改 active worktree → modified（無需任何命令）" || bad "改檔後應為 modified"
 $SDK dev start $ID --json >/dev/null 2>&1
-[ "$(STATE)" = "dev" ] && ok "dirty package + watcher 仍為 dev" || bad "watcher 不該改變判定"
+[ "$(STATE)" = "modified" ] && ok "dirty package + watcher 仍為 dev" || bad "watcher 不該改變判定"
 $SDK dev stop $ID --json >/dev/null 2>&1
-[ "$(STATE)" = "dev" ] && ok "stop watcher 後 dirty package 仍為 dev" || bad "stop 後仍應為 dev"
+[ "$(STATE)" = "modified" ] && ok "stop watcher 後 dirty package 仍為 dev" || bad "stop 後仍應為 dev"
 git -C "$V" -c core.fileMode=false checkout -- package.mjs 2>/dev/null
-[ "$(STATE)" = "release" ] && ok "撤銷修改後回到 release" || bad "撤銷後應回 release"
+[ "$(STATE)" = "official" ] && ok "撤銷修改後回到 official" || bad "撤銷後應回 official"
 
 echo "--- 11. reload 用的是正式那一份身分 ---"
 $SDK dev start $ID --json >/dev/null 2>&1
@@ -245,7 +245,7 @@ d = json.load(sys.stdin)
 # ⚠ watcher 與 dev 是兩個維度：watching 說的是「有沒有在監看」，state 說的是
 #    「這份代碼跟發布的一不一樣」。混為一談就等於又造了第二個狀態真相源。
 assert 'watching' in d and 'state' in d, d
-assert d['state'] in ('release','dev','unknown')
+assert d['state'] in ('official','development','modified','unknown','conflicted')
 assert 'instance_id' not in d and 'slug' not in d and 'workspace' not in d, d" \
   && ok "dev status 分開報告 watching 與 Git state" || bad "dev status 欄位"
 $SDK dev stop $ID --json >/dev/null 2>&1
@@ -256,7 +256,7 @@ start_fw
 $SDK dev status $ID --json | python3 -c "
 import json,sys; d=json.load(sys.stdin); assert d['watching'] is False" \
   && ok "重啟後不自動恢復監看" || bad "重啟後監看狀態"
-[ "$(STATE)" = "release" ] && ok "重啟後 Git 狀態仍由工作樹決定" || bad "重啟後狀態"
+[ "$(STATE)" = "official" ] && ok "重啟後 Git 狀態仍由工作樹決定" || bad "重啟後狀態"
 curl -s -H "$AUTH" $B/api/packages | grep -q "@" && bad "重啟後出現 @slug" || ok "重啟後仍無 <id>@<slug>"
 
 echo

@@ -21,8 +21,8 @@ import {
   loadSinglePackage, unregisterPackage, _getRecord, preflightPackageCandidate,
 } from './loader.mjs';
 import { hashWorkspace, WORKSPACE_HASH_SKIP as SKIP } from './workspace-hash.mjs';
-import { packageGitState, describeGitState } from './git-state.mjs';
 import { reconcilePackage } from './reconcile.mjs';
+import { activateDevelopment, listDevelopmentBackups } from './provenance.mjs';
 import { acquirePackageLock } from './operation-lock.mjs';
 import * as stage from '../stage/manager.mjs';
 
@@ -203,12 +203,15 @@ export function devStatus(id) {
     ownedServices: record?.registered?.services ?? [],
   });
   if (!reconcile.active) return { ok: false, error: 'not_installed', package_id: id, reconcile };
-  const git = packageGitState(reconcile.active.path);
+  // state, state_reason, and state_summary come from the one shared snapshot so they cannot disagree.
+  const ps = reconcile.package_state;
   return {
     ok: true, package_id: id, version_dir: reconcile.active.path,
-    state: reconcile.state, state_reason: git.reason, state_summary: reconcile.state === 'conflicted'
-      ? 'conflicted (reconcile required)' : describeGitState(git),
-    changes: git.changes, ignored_paths: git.ignored,
+    state: reconcile.state, state_reason: reconcile.state_reason, state_summary: reconcile.state_summary,
+    provenance: ps?.provenance ?? null, development: ps?.development ?? null,
+    local_history_present: ps?.local_history_present ?? null, protection_required: ps?.protection_required ?? null,
+    git: ps?.git ?? null,
+    changes: ps?.git?.changes ?? [], ignored_paths: ps?.git?.ignored ?? [],
     watching: Boolean(w), watch_mode: w?.watch_mode ?? null, seq: w?.seq ?? 0,
     runtime_generation: reconcile.runtime_generation,
     runtime_owner: reconcile.runtime_owner,
@@ -219,7 +222,8 @@ export function devStatus(id) {
 }
 
 function assertSafe(id, { allowConflict = false } = {}) {
-  const result = reconcilePackage(id, { frameworkRoot: CFG.frameworkRoot, runtime: runtimeFor(id) });
+  // Hot path (every reload): identity and conflicts only, no ref/stash scan.
+  const result = reconcilePackage(id, { frameworkRoot: CFG.frameworkRoot, runtime: runtimeFor(id), history: false });
   if (!result.active) return { ok: false, error: 'not_installed', reconcile: result };
   if (result.conflict && !allowConflict) return {
     ok: false, error: 'package_reconcile_required', reconcile: result,
@@ -371,10 +375,11 @@ async function reloadImpl(id, { reason = 'manual', allowConflict = false } = {})
   if (!loadError && record?.status === 'loaded') {
     // Web assets read the active worktree; backend imports use this generation.
     record.webRoot = path.join(dir, path.dirname(record.manifest.entrypoints.webui));
+    // The new generation is serving from here on; report it before services take their time.
+    recordReload(id, 'loaded');
     const restarted = await startServices(record, wasRunning);
     if (lastGood && isGeneration(lastGood.dir) && lastGood.dir !== generation.path) removeGeneration(lastGood.dir);
     sweepGenerations(id, generation.id);
-    recordReload(id, 'loaded');
     const w = watchers.get(id);
     if (w) { w.gen = generation; w.seq += 1; }
     CFG.log(`dev reload ${id} (${reason}): loaded ${generation.id}`);
@@ -411,6 +416,29 @@ export function reloadPackageRuntime(id, options = {}) {
     finally { lock.release(); }
   });
 }
+
+/**
+ * Explicit Development activation (HTTP). Provenance only: no Git file, branch, workspace, or
+ * watcher is touched; the watcher and provenance stay independent.
+ */
+export function activatePackageDevelopment(id) {
+  return serialized(id, async () => {
+    const lock = await acquirePackageLock(id, { root: process.env.PACKAGES_INSTALLED_DIR });
+    try {
+      const current = reconcilePackage(id, { frameworkRoot: CFG.frameworkRoot });
+      if (!current.active) return { ok: false, error: 'not_installed', error_code: 'not_installed' };
+      let active = null;
+      try { active = JSON.parse(fs.readFileSync(current.active.active_json, 'utf8')); } catch { /* validated by reconcile */ }
+      const result = activateDevelopment({
+        id, versionRoot: current.active.path, packageRoot: current.active.root, active, conflicts: current.conflicts,
+      });
+      if (!result.ok) return { ok: false, error: result.code, error_code: result.code, detail: result.detail ?? null, fix: result.fix ?? null };
+      return { ok: true, package_id: id, development: result.development, state: devStatus(id) };
+    } finally { lock.release(); }
+  });
+}
+
+export const developmentBackups = (id) => listDevelopmentBackups(id);
 
 /** Dev reload: the same transaction, refused while the Package identity needs reconcile. */
 export const devReload = (id, options = {}) => reloadPackageRuntime(id, { ...options, allowConflict: false });

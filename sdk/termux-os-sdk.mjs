@@ -31,6 +31,8 @@ http://127.0.0.1:8980. For another device, use a private
                                        legacy ~/termux-os-dev/packages is not used
   dev start|status|reload|logs|stop <package-id>
                                        Watch/reload the one active worktree
+  dev activate <package-id>            Mark the installed Package as being developed
+                                       (sticky; only a verified official restore/install ends it)
   dev sync <package-id> --connection <c> [--source <repo>]
                                        Atomically sync host Git source to active device code
   dev-mount mount|status|remount|unmount <connection> <package-id> <local-mount>

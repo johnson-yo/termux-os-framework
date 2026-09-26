@@ -32,7 +32,7 @@ import { listModelDeclarations } from './packages/model-declarations.mjs';
 import { deviceProfile } from './packages/runtime-contract.mjs';
 import {
   initDevRuntime, devWatchStart, devWatchStop, devReload, devStatus, listDevWatchers, isDevWatched, devEvents,
-  reloadPackageRuntime,
+  reloadPackageRuntime, activatePackageDevelopment, developmentBackups,
 } from './packages/dev-runtime.mjs';
 import { listCapabilities, describeCapability, setCapabilityBinding, invokeCapability, setCapabilityStateChangeHandler } from './capabilities/resolver.mjs';
 import { getState, listStates, setState, setStateChangeHandler } from './state/registry.mjs';
@@ -1859,7 +1859,11 @@ const server = http.createServer(async (req, res) => {
             );
           }
         }
-        const job = startPackageJob(m[2], { package_id: item.id });
+        const job = startPackageJob(m[2], {
+          package_id: item.id,
+          ...(m[2] === 'uninstall' && (body?.preserve_development === true || body?.force_discard === true)
+            ? { options: { preserve_development: body.preserve_development === true, force_discard: body.force_discard === true } } : {}),
+        });
         return json(res, 202, { ok: true, job });
       } catch (error) { return packageControlError(error); }
     }
@@ -2717,6 +2721,24 @@ const server = http.createServer(async (req, res) => {
     if (st && req.method === 'GET') {
       const r = devStatus(st[1]);
       return json(res, r.ok ? 200 : 404, r);
+    }
+    // Development provenance: sticky, set only by this explicit action, independent of the watcher.
+    const development = url.match(/^\/api\/dev\/packages\/([\w.-]+)\/development(?:\/(activate|backups))?$/);
+    if (development && req.method === 'GET' && !development[2]) {
+      const r = devStatus(development[1]);
+      if (!r.ok) return json(res, 404, r);
+      return json(res, 200, { ok: true, package_id: r.package_id, state: r.state, state_reason: r.state_reason,
+        state_summary: r.state_summary, provenance: r.provenance, development: r.development,
+        local_history_present: r.local_history_present, protection_required: r.protection_required, git: r.git });
+    }
+    if (development && req.method === 'GET' && development[2] === 'backups') {
+      return json(res, 200, { ok: true, package_id: development[1], backups: developmentBackups(development[1]) });
+    }
+    if (development && req.method === 'POST' && development[2] === 'activate') {
+      const r = await activatePackageDevelopment(development[1]);
+      const status = r.ok ? 200 : r.error === 'not_installed' ? 404
+        : ['development_already_active', 'package_reconcile_required'].includes(r.error) ? 409 : 400;
+      return json(res, status, r);
     }
     const reconcile = url.match(/^\/api\/dev\/packages\/([\w.-]+)\/reconcile$/);
     if (reconcile && req.method === 'GET') {

@@ -58,7 +58,7 @@ const RETIRED = {
   'data-mode': 'release and dev share the same data; there is no isolated mode to choose.',
 };
 
-const SUBCOMMANDS = ['start', 'stop', 'status', 'reload', 'logs', 'sync'];
+const SUBCOMMANDS = ['start', 'stop', 'status', 'reload', 'logs', 'sync', 'activate'];
 const USAGE = `Usage: termux-os-sdk dev <${SUBCOMMANDS.join('|')}> <package-id> [--source <repo>]`;
 
 function sourceDir(id, flags) {
@@ -228,7 +228,8 @@ export async function cmdDev(flags, pos) {
 
   const show = (o) => {
     console.log(`Package  : ${o.package_id}`);
-    console.log(`State    : ${o.state_summary ?? o.state ?? 'unknown'}   ← read from the active worktree`);
+    console.log(`State    : ${o.state_summary ?? o.state ?? 'unknown'}`);
+    if (o.provenance) console.log(`Provenance: ${o.provenance}${o.local_history_present ? '  (local history present)' : ''}`);
     console.log(`Watching : ${o.watching ? `yes (${o.watch_mode})` : 'no'}`);
     console.log(`Generation: ${o.runtime_generation ?? 'none'}${o.runtime_owner ? ` (owner pid ${o.runtime_owner.pid})` : ''}`);
     if (o.services?.length) console.log(`Services : ${o.services.join(', ')}`);
@@ -255,6 +256,17 @@ export async function cmdDev(flags, pos) {
     return emit({ ok: true, package_id: id, lines }, flags, (o) => o.lines.forEach((line) => console.log(line)));
   }
 
+  if (sub === 'activate') {
+    // Provenance only: marks the installed Package as being developed. It does not start the watcher.
+    const response = await post(conn, `/api/dev/packages/${id}/development/activate`, null);
+    if (!response.ok) return fail(flags, 'framework_unreachable', response.error, 'Start Framework and retry.');
+    if (!response.data?.ok) return fail(flags, response.data?.error_code ?? response.data?.error ?? 'activate_failed', response.data?.detail ?? null, response.data?.fix ?? null);
+    return emit({ ok: true, action: 'activate', ...response.data }, flags, (o) => {
+      console.log(`✓ ${id} is now in Development. Only a verified official restore or install makes it official again.`);
+      console.log(`  Baseline: ${o.development?.base_version} @ ${String(o.development?.base_released_head ?? '').slice(0, 12)}`);
+    });
+  }
+
   const endpoint = sub === 'start' ? '/api/dev/packages'
     : sub === 'stop' ? `/api/dev/packages/${id}/stop` : `/api/dev/packages/${id}/reload`;
   const response = await post(conn, endpoint, sub === 'start' ? { package_id: id } : null);
@@ -272,7 +284,7 @@ export async function cmdDev(flags, pos) {
     console.log(sub === 'start' ? '✓ Watching the active Package worktree; edits reload in place.'
       : sub === 'stop' ? '✓ Stopped watching. The active worktree keeps its Git state and runtime owner.' : '✓ Reloaded.');
     show(o);
-    if (sub === 'stop' && o.state === 'dev') {
+    if (sub === 'stop' && ['development', 'modified'].includes(o.state)) {
       console.log('Note: restore the saved Release archive only when you intentionally want to discard edits.');
     }
   });

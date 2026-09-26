@@ -2,6 +2,35 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.14
+
+- Add Development provenance: an explicit, sticky `activate-development` (CLI,
+  `POST /api/dev/packages/<id>/development/activate`, `termux-os-sdk dev
+  activate`) records the official baseline under `<packageRoot>/.development/`.
+  Watching, reloading, restarting the Framework, or returning the Git tree to
+  the released commit never ends it; only a verified official restore or
+  install that passed its post-check does. Activation requires verifiable Git
+  lineage (`development_lineage_unavailable` otherwise).
+- One shared Package state (`official | development | modified | unknown |
+  conflicted`) for `package-manager state`, the Dev status API and the install
+  safety check; `state`, `state_reason` and `state_summary` come from the same
+  snapshot and no longer contradict each other. Previously `release`/`dev`.
+- Local history is detected beyond `git status`: HEAD off the release, local
+  branches or tags holding unreleased commits (valid in the depth-1 installed
+  clone), and `refs/stash`.
+- Restore, update and uninstall refuse by default when Development provenance
+  or local history is present (`development_backup_required` /
+  `local_history_present`); `--preserve-development` makes a development backup
+  first, `--force-discard` proceeds (`--preserve-dirty` / `--force-dirty` remain
+  accepted). Pruning an old version archives its local history before deleting.
+- Development backups (`development-backup`, `development-backups`,
+  `restore-development-backup`) contain the whole version directory including
+  `.git`, so branches, commits and the stash come back; SHA-256, Package ID,
+  version and entry safety are checked before restoring.
+- Uninstall now keeps `<packageRoot>/config`, as its message always claimed.
+- A successful reload reports `last_reload_result: loaded` before services
+  restart instead of after.
+
 ## 0.3.13
 
 - Dev Runtime detects changes by pathname, not by inode. `fs.watch` is now only a

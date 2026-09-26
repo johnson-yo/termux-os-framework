@@ -30,7 +30,11 @@ import { declarationVariantId } from '../src/assets/declarations.mjs';
 import { commitStagedPayloads } from '../src/assets/transfer/commit.mjs';
 import { defaultAuthFile, readAuthFile } from '../src/system/auth-file.mjs';
 import { checkPackagePorts, configurePortRegistry } from '../src/system/port-registry.mjs';
-import { packageGitState, packageGitIdentity, describeGitState, GIT_STATE } from '../src/packages/git-state.mjs';
+import { packageGitIdentity, gitHistoryScan } from '../src/packages/git-state.mjs';
+import {
+  activateDevelopment, readDevelopment, writeDevelopment, clearDevelopment, releaseMetadata,
+  listDevelopmentBackups, developmentBackupRoot as backupRoot, DEVELOPMENT_BACKUP_SCHEMA as BACKUP_SCHEMA,
+} from '../src/packages/provenance.mjs';
 import { reconcilePackage, legacyWorkspaceCandidates } from '../src/packages/reconcile.mjs';
 import { acquirePackageLockSync } from '../src/packages/operation-lock.mjs';
 
@@ -774,9 +778,7 @@ async function cmdInstall(tarPath, shaPath, args = []) {
   const selectionSnapshot = captureSelectionSnapshot(readPayloadLedger(), selectionEntries);
   const forceTarget = args.includes('--force-target');
   const allowMissing = args.includes('--allow-missing-external');
-  const preserveDirty = args.includes('--preserve-dirty');
-  const forceDirty = args.includes('--force-dirty');
-  if (preserveDirty && forceDirty) die('choose either --preserve-dirty or --force-dirty, not both');
+  const protection = protectionMode(args);
 
   // 023 §6.2/§9.1：**在動現場之前**判機型與外部依賴——裝到一半才發現不兼容，
   // 代價是把一個好好的 active version 換成一個跑不起來的
@@ -793,38 +795,17 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     console.log(`WARNING: --force-target — target "${t.target?.id}" could not be confirmed:\n  ${t.reasons.join('\n  ')}`);
   }
   /**
-   * dev 保护：active 工作树被改过就不许静默覆盖。
-   *
-   * 判据来自工作树本身，所以「使用者改了什么」和「系统以为他改了什么」不可能分歧。
-   * ⚠ unknown 不当作 dirty——旧的 source_tar 包没有 Git 身份，把它们一律拒绝会让
-   * 过渡期所有升级停摆；但也绝不当作 clean 去覆盖，unknown 只是不触发这道门。
+   * Local history protection. The shared package state decides — Development provenance, a
+   * modified work tree, HEAD off the release, a side branch or tag with unreleased commits, or
+   * a stash all mean the active version holds something that exists nowhere else.
+   * ⚠ A Package without verifiable lineage (no .git / no released HEAD) and no edits is `unknown`
+   * and does not trigger this gate: refusing every legacy update would stall them all.
    */
-  let dirtyWorktree = null;
+  let historyGuard = { backup: false };
+  let prevState = null;
   if (prevActive) {
-    const prevDir = path.join(pkgDir, 'versions', prevActive.active_version);
-    const git = packageGitState(prevDir);
-    let prevHead = null;
-    try { prevHead = JSON.parse(fs.readFileSync(archiveMetaPath(pkgDir, prevActive.active_version, prevActive.active_target ?? TARGET_GENERIC), 'utf8')).head ?? null; }
-    catch { /* 舊安裝沒有這份記錄。 */ }
-    const nowHead = packageGitIdentity(prevDir).head;
-    if (prevHead && nowHead && prevHead !== nowHead) {
-      git.state = GIT_STATE.DEV;
-      git.changes = git.changes.length ? git.changes
-        : [{ code: 'HD', path: `HEAD ${nowHead.slice(0, 12)} ≠ released ${prevHead.slice(0, 12)}`, untracked: false }];
-    }
-    const dirty = git.state === GIT_STATE.DEV;
-    dirtyWorktree = { dirty, dir: prevDir, git, prevHead, nowHead };
-    if (dirty && !preserveDirty && !forceDirty) {
-      const sample = git.changes.slice(0, 10).map((c) => `    ${c.code} ${c.path}`).join('\n');
-      die(`${id} ${prevActive.active_version} has local modifications (${git.changes.length} change(s)); refusing to overwrite them:\n`
-        + `${sample}${git.changes.length > 10 ? '\n    …' : ''}\n`
-        + '  Run the install again with\n'
-        + `    node scripts/package-manager.mjs install <archive> [sha256] --preserve-dirty\n`
-        + '  to save the complete active worktree before replacement, or use --force-dirty only to discard it.');
-    }
-    if (dirty && forceDirty) {
-      console.log(`WARNING: --force-dirty — discarding ${git.changes.length} local change(s) in ${id} ${prevActive.active_version}; no backup was made`);
-    }
+    prevState = requireReconciled(id).package_state;
+    historyGuard = guardLocalHistory(prevState, `updating ${id} ${prevActive.active_version}`, protection);
   }
   const ext = checkExternal(manifest);
   const missing = ext.items.filter((i) => i.ok === false && i.required);
@@ -862,22 +843,9 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     if (v.top_id !== id) fs.renameSync(stagedRoot, stagedPkg);
     if (!fs.existsSync(path.join(stagedPkg, MANIFEST_FILENAME))) throw new Error('staging missing manifest');
 
-    // Save before stopping services or moving the active version. The backup
-    // is a complete private archive, not just a diff: deleted and untracked
-    // files, plus the local Git identity, must remain recoverable.
-    if (dirtyWorktree?.dirty && preserveDirty) {
-      const backup = archiveDirtyWorktree(dirtyWorktree.dir, {
-        id,
-        version: prevActive.active_version,
-        target: prevActive.active_target ?? TARGET_GENERIC,
-        active_archive_sha256: prevActive.archive_sha256 ?? null,
-        head: dirtyWorktree.nowHead,
-        released_head: dirtyWorktree.prevHead,
-        git: dirtyWorktree.git,
-      });
-      console.log(`saved dirty worktree backup for ${id} ${prevActive.active_version}`
-        + ` (${backup.sha256.slice(0, 12)}…, ${backup.path})`);
-    }
+    // Save before stopping services or moving the active version. The backup is the complete
+    // version directory: deletions, untracked files, branches, commits and the stash.
+    if (historyGuard.backup) backupActiveVersion(id, pkgDir, prevActive, prevState, 'update');
 
     await stopOwnedServices(manifest);
 
@@ -927,14 +895,36 @@ async function cmdInstall(tarPath, shaPath, args = []) {
     }
 
     // 只留 active+previous 兩個版本（§8）；必須在 post-install 成功後才修剪——
-    // 否則 broken 更新會先剪掉可回退的舊版本目錄
+    // 否則 broken 更新會先剪掉可回退的舊版本目錄。
+    // A version directory with local history is archived first; if that fails it is kept.
     const keep = new Set([version, prevActive?.active_version].filter(Boolean));
     for (const d of fs.readdirSync(path.join(pkgDir, 'versions'))) {
-      if (!keep.has(d)) fs.rmSync(path.join(pkgDir, 'versions', d), { recursive: true, force: true });
+      if (keep.has(d)) continue;
+      const history = inactiveVersionHistory(pkgDir, d);
+      if (history.local_history) {
+        try {
+          const backup = createDevelopmentBackup(path.join(pkgDir, 'versions', d), {
+            id, version: d, target: history.target, reason: 'prune', released_head: history.released_head,
+            state: { git: history, provenance: null, development: null },
+          });
+          console.log(`archived local history of ${id} ${d} before pruning (${backup.sha256.slice(0, 12)}…, ${backup.path})`);
+        } catch (error) {
+          keep.add(d);
+          console.error(`WARNING: kept versions/${d}: it holds local history and could not be archived (${error.message})`);
+          continue;
+        }
+      }
+      fs.rmSync(path.join(pkgDir, 'versions', d), { recursive: true, force: true });
     }
     // archive/ 与 versions/ 保持同一个版本集合：留着一个无处可装的归档没有意义，
     // 而少留一个会让 rollback 之后的 restore 失去来源。
     pruneArchives(pkgDir, keep);
+    // A verified official Release is active, serving, and pruning is done: only now is the
+    // Package official again. Any earlier failure rolls back with the provenance untouched.
+    if (readDevelopment(pkgDir)) {
+      clearDevelopment(pkgDir);
+      console.log(`${id}: development provenance cleared by the verified install of ${version}`);
+    }
     cleanup();
     operationLock.release();
     console.log(`installed ${id} ${version} (sha256 ${sha256.slice(0, 12)}…)`);
@@ -1140,75 +1130,260 @@ function readInstallOrigin(tarPath) {
   catch { return { kind: 'local_file', path: path.basename(tarPath) }; }
 }
 
+// ============================================================
+// Local history protection (Development provenance + Git history)
+// ============================================================
+
+const PRESERVE_FLAGS = ['--preserve-development', '--preserve-dirty'];
+const FORCE_FLAGS = ['--force-discard', '--force-dirty'];
+
+/** A refusal an Agent can branch on: one JSON line on stdout, the human line on stderr. */
+function refuse(code, message, extra = {}) {
+  console.log(JSON.stringify({ ok: false, code, detail: message, ...extra }));
+  console.error(`ERROR: ${code}: ${message}`);
+  process.exit(1);
+}
+
+function protectionMode(args) {
+  const preserve = args.some((arg) => PRESERVE_FLAGS.includes(arg));
+  const force = args.some((arg) => FORCE_FLAGS.includes(arg));
+  if (preserve && force) refuse('protection_options_conflict', 'choose either --preserve-development or --force-discard, not both');
+  return { preserve, force };
+}
+
+/** Local history in a non-active version directory (previous/prunable). Provenance is not its concern. */
+function inactiveVersionHistory(pkgDir, version) {
+  const dir = path.join(pkgDir, 'versions', version);
+  if (!fs.existsSync(path.join(dir, '.git'))) return { local_history: false, available: false };
+  let meta = null;
+  try {
+    for (const name of fs.readdirSync(archiveDir(pkgDir))) {
+      if (name.startsWith(`${version}@`) && name.endsWith('.json')) {
+        try { meta = JSON.parse(fs.readFileSync(path.join(archiveDir(pkgDir), name), 'utf8')); break; } catch { /* next */ }
+      }
+    }
+  } catch { /* No archive directory. */ }
+  const scan = gitHistoryScan(dir, meta?.head ?? null);
+  // A Git tree whose release commit is unknown cannot be proven empty of local work.
+  return { ...scan, local_history: scan.available ? scan.local_history : true, target: meta?.target ?? TARGET_GENERIC,
+    released_head: meta?.head ?? null };
+}
+
+function describeProtection(state) {
+  const refs = state.git.local_refs.map((ref) => `${ref.ref} (+${ref.commits ?? '?'})`);
+  return [
+    ...state.reasons_text,
+    ...(refs.length ? [`refs: ${refs.join(', ')}`] : []),
+    ...(state.git.head ? [`HEAD ${state.git.head.slice(0, 12)} on ${state.git.branch ?? 'detached HEAD'}`] : []),
+  ].join('; ');
+}
+
 /**
- * Preserve a dirty active Package before an update replaces it.
- *
- * This is intentionally a private, recoverable archive rather than a commit:
- * the worktree may contain user data, untracked files, or a deliberately
- * detached local experiment.  A full tar also preserves deletions and the
- * `.git` identity, which a patch or `git checkout` cannot reliably reconstruct.
+ * Guard a destructive operation on the active version. Returns whether a backup must be made.
+ * Refuses by default; `--preserve-development` backs up first, `--force-discard` proceeds.
  */
-function archiveDirtyWorktree(versionRoot, meta) {
-  const destination = path.join(os.homedir(), '.termux-os', 'package-archives', meta.id);
+function guardLocalHistory(state, operation, { preserve, force }) {
+  if (!state?.protection_required) return { backup: false };
+  if (preserve) return { backup: true };
+  if (force) {
+    console.log(`WARNING: --force-discard — ${operation} discards: ${describeProtection(state)}; no backup was made`);
+    return { backup: false };
+  }
+  refuse(state.provenance === 'development' ? 'development_backup_required' : 'local_history_present',
+    `${operation} would destroy local history (${describeProtection(state)}). `
+      + 'Re-run with --preserve-development to back up the complete work tree (.git, branches, stash) first, '
+      + 'or --force-discard to discard it.',
+    { state: state.state, provenance: state.provenance, protection_reasons: state.protection_reasons,
+      local_refs: state.git.local_refs, stash_count: state.git.stash_count });
+  return { backup: false };
+}
+
+/**
+ * Development backup: a private tar of the complete version directory, `.git` included, so
+ * branches, commits, the stash and its reflog, deletions and untracked files all come back.
+ * A patch or `git checkout` cannot reconstruct those.
+ */
+function createDevelopmentBackup(versionRoot, meta) {
+  const destination = backupRoot(meta.id);
   const stamp = `${new Date().toISOString().replaceAll(':', '')}-${process.pid}`;
-  const base = `${meta.version}@${meta.target ?? TARGET_GENERIC}-dirty-${stamp}`;
+  const base = `${meta.version}@${meta.target ?? TARGET_GENERIC}-development-${stamp}`;
   const archive = path.join(destination, `${base}.tar.gz`);
   const partial = `${archive}.part`;
   const metadata = `${archive}.json`;
   const metadataPartial = `${metadata}.part`;
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  const identity = packageGitIdentity(versionRoot);
+  let refs = [];
   try {
-    execFileSync('tar', ['-czf', partial, '-C', path.dirname(versionRoot), path.basename(versionRoot)], {
-      stdio: 'ignore',
-    });
+    refs = execFileSync('git', ['-C', versionRoot, 'for-each-ref', '--format=%(refname) %(objectname)'], { encoding: 'utf8' })
+      .split('\n').filter(Boolean).map((line) => { const [ref, commit] = line.split(' '); return { ref, commit }; });
+  } catch { /* A tree without Git is still backed up. */ }
+  try {
+    execFileSync('tar', ['-czf', partial, '-C', path.dirname(versionRoot), path.basename(versionRoot)], { stdio: 'ignore' });
     const digest = sha256File(partial);
     fs.renameSync(partial, archive);
     fs.writeFileSync(metadataPartial, `${JSON.stringify({
-      schema: 'termux-os.package-dirty-backup.v1',
+      schema: BACKUP_SCHEMA,
       package_id: meta.id,
       version: meta.version,
       target: meta.target ?? TARGET_GENERIC,
+      reason: meta.reason ?? 'manual',
       archive,
       sha256: digest,
       size: fs.statSync(archive).size,
       active_archive_sha256: meta.active_archive_sha256 ?? null,
-      head: meta.head ?? null,
+      head: identity.head,
+      branch: identity.branch,
+      detached: identity.detached === true,
       released_head: meta.released_head ?? null,
-      changes: meta.git?.changes ?? [],
-      ignored: meta.git?.ignored ?? [],
+      refs,
+      stash_count: meta.state?.git?.stash_count ?? 0,
+      local_refs: meta.state?.git?.local_refs ?? [],
+      changes: meta.state?.git?.changes ?? [],
+      provenance: meta.state?.provenance ?? null,
+      development: meta.state?.development ?? null,
       created_at: new Date().toISOString(),
     }, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(metadataPartial, metadata);
     fs.chmodSync(archive, 0o600);
-    return { path: archive, sha256: digest, metadata };
+    return { path: archive, name: path.basename(archive), sha256: digest, metadata };
   } catch (error) {
-    fs.rmSync(partial, { force: true });
-    fs.rmSync(archive, { force: true });
-    fs.rmSync(metadataPartial, { force: true });
-    fs.rmSync(metadata, { force: true });
-    throw new Error(`dirty Package backup failed: ${String(error?.message ?? error)}`);
+    for (const file of [partial, archive, metadataPartial, metadata]) fs.rmSync(file, { force: true });
+    throw new Error(`development backup failed: ${String(error?.message ?? error)}`);
   }
 }
 
-function cmdDirtyBackups(id) {
-  if (!/^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*){3,}$/.test(String(id))) {
-    die(`invalid package id: ${id}`);
-  }
-  const destination = path.join(os.homedir(), '.termux-os', 'package-archives', id);
-  let entries = [];
+function backupActiveVersion(id, pkgDir, active, state, reason) {
+  const release = releaseMetadata(pkgDir, active.active_version, active.active_target ?? TARGET_GENERIC);
+  const backup = createDevelopmentBackup(path.join(pkgDir, 'versions', active.active_version), {
+    id, version: active.active_version, target: active.active_target ?? TARGET_GENERIC, reason,
+    active_archive_sha256: active.archive_sha256 ?? null, released_head: release?.head ?? null, state,
+  });
+  console.log(`saved development backup for ${id} ${active.active_version} (${backup.sha256.slice(0, 12)}…, ${backup.path})`);
+  return backup;
+}
+
+function assertPackageId(id) {
+  if (!/^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*){3,}$/.test(String(id))) refuse('invalid_package_id', `invalid package id: ${id}`);
+}
+
+function cmdDevelopmentBackups(id) {
+  assertPackageId(id);
+  console.log(JSON.stringify({ ok: true, schema: 'termux-os.package-development-backups.v1', package_id: id,
+    backups: listDevelopmentBackups(id) }, null, 2));
+}
+
+function cmdDevelopmentBackup(id) {
+  assertPackageId(id);
+  const lock = lockPackage(id);
   try {
-    entries = fs.readdirSync(destination)
-      .filter((name) => name.endsWith('.tar.gz.json'))
-      .map((name) => {
-        try { return JSON.parse(fs.readFileSync(path.join(destination, name), 'utf8')); } catch { return null; }
-      })
-      .filter((item) => item?.schema === 'termux-os.package-dirty-backup.v1');
-  } catch { /* No backup directory is an empty, successful result. */ }
-  console.log(JSON.stringify({
-    schema: 'termux-os.package-dirty-backups.v1',
-    package_id: id,
-    backups: entries,
-  }, null, 2));
+    const current = requireReconciled(id);
+    if (!current.active) refuse('not_installed', `${id} is not installed`);
+    const backup = backupActiveVersion(id, path.join(installedRoot(), id), readActive(id), current.package_state, 'manual');
+    console.log(JSON.stringify({ ok: true, operation: 'development-backup', package_id: id, backup }, null, 2));
+  } finally { lock.release(); }
+}
+
+function cmdActivateDevelopment(id) {
+  assertPackageId(id);
+  const lock = lockPackage(id);
+  try {
+    const current = reconcilePackage(id, { frameworkRoot: ROOT });
+    if (!current.active) refuse('not_installed', `${id} is not installed`);
+    const result = activateDevelopment({
+      id, versionRoot: current.active.path, packageRoot: current.active.root, active: readActive(id), conflicts: current.conflicts,
+    });
+    if (!result.ok) {
+      lock.release();
+      refuse(result.code, typeof result.detail === 'string' ? result.detail : result.code, { fix: result.fix ?? null });
+    }
+    console.log(JSON.stringify({ ok: true, operation: 'activate-development', package_id: id, development: result.development,
+      state: reconcilePackage(id, { frameworkRoot: ROOT }).package_state }, null, 2));
+  } finally { lock.release(); }
+}
+
+/** Safe listing check for a backup tar: one top directory named after the version, no links, no escapes. */
+function checkBackupEntries(tar, version) {
+  let listing;
+  try { listing = execFileSync('tar', ['-tvzf', tar], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } }); }
+  catch (error) { return `backup unreadable: ${String(error?.message ?? error)}`; }
+  for (const line of listing.split('\n').filter(Boolean)) {
+    const mode = line.trim()[0];
+    const name = line.trim().split(/\s+/).slice(5).join(' ').split(' -> ')[0];
+    if ('lhbcps'.includes(mode) || line.includes(' link to ')) return `forbidden entry type "${mode}": ${name}`;
+    if (name.startsWith('/') || name.split('/').includes('..')) return `unsafe path: ${name}`;
+    if (name.split('/')[0] !== version) return `unexpected top-level entry: ${name}`;
+  }
+  return null;
+}
+
+async function cmdRestoreDevelopmentBackup(id, selector, args = []) {
+  assertPackageId(id);
+  if (!selector || selector.startsWith('--')) refuse('backup_not_found', 'usage: restore-development-backup <package-id> <backup-name|sha256-prefix>');
+  const mode = protectionMode(args);
+  const lock = lockPackage(id);
+  const fail = (code, message) => { lock.release(); refuse(code, message); };
+  const root = installedRoot();
+  const pkgDir = path.join(root, id);
+  const current = requireReconciled(id);
+  if (!current.active) fail('not_installed', `${id} is not installed`);
+  const active = readActive(id);
+  const backup = listDevelopmentBackups(id).find((item) => item.name === selector || String(item.sha256).startsWith(selector));
+  if (!backup) fail('backup_not_found', `no development backup of ${id} matches "${selector}"`);
+  if (!fs.existsSync(backup.archive)) fail('backup_not_found', `backup archive is missing: ${backup.archive}`);
+  if (sha256File(backup.archive) !== backup.sha256) fail('backup_sha_mismatch', `backup ${backup.name} does not match its recorded SHA-256`);
+  if (backup.version !== active.active_version || (backup.target ?? TARGET_GENERIC) !== (active.active_target ?? TARGET_GENERIC)) {
+    fail('backup_version_mismatch', `backup is ${backup.version}@${backup.target}, active is ${active.active_version}@${active.active_target ?? TARGET_GENERIC}`);
+  }
+  const unsafe = checkBackupEntries(backup.archive, backup.version);
+  if (unsafe) fail('backup_unsafe', unsafe);
+  const guard = guardLocalHistory(current.package_state, 'restoring a development backup', mode);
+  if (guard.backup) backupActiveVersion(id, pkgDir, active, current.package_state, 'before-backup-restore');
+
+  const versionDir = path.join(pkgDir, 'versions', active.active_version);
+  const staging = path.join(root, '.staging', `${id}-backup-restore-${Date.now()}`);
+  const held = `${versionDir}.backup-restore-held-${Date.now()}`;
+  let moved = false;
+  try {
+    fs.mkdirSync(staging, { recursive: true });
+    execFileSync('tar', ['-xzf', backup.archive, '-C', staging]);
+    const restored = path.join(staging, backup.version);
+    if (!fs.existsSync(path.join(restored, MANIFEST_FILENAME))) throw new Error('backup has no Package manifest');
+    const manifest = JSON.parse(fs.readFileSync(path.join(restored, MANIFEST_FILENAME), 'utf8'));
+    if (manifest.id !== id) throw new Error(`backup manifest id ${manifest.id} is not ${id}`);
+    let liveManifest = null;
+    try { liveManifest = JSON.parse(fs.readFileSync(path.join(versionDir, MANIFEST_FILENAME), 'utf8')); } catch { /* broken is fine */ }
+    if (liveManifest) await stopOwnedServices(liveManifest);
+    fs.renameSync(versionDir, held); moved = true;
+    fs.renameSync(restored, versionDir);
+    if (frameworkRestart()) {
+      const w = await waitPackageStatus(id, true);
+      if (!w.ok) throw new Error(`post-restore check failed: ${w.error}`);
+    } else console.log('note: framework.sh not found, skipped restart (dev machine?)');
+    fs.rmSync(held, { recursive: true, force: true });
+    fs.rmSync(path.join(root, '.staging'), { recursive: true, force: true });
+    // A restored development tree is development again, with the baseline it was taken from.
+    if (!readDevelopment(pkgDir)) {
+      const release = releaseMetadata(pkgDir, active.active_version, active.active_target ?? TARGET_GENERIC);
+      writeDevelopment(pkgDir, backup.development ? { ...backup.development, restored_from_backup: backup.name } : {
+        package_id: id, base_version: active.active_version, base_target: active.active_target ?? TARGET_GENERIC,
+        base_release_sha256: active.archive_sha256 ?? null, base_released_head: release?.head ?? null,
+        activated_at: new Date().toISOString(), activated_from_branch: backup.branch ?? null, activated_head: backup.head ?? null,
+        restored_from_backup: backup.name,
+      });
+    }
+    lock.release();
+    console.log(JSON.stringify({ ok: true, operation: 'restore-development-backup', package_id: id, backup: backup.name,
+      state: reconcilePackage(id, { frameworkRoot: ROOT }).package_state }, null, 2));
+  } catch (error) {
+    fs.rmSync(path.join(root, '.staging'), { recursive: true, force: true });
+    if (moved && fs.existsSync(held)) {
+      fs.rmSync(versionDir, { recursive: true, force: true });
+      fs.renameSync(held, versionDir);
+      frameworkRestart();
+    }
+    fail('backup_restore_failed', String(error?.message ?? error));
+  }
 }
 
 /**
@@ -1257,9 +1432,10 @@ function pruneArchives(pkgDir, keepVersions) {
 // ============================================================
 // restore <id>（把 active 版本的内容换回保存的原包）
 // ============================================================
-async function cmdRestore(id) {
+async function cmdRestore(id, args = []) {
+  const mode = protectionMode(args);
   const operationLock = lockPackage(id);
-  requireReconciled(id);
+  const current = requireReconciled(id);
   const root = installedRoot();
   const active = readActive(id);
   if (!active) die(`${id} is not installed`);
@@ -1282,6 +1458,11 @@ async function cmdRestore(id) {
   if (v.id !== id || v.version !== version) {
     die(`saved archive identity mismatch: archive is ${v.id} ${v.version}, active is ${id} ${version}`);
   }
+
+  // The restore replaces the whole active directory, `.git` included. Refuse by default when that
+  // would destroy local history or end a Development session without a backup.
+  const guard = guardLocalHistory(current.package_state, `restoring ${id} ${version} to the official release`, mode);
+  if (guard.backup) backupActiveVersion(id, pkgDir, active, current.package_state, 'restore');
 
   const versionDir = path.join(pkgDir, 'versions', version);
   const staging = path.join(root, '.staging', `${id}-restore-${Date.now()}`);
@@ -1311,12 +1492,20 @@ async function cmdRestore(id) {
       const w = await waitPackageStatus(id, true);
       if (!w.ok) throw new Error(`post-restore check failed: ${w.error}`);
     }
-    const git = packageGitState(versionDir);
-    console.log(`restored ${id} ${version} [${target}] from saved archive (${describeGitState(git)})`);
+    // Official again only when the restored tree is provably the release: HEAD is the released
+    // commit and nothing else is present. A failed post-check above never reaches this line.
+    const released = releaseMetadata(pkgDir, version, target)?.head ?? null;
+    const scan = gitHistoryScan(versionDir, released);
+    const official = scan.available && scan.local_history === false && scan.head === released;
+    if (official && readDevelopment(pkgDir)) clearDevelopment(pkgDir);
+    const state = reconcilePackage(id, { frameworkRoot: ROOT }).package_state;
+    console.log(`restored ${id} ${version} [${target}] from saved archive (${state?.summary ?? 'unknown'})`);
     operationLock.release();
-    if (git.state === GIT_STATE.DEV) {
-      console.error(`WARNING: work tree is still not clean after restore: ${git.changes.length} change(s)`);
+    if (scan.worktree === 'modified') {
+      console.error(`WARNING: work tree is still not clean after restore: ${scan.changes.length} change(s)`);
       process.exitCode = 1;
+    } else if (readDevelopment(pkgDir)) {
+      console.error(`WARNING: development provenance kept: the restored tree could not be verified as the release (${scan.reason ?? 'local history'})`);
     }
   } catch (e) {
     fs.rmSync(path.join(root, '.staging'), { recursive: true, force: true });
@@ -1335,24 +1524,30 @@ async function cmdRestore(id) {
 // ============================================================
 function cmdState(id) {
   const reconcile = reconcilePackage(id, { frameworkRoot: ROOT });
-  if (!reconcile.active) die(`${id} is not installed`);
-  const git = packageGitState(reconcile.active.path);
-  const state = reconcile.state;
+  if (!reconcile.active) refuse('not_installed', `${id} is not installed`);
+  const ps = reconcile.package_state;
+  // One snapshot: state, reason and summary cannot disagree with each other or with the Dev API.
   console.log(JSON.stringify({
+    schema: 'termux-os.package-state-report.v1',
     id,
     version: reconcile.active.version,
     target: reconcile.active.target,
-    state,
-    reason: reconcile.conflict ? 'reconcile_required' : reconcile.git.head_diverged
-      ? 'head_diverged_from_release' : git.reason,
-    released_head: reconcile.git.released_head,
-    head_diverged: reconcile.git.head_diverged,
-    error: git.error,
-    changes: git.changes,
-    ignored_paths: git.ignored,
-    git: reconcile.git,
+    state: reconcile.state,
+    reason: reconcile.state_reason,
+    summary: reconcile.state_summary,
+    provenance: ps?.provenance ?? null,
+    development: ps?.development ?? null,
+    local_history_present: ps?.local_history_present ?? null,
+    protection_required: ps?.protection_required ?? null,
+    protection_reasons: ps?.protection_reasons ?? [],
+    released_head: ps?.git?.released_head ?? null,
+    head_diverged: Boolean(ps?.git?.head && ps?.git?.released_head && ps.git.head !== ps.git.released_head),
+    changes: ps?.git?.changes ?? [],
+    ignored_paths: ps?.git?.ignored ?? [],
+    git: ps?.git ?? null,
     restorable: Boolean(reconcile.archive?.entries?.some((entry) => entry.kind === 'archive'
       && entry.version === reconcile.active.version && (entry.target ?? reconcile.active.target) === reconcile.active.target)),
+    development_backups: listDevelopmentBackups(id).length,
     reconcile,
   }, null, 2));
 }
@@ -1360,14 +1555,36 @@ function cmdState(id) {
 // ============================================================
 // uninstall <id>（§7：只刪代碼；配置/數據/綁定/Desired 全保留）
 // ============================================================
-async function cmdUninstall(id) {
+async function cmdUninstall(id, args = []) {
+  const mode = protectionMode(args);
   const operationLock = lockPackage(id);
-  requireReconciled(id);
+  const current = requireReconciled(id);
   const root = installedRoot();
+  const pkgDir = path.join(root, id);
   const active = readActive(id);
   if (!active) { operationLock.release(); console.log(`${id} is not installed (changed=false)`); return; }
+  // Every version directory goes, so every one with local history is guarded, not only the active one.
+  const others = (() => { try { return fs.readdirSync(path.join(pkgDir, 'versions')); } catch { return []; } })()
+    .filter((version) => version !== active.active_version)
+    .map((version) => ({ version, history: inactiveVersionHistory(pkgDir, version) }))
+    .filter((item) => item.history.local_history);
+  const state = current.package_state;
+  const combined = others.length && !state.protection_required ? {
+    ...state, protection_required: true, reasons_text: [`versions/${others.map((o) => o.version).join(', ')} hold local history`],
+  } : state;
+  const guard = guardLocalHistory(combined, `uninstalling ${id}`, mode);
+  if (guard.backup) {
+    if (state.protection_required) backupActiveVersion(id, pkgDir, active, state, 'uninstall');
+    for (const item of others) {
+      const backup = createDevelopmentBackup(path.join(pkgDir, 'versions', item.version), {
+        id, version: item.version, target: item.history.target, reason: 'uninstall', released_head: item.history.released_head,
+        state: { git: item.history, provenance: null, development: null },
+      });
+      console.log(`saved development backup for ${id} ${item.version} (${backup.sha256.slice(0, 12)}…, ${backup.path})`);
+    }
+  }
   let manifest = null;
-  try { manifest = JSON.parse(fs.readFileSync(path.join(root, id, 'versions', active.active_version, MANIFEST_FILENAME), 'utf8')); }
+  try { manifest = JSON.parse(fs.readFileSync(path.join(pkgDir, 'versions', active.active_version, MANIFEST_FILENAME), 'utf8')); }
   catch { /* 版本目錄壞了也照樣卸載 */ }
   if (manifest) await stopOwnedServices(manifest);
   // 024 §6.3：只摘 active 登記，**payload 一律保留**（無 purge）——大模型重裝一次要幾分鐘，
@@ -1378,13 +1595,25 @@ async function cmdUninstall(id) {
   }
   const ledger = readPayloadLedger();
   if (!ledger.error && fs.existsSync(payloadLedgerPath())) syncCompatibilityRegistry(ledger);
-  fs.rmSync(path.join(root, id), { recursive: true, force: true }); // active.json + 全部版本
+  // Code, archives and provenance go; the Package's own settings stay where a reinstall finds
+  // them. A directory holding only config/ is not an installed Package (no active.json/versions).
+  const configDir = path.join(pkgDir, 'config');
+  const heldConfig = path.join(root, '.staging', `${id}-config-${Date.now()}`);
+  const keepConfig = fs.existsSync(configDir);
+  if (keepConfig) { fs.mkdirSync(path.dirname(heldConfig), { recursive: true }); fs.renameSync(configDir, heldConfig); }
+  fs.rmSync(pkgDir, { recursive: true, force: true });
+  if (keepConfig) {
+    fs.mkdirSync(pkgDir, { recursive: true });
+    fs.renameSync(heldConfig, configDir);
+    fs.rmSync(path.join(root, '.staging'), { recursive: true, force: true });
+  }
   if (frameworkRestart()) {
     const w = await waitPackageStatus(id, false);
     if (!w.ok) die(`uninstall post-check failed: ${w.error}`);
   }
   operationLock.release();
-  console.log(`uninstalled ${id} (was ${active.active_version}); config/data/bindings/desired preserved`);
+  console.log(`uninstalled ${id} (was ${active.active_version}); ${keepConfig ? `config kept at ${configDir}` : 'no Package config to keep'}; `
+    + 'shared data, bindings and desired state preserved');
 }
 
 // ============================================================
@@ -1463,6 +1692,8 @@ function cmdList() {
   if (!ids.length) { console.log(`(no packages installed under ${root})`); return; }
   for (const id of ids.sort()) {
     const a = readActive(id);
+    // An uninstalled Package keeps only config/; that is kept settings, not a broken install.
+    if (!a && !fs.existsSync(path.join(root, id, 'versions'))) continue;
     if (!a) { console.log(`${id}  (broken: no active.json)`); continue; }
     // 舊 active.json 沒有 target 欄位 = generic（§7.2 遷移規則，不改寫文件）
     const tgt = a.active_target ?? TARGET_GENERIC;
@@ -1477,23 +1708,28 @@ const [cmd, ...rest] = process.argv.slice(2);
 switch (cmd) {
   case 'pack': await cmdPack(rest[0] ?? die('usage: pack <package-id> [--target <id>] [--artifact-dir <path>] [--source <dir>]'), rest.slice(1)); break;
   case 'verify': await cmdVerify(rest[0] ?? die('usage: verify <tar> [sha256]'), rest[1]?.startsWith('--') ? undefined : rest[1]); break;
-  case 'install': await cmdInstall(rest[0] ?? die('usage: install <tar> [sha256] [--force-target] [--allow-missing-external] [--preserve-dirty | --force-dirty]'),
+  case 'install': await cmdInstall(rest[0] ?? die('usage: install <tar> [sha256] [--force-target] [--allow-missing-external] [--preserve-development | --force-discard]'),
     rest[1]?.startsWith('--') ? undefined : rest[1], rest.slice(1)); break;
-  case 'uninstall': await cmdUninstall(rest[0] ?? die('usage: uninstall <package-id>')); break;
+  case 'uninstall': await cmdUninstall(rest[0] ?? die('usage: uninstall <package-id> [--preserve-development | --force-discard]'), rest.slice(1)); break;
   case 'rollback': await cmdRollback(rest[0] ?? die('usage: rollback <package-id>')); break;
   case 'list': cmdList(); break;
   case 'profile': cmdProfile(); break;
   case 'check': await cmdCheck(rest[0] ?? die('usage: check <tar> [--force-target]'), rest.slice(1)); break;
   case 'check-installed': cmdCheckInstalled(rest[0] ?? die('usage: check-installed <package-id>'), rest.slice(1)); break;
-  case 'restore': await cmdRestore(rest[0] ?? die('usage: restore <package-id>')); break;
+  case 'restore': await cmdRestore(rest[0] ?? die('usage: restore <package-id> [--preserve-development | --force-discard]'), rest.slice(1)); break;
   case 'state': cmdState(rest[0] ?? die('usage: state <package-id>')); break;
   case 'reconcile': cmdReconcile(rest[0] ?? die('usage: reconcile <package-id>')); break;
   case 'dev-sync': await cmdDevSync(rest[0] ?? die('usage: dev-sync <archive.tar.gz> [--sha256=<sidecar>]'), rest.slice(1)); break;
   case 'legacy-list': cmdLegacyList(rest[0] ?? null); break;
   case 'legacy-archive': await cmdLegacyArchive(rest[0] ?? die('usage: legacy-archive <package-id>')); break;
   case 'archive-dev-artifacts': await cmdArchiveDevArtifacts(rest[0] ?? die('usage: archive-dev-artifacts <package-id>')); break;
-  case 'dirty-backups': cmdDirtyBackups(rest[0] ?? die('usage: dirty-backups <package-id>')); break;
+  case 'dirty-backups':
+  case 'development-backups': cmdDevelopmentBackups(rest[0] ?? die('usage: development-backups <package-id>')); break;
+  case 'development-backup': cmdDevelopmentBackup(rest[0] ?? die('usage: development-backup <package-id>')); break;
+  case 'restore-development-backup': await cmdRestoreDevelopmentBackup(rest[0] ?? die('usage: restore-development-backup <package-id> <backup-name|sha256-prefix> [--preserve-development | --force-discard]'), rest[1], rest.slice(2)); break;
+  case 'activate-development': cmdActivateDevelopment(rest[0] ?? die('usage: activate-development <package-id>')); break;
+  case 'development-status': cmdState(rest[0] ?? die('usage: development-status <package-id>')); break;
   default:
-    console.log('usage: node scripts/package-manager.mjs <pack|verify|install|uninstall|rollback|list|profile|check|check-installed|restore|state|reconcile|dev-sync|legacy-list|legacy-archive|archive-dev-artifacts|dirty-backups> ...');
+    console.log('usage: node scripts/package-manager.mjs <pack|verify|install|uninstall|rollback|list|profile|check|check-installed|restore|state|reconcile|dev-sync|legacy-list|legacy-archive|archive-dev-artifacts|activate-development|development-status|development-backup|development-backups|restore-development-backup> ...');
     process.exit(cmd ? 1 : 0);
 }

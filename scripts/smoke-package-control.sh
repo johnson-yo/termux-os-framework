@@ -330,7 +330,7 @@ SMOKE_HOME="$WORK/home"
 BACKUP_DIR="$SMOKE_HOME/.termux-os/package-archives/github.termux-os.service.example-counter"
 if node -e 'process.exit(require(process.argv[1]).job.status==="success"?0:1)' "$WORK/dirty-install-job.json" \
   && [ "$(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.gz.json' 2>/dev/null | wc -l)" -ge 1 ] \
-  && grep -q 'saved dirty worktree backup' "$WORK/dirty-install-job.json"; then
+  && grep -q 'saved development backup' "$WORK/dirty-install-job.json"; then
   ok "dirty update archives the complete worktree before install"
 else
   bad "dirty update backup/install"
@@ -377,7 +377,7 @@ curl -sf -b "$COOKIE" "$BASE/api/admin/package-manager" >"$WORK/force-installed.
 if node -e 'const d=require(process.argv[1]);const p=d.packages.find(x=>x.id==="github.termux-os.service.example-counter");
   process.exit(require(process.argv[2]).job.status==="success"&&p?.version==="0.1.2"?0:1)' \
   "$WORK/force-installed.json" "$WORK/force-install-job.json" \
-  && grep -q -- '--force-dirty' "$WORK/force-install-job.json"; then
+  && grep -qE -- '--force-(dirty|discard)' "$WORK/force-install-job.json"; then
   ok "explicit force discard reaches the installer and replaces the dirty Package"
 else
   bad "explicit force discard install"
@@ -390,13 +390,28 @@ if [ "$CODE" = 409 ] && grep -q confirmation_mismatch "$WORK/wrong-id.json"; the
 else
   bad "uninstall confirmation guard"
 fi
+# The previous version (0.1.1) still holds an edited Git work tree: a plain uninstall must refuse
+# to delete it, and the explicit backup option must save it before the Package goes.
 curl -sf -b "$COOKIE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
   --data '{"confirm_package_id":"github.termux-os.service.example-counter"}' \
+  "$BASE/api/admin/package-manager/packages/github.termux-os.service.example-counter/uninstall" >"$WORK/uninstall-refused-start.json"
+REFUSED_JOB="$(node -e 'process.stdout.write(require(process.argv[1]).job.id)' "$WORK/uninstall-refused-start.json")"
+wait_api_job "$REFUSED_JOB" "$WORK/uninstall-refused-job.json" || true
+if node -e 'process.exit(require(process.argv[1]).job.status==="failed"?0:1)' "$WORK/uninstall-refused-job.json" \
+  && grep -q local_history_present "$WORK/uninstall-refused-job.json" \
+  && [ -e "$WORK/packages/github.termux-os.service.example-counter/versions/0.1.1/.git" ]; then
+  ok "uninstall refuses to delete local history by default"
+else
+  bad "uninstall local-history guard"
+fi
+curl -sf -b "$COOKIE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
+  --data '{"confirm_package_id":"github.termux-os.service.example-counter","preserve_development":true}' \
   "$BASE/api/admin/package-manager/packages/github.termux-os.service.example-counter/uninstall" >"$WORK/uninstall-start.json"
 UNINSTALL_JOB="$(node -e 'process.stdout.write(require(process.argv[1]).job.id)' "$WORK/uninstall-start.json")"
 wait_api_job "$UNINSTALL_JOB" "$WORK/uninstall-job.json" || true
 if node -e 'process.exit(require(process.argv[1]).job.status==="success"?0:1)' "$WORK/uninstall-job.json" \
-  && [ ! -e "$WORK/packages/github.termux-os.service.example-counter" ]; then
+  && [ ! -e "$WORK/packages/github.termux-os.service.example-counter/versions" ] \
+  && grep -q 'saved development backup' "$WORK/uninstall-job.json"; then
   ok "formal Package Manager uninstall job succeeds"
 else
   bad "uninstall job"

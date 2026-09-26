@@ -1,7 +1,7 @@
 /**
  * SPDX-License-Identifier: Apache-2.0
  * [INPUT]: An installed Package's active version directory and the `git` executable.
- * [OUTPUT]: `packageGitState`, `describeGitState`, `GIT_STATE`, and `gitAvailable`.
+ * [OUTPUT]: `packageGitState`, `gitHistoryScan`, `describeGitState`, `GIT_STATE`, and `gitAvailable`.
  * [POS]: src/packages/git-state.mjs in termux-os-framework. The only place that answers
  *        "is this Package released or being edited", read directly from the work tree so no
  *        second record of that fact can exist to disagree with it.
@@ -128,6 +128,71 @@ export function packageGitIdentity(dir) {
   return out;
 }
 
+/**
+ * Everything in a work tree that is not the released commit: the one answer to "would replacing
+ * this directory destroy something that exists nowhere else?".
+ *
+ * Checked, because each was observed to survive a clean `git status`:
+ *   - tracked/untracked changes in the work tree,
+ *   - HEAD relative to the released commit (at-release / ahead / diverged / unknown),
+ *   - local branches and tags holding commits not reachable from the released commit
+ *     (`git rev-list <ref> --not <released>` — valid in the depth-1 installed clone, whose
+ *     graft is the released commit itself),
+ *   - `refs/stash`.
+ * Remote-tracking refs are upstream state, not local work, and are not counted. A reflog entry
+ * alone is not history anyone can reach, so a deleted branch no longer counts.
+ *
+ * Deliberately not called from the watcher: it runs several Git commands.
+ */
+export function gitHistoryScan(dir, releasedHead) {
+  const out = {
+    available: false, reason: null, worktree: 'unknown', changes: [], ignored: [],
+    head: null, released_head: releasedHead ?? null, branch: null, detached: false,
+    head_relation: 'unknown', local_refs: [], stash_count: 0, local_history: null,
+  };
+  const state = packageGitState(dir);
+  if (state.state === GIT_STATE.UNKNOWN) return { ...out, reason: state.reason, error: state.error };
+  out.worktree = state.state === GIT_STATE.DEV ? 'modified' : 'clean';
+  out.changes = state.changes;
+  out.ignored = state.ignored;
+  const read = (args) => { try { return git(dir, args).trim(); } catch { return null; } };
+  const identity = packageGitIdentity(dir);
+  out.head = identity.head;
+  out.branch = identity.branch;
+  out.detached = identity.detached === true;
+  // Without a verifiable release commit the refs cannot be judged, but edits in the work tree are
+  // still edits: they count as local history rather than disappearing into "unknown".
+  const unverifiable = (reason) => ({ ...out, reason, local_history: out.worktree === 'modified' ? true : null });
+  if (!out.head) return unverifiable('head_unreadable');
+  if (!releasedHead) return unverifiable('released_head_unknown');
+  if (read(['cat-file', '-t', releasedHead]) !== 'commit') return unverifiable('released_head_missing');
+  out.available = true;
+  const unreachable = (rev) => {
+    const listed = read(['rev-list', rev, '--not', releasedHead]);
+    return listed === null ? null : listed.split('\n').filter(Boolean).length;
+  };
+  if (out.head === releasedHead) out.head_relation = 'at-release';
+  else {
+    let ancestor = false;
+    try { git(dir, ['merge-base', '--is-ancestor', releasedHead, out.head]); ancestor = true; } catch { /* Not an ancestor. */ }
+    out.head_relation = ancestor ? 'ahead' : 'diverged';
+  }
+  const refs = (read(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags']) ?? '')
+    .split('\n').filter(Boolean).map((line) => { const [ref, commit] = line.split(' '); return { ref, commit }; });
+  for (const { ref, commit } of refs) {
+    if (commit === releasedHead) continue;
+    const commits = unreachable(ref);
+    // An unreadable ref is treated as holding history: refusing is recoverable, deleting is not.
+    if (commits === null || commits > 0) out.local_refs.push({ ref, commit, commits });
+  }
+  if (read(['rev-parse', '--verify', '-q', 'refs/stash'])) {
+    out.stash_count = Number(read(['rev-list', '--walk-reflogs', '--count', 'refs/stash'])) || 1;
+  }
+  out.local_history = out.worktree === 'modified' || out.head !== releasedHead
+    || out.local_refs.length > 0 || out.stash_count > 0;
+  return out;
+}
+
 /** 一行人类可读描述，给 CLI 与 WebUI 共用。 */
 export function describeGitState(result) {
   if (!result) return 'unknown';
@@ -203,6 +268,48 @@ if (process.argv[1] && process.argv[1].endsWith('git-state.mjs') && process.argv
   run(['checkout', '-q', '--detach', 'HEAD']);
   t('a detached HEAD is visible as such, not reported as a branch',
     packageGitIdentity(repo).detached === true && packageGitIdentity(repo).branch === null);
+
+  // Local-history matrix on a depth-1 clone, the shape of every installed Package with Git.
+  run(['checkout', '-q', 'main']);
+  const inst = path.join(tmp, 'installed');
+  execFileSync('git', ['clone', '-q', '--depth', '1', `file://${repo}`, inst], { stdio: 'ignore' });
+  const g = (args) => execFileSync('git', ['-C', inst, ...GIT_FLAGS, ...args], {
+    stdio: 'ignore', env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@e', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@e' } });
+  const A = packageGitIdentity(inst).head;
+  const scan = () => gitHistoryScan(inst, A);
+  let r = scan();
+  t('case 1: HEAD=A clean, no extra refs → no local history', r.available && r.local_history === false && r.head_relation === 'at-release');
+  fs.writeFileSync(path.join(inst, 'a.txt'), 'edit\n');
+  t('case 2: HEAD=A dirty → local history', scan().local_history === true && scan().worktree === 'modified');
+  g(['commit', '-qam', 'B']);
+  const B = packageGitIdentity(inst).head;
+  r = scan();
+  t('case 3: HEAD=B clean, A→B → local history, ahead', r.local_history === true && r.head_relation === 'ahead' && r.worktree === 'clean');
+  fs.writeFileSync(path.join(inst, 'a.txt'), 'edit again\n');
+  t('case 4: HEAD=B dirty → local history', scan().local_history === true);
+  g(['checkout', '-q', '--', 'a.txt']);
+  g(['branch', 'dev/foo']);
+  g(['reset', '-q', '--hard', A]);
+  r = scan();
+  t('case 5: main=A checked out, dev/foo=B kept → local history via the side branch',
+    r.local_history === true && r.head_relation === 'at-release' && r.local_refs.some((x) => x.ref === 'refs/heads/dev/foo' && x.commits === 1));
+  g(['branch', '-D', 'dev/foo']);
+  fs.writeFileSync(path.join(inst, 'a.txt'), 'stashed\n');
+  g(['stash', '-q']);
+  r = scan();
+  t('case 6: HEAD=A clean with a stash → local history', r.local_history === true && r.stash_count === 1 && r.worktree === 'clean');
+  g(['stash', 'drop', '-q']);
+  g(['checkout', '-q', '--detach', B]);
+  r = scan();
+  t('case 7: detached HEAD=B → local history, detached', r.local_history === true && r.detached === true);
+  g(['checkout', '-q', 'main']);
+  r = scan();
+  t('case 8: B unreferenced (only in the reflog), HEAD=A, no stash → no local history', r.local_history === false);
+  t('an unknown released head is not available', gitHistoryScan(inst, null).available === false
+    && gitHistoryScan(inst, 'f'.repeat(40)).reason === 'released_head_missing');
+  fs.writeFileSync(path.join(inst, 'a.txt'), 'edit without a known release\n');
+  t('edits still count as local history when the release commit is unknown', gitHistoryScan(inst, null).local_history === true);
+  g(['checkout', '-q', '--', 'a.txt']);
 
   fs.rmSync(tmp, { recursive: true, force: true });
   process.exit(fails ? 1 : 0);

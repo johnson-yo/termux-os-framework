@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { installedRoot, ACTIVE_FILENAME, ACTIVE_SCHEMA } from './installed-root.mjs';
 import { packageGitIdentity, packageGitState, GIT_STATE } from './git-state.mjs';
+import { packageStateSnapshot, PACKAGE_STATE } from './provenance.mjs';
 
 const readJson = (file) => {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
@@ -159,6 +160,7 @@ export function reconcilePackage(id, {
   runtime = null,
   watcher = null,
   ownedServices = [],
+  history = true,
 } = {}) {
   const scanned = installedRecords(root, id);
   const matching = scanned.records.filter((record) => record.id === id || record.root_name === id);
@@ -169,9 +171,6 @@ export function reconcilePackage(id, {
   const record = valid.length === 1 ? valid[0] : null;
   const active = record ? record.active : null;
   const versionDir = record?.version_dir ?? null;
-  const git = versionDir ? packageGitState(versionDir) : {
-    state: GIT_STATE.UNKNOWN, changes: [], ignored: [], error: null, reason: 'active_worktree_missing',
-  };
   const identity = versionDir ? packageGitIdentity(versionDir) : packageGitIdentity(null);
   const releasedHead = record ? activeReleaseHead(record.dir, active) : null;
   const headDiverged = Boolean(releasedHead && identity.head && releasedHead !== identity.head);
@@ -186,9 +185,16 @@ export function reconcilePackage(id, {
     ...(duplicate.length ? [{ kind: 'duplicate_active_worktrees', items: duplicate }] : []),
     ...legacyWorkspaces.map((workspace) => ({ kind: 'legacy_workspace', ...workspace })),
   ];
-  const state = conflicts.length ? 'conflicted'
-    : !record ? GIT_STATE.UNKNOWN
-      : git.state === GIT_STATE.RELEASE && headDiverged ? GIT_STATE.DEV : git.state;
+  // One state for every caller (package-manager, Dev API, install safety): provenance, Git
+  // history, and conflicts are resolved in provenance.mjs, not re-derived here.
+  const packageState = record
+    ? packageStateSnapshot({ versionRoot: versionDir, packageRoot: record.dir, active, conflicts, history })
+    : null;
+  const git = versionDir ? packageGitState(versionDir) : {
+    state: GIT_STATE.UNKNOWN, changes: [], ignored: [], error: null, reason: 'active_worktree_missing',
+  };
+  const state = conflicts.length ? PACKAGE_STATE.CONFLICTED
+    : !record ? PACKAGE_STATE.UNKNOWN : packageState.state;
   const previousVersion = active?.previous_version ?? null;
   const previousTarget = active?.previous_target ?? 'generic';
   const previousPath = record && previousVersion ? path.join(record.dir, 'versions', previousVersion) : null;
@@ -223,8 +229,15 @@ export function reconcilePackage(id, {
       archive_sha256: active.archive_sha256 ?? null,
       installed_at: active.installed_at ?? null,
     } : null,
+    state_reason: conflicts.length ? 'reconcile_required' : packageState?.reason ?? 'not_installed',
+    state_summary: conflicts.length ? 'conflicted (reconcile required)' : packageState?.summary ?? 'unknown',
+    package_state: packageState,
     git: { ...git, ...identity, dirty: git.state === GIT_STATE.DEV,
-      released_head: releasedHead, head_diverged: headDiverged },
+      released_head: releasedHead, head_diverged: headDiverged,
+      local_history_present: packageState?.local_history_present ?? null,
+      local_refs: packageState?.git?.local_refs ?? [], stash_count: packageState?.git?.stash_count ?? 0 },
+    provenance: packageState?.provenance ?? null,
+    development: packageState?.development ?? null,
     previous: previousVersion ? {
       version: previousVersion,
       target: previousTarget,

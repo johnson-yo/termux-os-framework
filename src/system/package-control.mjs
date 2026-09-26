@@ -12,7 +12,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolveInstalledPackages } from '../packages/installed-root.mjs';
-import { packageGitIdentity, packageGitState, GIT_STATE } from '../packages/git-state.mjs';
+import { packageStateSnapshot } from '../packages/provenance.mjs';
 import { getPackagePorts } from './port-registry.mjs';
 import { isPackageEnabled } from './package-settings.mjs';
 import { nodeExecutable } from './node-runtime.mjs';
@@ -82,29 +82,37 @@ const publicUpload = (u) => {
 
 /**
  * A Package update must show the current worktree hazard before confirmation.
- * The answer comes from the bytes on disk and the saved release identity; it
- * is deliberately not a user supplied flag or a persisted "clean" boolean.
+ * The answer is the shared package state (provenance + full Git history scan), never a
+ * user-supplied flag. `dirty` keeps its old meaning for the WebUI: "replacing this would
+ * destroy something", which now also covers development provenance, side branches and stashes.
  */
 function packageInstallSafety(versionRoot, packageRoot, active) {
-  const git = packageGitState(versionRoot);
-  const target = active.active_target ?? 'generic';
-  const releaseMeta = readJson(path.join(packageRoot, 'archive', `${active.active_version}@${target}.json`));
-  const identity = packageGitIdentity(versionRoot);
-  const headDiverged = Boolean(releaseMeta?.head && identity.head && releaseMeta.head !== identity.head);
-  const dirty = git.state === GIT_STATE.DEV || headDiverged;
-  const changes = git.changes.length ? git.changes : headDiverged
-    ? [{ code: 'HD', path: `HEAD ${identity.head.slice(0, 12)} ≠ released ${releaseMeta.head.slice(0, 12)}`, untracked: false }]
-    : [];
+  const ps = packageStateSnapshot({ versionRoot, packageRoot, active });
+  const git = ps.git;
+  const changes = [
+    ...git.changes,
+    ...(git.head && git.released_head && git.head !== git.released_head
+      ? [{ code: 'HD', path: `HEAD ${git.head.slice(0, 12)} ≠ released ${git.released_head.slice(0, 12)}`, untracked: false }] : []),
+    ...git.local_refs.map((ref) => ({ code: 'RF', path: `${ref.ref} holds ${ref.commits ?? '?'} unreleased commit(s)`, untracked: false })),
+    ...(git.stash_count ? [{ code: 'ST', path: `refs/stash (${git.stash_count})`, untracked: false }] : []),
+    ...(ps.development && !git.local_history ? [{ code: 'DV', path: 'development provenance is active', untracked: false }] : []),
+  ];
   return {
-    state: dirty ? GIT_STATE.DEV : git.state,
-    reason: headDiverged ? 'head_diverged_from_release' : git.reason,
-    dirty,
+    state: ps.state,
+    reason: ps.reason,
+    summary: ps.summary,
+    provenance: ps.provenance,
+    dirty: ps.protection_required,
+    local_history_present: ps.local_history_present,
+    protection_reasons: ps.protection_reasons,
     change_count: changes.length,
     changes,
-    ignored_count: git.ignored.length,
-    head: identity.head,
-    released_head: releaseMeta?.head ?? null,
-    head_diverged: headDiverged,
+    ignored_count: git.ignored?.length ?? 0,
+    head: git.head,
+    released_head: git.released_head,
+    head_diverged: Boolean(git.head && git.released_head && git.head !== git.released_head),
+    local_refs: git.local_refs,
+    stash_count: git.stash_count,
   };
 }
 
@@ -302,6 +310,13 @@ export function recoverPackageJobs() {
   if (fs.existsSync(d.lock) && (!lock || !processAlive(lock.pid))) fs.rmSync(d.lock, { recursive: true, force: true });
 }
 
+function uninstallOptions(options) {
+  if (options.preserve_development === true && options.force_discard === true) {
+    throw Object.assign(new Error('choose either development backup or force discard, not both'), { code: 'dirty_options_conflict' });
+  }
+  return options.preserve_development === true ? { preserve_development: true } : { force_discard: true };
+}
+
 export function startPackageJob(action, target) {
   if (!ACTIONS.has(action)) throw Object.assign(new Error('invalid_package_action'), { code: 'invalid_package_action' });
   recoverPackageJobs();
@@ -334,7 +349,13 @@ export function startPackageJob(action, target) {
     ? (uploadIds
       ? { upload_ids: uploadIds, upload_id: uploadIds.at(-1), ...(installOptions ? { options: installOptions } : {}) }
       : { upload_id: packageId(target.upload_id, 'upload_id'), ...(installOptions ? { options: installOptions } : {}) })
-    : { package_id: packageId(target.package_id, 'package_id') };
+    : {
+      package_id: packageId(target.package_id, 'package_id'),
+      // Uninstall refuses to delete local history by default; the caller may ask for a backup first
+      // or an explicit discard, never both.
+      ...(action === 'uninstall' && (target?.options?.preserve_development === true || target?.options?.force_discard === true)
+        ? { options: uninstallOptions(target.options) } : {}),
+    };
   for (const id of normalized.upload_ids ?? (normalized.upload_id ? [normalized.upload_id] : [])) {
     if (!getPackageUpload(id, { internal: true })) {
       throw Object.assign(new Error('unknown_upload'), { code: 'unknown_upload' });

@@ -77,6 +77,7 @@ for script in \
 done
 node scripts/smoke-asset-payload-v2.mjs
 node scripts/smoke-dev-runtime-resilience.mjs
+node scripts/smoke-dev-provenance.mjs
 
 node scripts/extract-ui-strings.mjs --check
 node scripts/check-publication.mjs

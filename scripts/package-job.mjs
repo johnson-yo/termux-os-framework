@@ -104,7 +104,9 @@ try {
   };
 
   if (!uploads.length) {
-    exitCode = await runOne([job.action, job.target.package_id]);
+    exitCode = await runOne([job.action, job.target.package_id,
+      ...(job.target.options?.preserve_development === true ? ['--preserve-development'] : []),
+      ...(job.target.options?.force_discard === true ? ['--force-discard'] : [])]);
   } else if (job.action === 'check') {
     exitCode = await runOne(['check', upload.archive_path]);
   } else {

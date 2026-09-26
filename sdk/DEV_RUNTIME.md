@@ -61,12 +61,38 @@ duplicate identity. A conflict blocks install, restore, rollback, uninstall, and
 it is explicitly reconciled. The old `~/termux-os-dev/packages` source is report-only and can be
 moved to the private legacy archive without deleting user content.
 
+## Development provenance
+
+Editing an installed Package is allowed at any time, and the Git state reports it (`modified`).
+Declaring that you are developing it is a separate, explicit act:
+
+```sh
+node scripts/package-manager.mjs activate-development <package-id>   # or: termux-os-sdk dev activate <id>
+node scripts/package-manager.mjs development-status   <package-id>   # state + provenance + Git history
+```
+
+Activation records the official baseline in `<packageRoot>/.development/` and changes nothing else:
+no Git file, branch, workspace, or watcher. It is sticky — `dev stop`, a Framework restart,
+`git reset --hard` to the release, or a clean `git status` do not end it. Only a verified official
+restore or install makes the Package `official` again. Activation needs verifiable Git lineage
+(a `.git` and a released HEAD); a Package without it answers `development_lineage_unavailable`.
+
+Local history is everything that would be lost by replacing the directory: work-tree changes, HEAD
+off the release, local branches or tags with unreleased commits, and the stash. Restore, update,
+and uninstall refuse when it (or Development provenance) is present; add
+`--preserve-development` to back up first or `--force-discard` to discard. Backups keep `.git`:
+
+```sh
+node scripts/package-manager.mjs development-backups <package-id>
+node scripts/package-manager.mjs restore-development-backup <package-id> <backup-name|sha256-prefix>
+```
+
 ## Returning to the released content
 
 Editing is one-way by design; a cleared flag would not un-edit a file. Restore the bytes:
 
 ```sh
-node scripts/package-manager.mjs restore <package-id>
+node scripts/package-manager.mjs restore <package-id> [--preserve-development | --force-discard]
 ```
 
 That unpacks the original Release archive saved at install time, verified against its SHA-256.
