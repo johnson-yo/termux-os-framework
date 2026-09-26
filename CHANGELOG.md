@@ -2,6 +2,31 @@
 
 All notable public changes will be recorded here after the first tagged release.
 
+## 0.3.13
+
+- Dev Runtime detects changes by pathname, not by inode. `fs.watch` is now only a
+  latency hint; a periodic tree reconciliation (path, type, size, mtime, inode)
+  is the correctness backstop, and the watch is re-armed after every change
+  batch. Previously a recursive watch stopped reporting a file for good once an
+  editor, an agent, or `git checkout` replaced it, so only the first save of a
+  file reloaded and a branch switch left web and backend on different commits.
+- Changes are coalesced per quiet period: a `git switch` touching many files is
+  one reload, web-only batches advance the page sequence without a backend
+  reload, and `.git` activity never triggers work.
+- Reloads are transactional. A candidate generation is preflighted (manifest,
+  compatibility, module import) before anything live is stopped; if it fails,
+  or its `register()` fails after the swap, the last-good runtime keeps (or
+  resumes) serving and the failure is reported as `dev_reload_failed` with
+  `last_reload_result`, `last_reload_error`, and `last_reload_failed_at`. The
+  next ordinary save recovers on its own.
+- Dev reload and Package restart keep `context.configRoot` at
+  `<packageRoot>/config`; it used to follow the generation directory. Package
+  restart now reloads the current code through the same transaction instead of
+  re-importing a cached module.
+- An open dev page survives `dev stop`: the events endpoint answers
+  `watching: false` instead of 404, the page keeps a slow poll, and it reloads
+  when the next `dev start` opens a new watcher session.
+
 ## 0.3.12
 
 - Fix legacy payload removal: every tracked file was reported as an untracked

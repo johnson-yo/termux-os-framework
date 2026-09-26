@@ -32,6 +32,7 @@ import { listModelDeclarations } from './packages/model-declarations.mjs';
 import { deviceProfile } from './packages/runtime-contract.mjs';
 import {
   initDevRuntime, devWatchStart, devWatchStop, devReload, devStatus, listDevWatchers, isDevWatched, devEvents,
+  reloadPackageRuntime,
 } from './packages/dev-runtime.mjs';
 import { listCapabilities, describeCapability, setCapabilityBinding, invokeCapability, setCapabilityStateChangeHandler } from './capabilities/resolver.mjs';
 import { getState, listStates, setState, setStateChangeHandler } from './state/registry.mjs';
@@ -344,7 +345,8 @@ function serveDevHtml(res, webRoot, rel, pkgId) {
     return json(res, 404, { ok: false, error: 'not found' });
   }
   let html = injectBrowserSession(fs.readFileSync(file, 'utf8'));
-  const inject = devInjection(pkgId, devEvents(pkgId)?.seq ?? 0);
+  const events = devEvents(pkgId);
+  const inject = devInjection(pkgId, events?.seq ?? 0, events?.session ?? null);
   html = html.includes('</body>') ? html.replace('</body>', `${inject}</body>`) : html + inject;
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(html);
@@ -848,6 +850,7 @@ async function loadInstalledPackage(id) {
     expectId: entry.id,
     source: 'installed',
     install: packageInstallInfo(entry),
+    packageRoot: entry.packageRoot,
   }, {
     frameworkVersion: FRAMEWORK_VERSION,
     config: CFG,
@@ -857,26 +860,32 @@ async function loadInstalledPackage(id) {
   return record;
 }
 
+/**
+ * Restart = reload the active worktree's code through the same transaction as Dev reload.
+ * A second implementation used to exist here: it re-imported the entry without a cache bust, so
+ * the new code never ran, and it derived the configuration root from the version directory.
+ * Sharing the Dev path fixes both and keeps the last-good runtime if the new code cannot load.
+ */
 async function restartPackageForSetting(id) {
   if (!isPackageEnabled(id)) throw Object.assign(new Error('Package is disabled'), { code: 'package_disabled' });
   const current = _getRecord(id);
   if (!current || current.status !== 'loaded') {
     throw Object.assign(new Error('Package is not currently loaded'), { code: 'package_not_loaded' });
   }
-  const paused = await stopPackageServicesForSetting(id, { preserveDesired: true });
-  await unregisterPackage(id);
-  const record = await loadInstalledPackage(id);
-  if (record?.status !== 'loaded') {
-    throw Object.assign(new Error(record?.error ?? 'Package reload failed'), { code: 'package_reload_failed' });
+  const services = await packageServiceState(id);
+  const result = await reloadPackageRuntime(id, { reason: 'package restart', allowConflict: true });
+  if (!result.ok) {
+    throw Object.assign(new Error(result.detail ?? result.error ?? 'Package reload failed'), { code: 'package_reload_failed' });
   }
-  const restarted = [];
-  for (const service of paused.restart_services) {
-    if (record.registered.services.includes(service)) {
-      const result = await stage.startService(service);
-      if (result.ok) restarted.push(service);
+  const record = _getRecord(id);
+  const restarted = [...(result.restarted_services ?? [])];
+  for (const service of services) {
+    if (service.should_run && !restarted.includes(service.id) && record?.registered?.services?.includes(service.id)) {
+      const started = await stage.startService(service.id);
+      if (started.ok) restarted.push(service.id);
     }
   }
-  return { ok: true, action: 'restart', package_id: id, restarted_services: restarted, dropped_sessions: paused.services };
+  return { ok: true, action: 'restart', package_id: id, restarted_services: restarted, dropped_sessions: services.map((s) => s.id) };
 }
 
 async function disablePackageForSetting(id) {

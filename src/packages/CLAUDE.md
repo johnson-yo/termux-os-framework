@@ -4,6 +4,12 @@ Runtime truth is the Installed Root at `~/.termux-os/packages/`. Source reposito
 release archives are immutable, and Dev Runtime reloads the one active worktree in place. A
 generation is only a module-cache copy and never a second Package.
 
+Dev Runtime change detection is pathname truth: `fs.watch` is a hint and a periodic tree
+reconciliation is the backstop, because a recursive watch loses a file once its inode is replaced.
+A reload is a transaction — preflight the candidate generation, swap, and restore the last-good
+record if `register()` fails — and it is the only code-reload path (Dev reload and Package restart
+share it). A generation isolates the module cache only; `configRoot` stays `<packageRoot>/config`.
+
 Package loading is failure-isolated. Manifests, declared artifacts, targets, paths, and compatibility are validated before activation. HTTP routes and authenticated WebSocket routes are registered per Package and removed with the Package. Fixtures in `fixtures/` are test-only and must never load during normal empty-Core startup.
 
 Supervised Package services receive `TERMUX_OS_PORT_<ID>_HOST` and

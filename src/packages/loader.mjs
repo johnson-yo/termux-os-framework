@@ -458,13 +458,56 @@ export async function unregisterPackage(id) {
   return r;
 }
 
-/** 單包載入（dev-runtime 用）：cacheBust 給 entry import 加查詢串避開 ESM 模塊快取 */
+/**
+ * Single-Package load used by Dev Runtime and Package restart.
+ *
+ * `dir` is the code root (the active worktree or a Dev Runtime generation copy); `packageRoot`
+ * is the persistent Installed Root entry that owns `config/`. They are separate on purpose: a
+ * generation is only a module-cache copy, and deriving the configuration root from it put a
+ * Package's settings inside a directory that the next reload deletes.
+ *
+ * `cacheBust` may be `true` (a fresh query token) or a string token. Passing the token that
+ * `preflightPackageCandidate` already imported makes the load reuse that exact module instance,
+ * so the candidate's top-level code runs once. `manifest` replaces the on-disk manifest; a
+ * rollback uses it to restore the last-good record even after the worktree changed underneath it.
+ */
 export async function loadSinglePackage({ dir, expectId, source, install = null,
-  contextOverrides = null, cacheBust = false }, opts) {
-  await loadCandidate({ dir, expectId, source, install, contextOverrides, cacheBust }, opts);
+  contextOverrides = null, cacheBust = false, packageRoot = null, manifest = null }, opts) {
+  await loadCandidate({ dir, expectId, source, install, contextOverrides, cacheBust, packageRoot,
+    manifestOverride: manifest }, opts);
   const record = packages.get(expectId) ?? null;
   notifyPackageStateChange({ kind: 'package_loaded', package_id: expectId, status: record?.status ?? 'absent' });
   return record;
+}
+
+/**
+ * Prove that a candidate code root can load before anything live is torn down.
+ *
+ * Only side-effect-free checks run here: manifest parse, validation, compatibility, identity,
+ * entrypoint presence, and importing the backend module graph under `?dev=<cacheToken>`. No
+ * registry is touched, so a syntax error, a failed import, or an invalid manifest leaves the
+ * running Package exactly as it was. `register()` is not called; its failure is handled by the
+ * caller's rollback because registration is the step that mutates global state.
+ */
+export async function preflightPackageCandidate({ dir, expectId, cacheToken }, { frameworkVersion }) {
+  const fail = (stage, error) => ({ ok: false, stage, error: String(error?.message ?? error) });
+  let manifest;
+  try { manifest = JSON.parse(fs.readFileSync(path.join(dir, MANIFEST_FILENAME), 'utf8')); }
+  catch (error) { return fail('manifest', `manifest parse error: ${String(error?.message ?? error)}`); }
+  const v = validateManifest(manifest, { frameworkVersion });
+  if (!v.ok) return fail('manifest', `manifest invalid: ${v.errors.join('; ')}`);
+  if (!v.compatible) return fail('manifest', `requires framework ${manifest.compatibility.framework}, current ${frameworkVersion}`);
+  if (manifest.id !== expectId) return fail('manifest', `manifest id "${manifest.id}" does not match "${expectId}"`);
+  const backendPath = path.join(dir, manifest.entrypoints.backend);
+  if (!fs.existsSync(backendPath)) return fail('manifest', `backend not found: ${manifest.entrypoints.backend}`);
+  if (!fs.existsSync(path.join(dir, manifest.entrypoints.webui))) {
+    return fail('manifest', `webui entry not found: ${manifest.entrypoints.webui}`);
+  }
+  try {
+    const mod = await import(`${pathToFileURL(backendPath).href}?dev=${cacheToken}`);
+    if (typeof mod.register !== 'function') return fail('import', 'backend must export async function register(context)');
+  } catch (error) { return fail('import', error); }
+  return { ok: true, manifest };
 }
 
 // ============================================================
@@ -743,10 +786,10 @@ function makeContext(record, config, configPath, overrides = null, saveConfig = 
 //      PACKAGES_DEV_DIR 不再是加载入口。PACKAGES_EXTRA_DIR 仅保留给测试夹具。
 // ============================================================
 async function loadCandidate({ dir, expectId, source, install, contextOverrides = null, cacheBust = false,
-  packageRoot = null },
+  packageRoot = null, manifestOverride = null },
   { frameworkVersion, config, configPath, saveConfig, log }) {
   const manifestPath = path.join(dir, MANIFEST_FILENAME);
-  if (!fs.existsSync(manifestPath)) {
+  if (!manifestOverride && !fs.existsSync(manifestPath)) {
     if (source === 'installed') {
       packages.set(expectId, { id: expectId, dir, manifest: null, status: 'failed', source, install,
         error: `installed version has no ${MANIFEST_FILENAME}`, registered: { actions: [], services: [], apps: [], providers: [], assets: [], websockets: [], states: [], cleanups: [] } });
@@ -760,9 +803,11 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
     log(`package ${id}: FAILED — ${error}`);
   };
 
-  let manifest;
-  try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); }
-  catch (e) { return fail(expectId, null, `manifest parse error: ${String(e?.message ?? e)}`); }
+  let manifest = manifestOverride;
+  if (!manifest) {
+    try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); }
+    catch (e) { return fail(expectId, null, `manifest parse error: ${String(e?.message ?? e)}`); }
+  }
 
   const v = validateManifest(manifest, { frameworkVersion });
   if (!v.ok) return fail(manifest?.id && !packages.has(manifest.id) ? manifest.id : expectId, manifest, `manifest invalid: ${v.errors.join('; ')}`);
@@ -809,7 +854,9 @@ async function loadCandidate({ dir, expectId, source, install, contextOverrides 
     // Package-owned assignment instead of creating a shadow port.
     record.ports = registerPackagePorts(id, manifest.ports ?? []);
     // 029：dev 重載時 entry 加查詢串繞開 ESM 快取（子模塊靠 dev-runtime 的 generation 副本換新 URL）
-    const entryUrl = pathToFileURL(backendPath).href + (cacheBust ? `?dev=${Date.now()}` : '');
+    const codeToken = typeof cacheBust === 'string' ? cacheBust : cacheBust ? String(Date.now()) : null;
+    record.codeToken = codeToken;
+    const entryUrl = pathToFileURL(backendPath).href + (codeToken ? `?dev=${codeToken}` : '');
     const mod = await import(entryUrl);
     if (typeof mod.register !== 'function') throw new Error('backend must export async function register(context)');
     packages.set(id, record); // 先入表：register 內的衝突錯誤能指回本 Package

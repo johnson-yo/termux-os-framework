@@ -27,6 +27,27 @@ termux-os-sdk dev logs   <package-id>   # logs of the Package's own services
 The Package must already be installed: `dev` acts on the one installed copy, using its service
 ids, ports, URL, configuration and data. Nothing is duplicated, shadowed, or namespaced.
 
+## Change detection and reload
+
+The watcher treats the work tree's paths as the truth. `fs.watch` only makes a change noticed
+sooner; a reconciliation scan (every 2 s, `TERMUX_OS_DEV_SCAN_MS` to tune) compares each path's
+type, size, mtime, and inode, so a file replaced by an editor, an agent, or `git checkout` keeps
+being seen on every later save. `.git`, `.sdk`, `.runtime`, and `node_modules` are never watched.
+
+Changes that arrive together are handled together once the tree has been quiet for a moment:
+a change under the WebUI directory refreshes open dev pages; any other change reloads the backend
+once, and the page follows. A branch switch therefore lands as one reload with web and backend on
+the same commit.
+
+A reload never removes a working runtime before its replacement has loaded. The candidate is
+checked first (manifest, compatibility, module import); if that or its `register()` fails, the
+previous runtime keeps serving, `dev status` reports `last_reload_result: "failed"` with a
+`dev_reload_failed` error, and the next save retries automatically. `context.configRoot` is always
+`<packageRoot>/config`; a generation only isolates the module cache.
+
+A page opened while the Package is watched keeps a slow poll through `dev stop` and reloads itself
+when the next `dev start` begins.
+
 For host-to-device iteration, use the formal sync path before starting the watcher:
 
 ```sh

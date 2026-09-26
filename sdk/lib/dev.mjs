@@ -259,7 +259,13 @@ export async function cmdDev(flags, pos) {
     : sub === 'stop' ? `/api/dev/packages/${id}/stop` : `/api/dev/packages/${id}/reload`;
   const response = await post(conn, endpoint, sub === 'start' ? { package_id: id } : null);
   if (!response.ok) return fail(flags, 'framework_unreachable', response.error, 'Start Framework and retry.');
-  if (!response.data?.ok) return fail(flags, response.data?.error ?? `dev_${sub}_failed`, response.data?.detail ?? null, response.data?.fix ?? null);
+  // A stable code, never an exception message: reload failures carry `error_code` plus `detail`.
+  if (!response.data?.ok) {
+    return fail(flags, response.data?.error_code ?? response.data?.error ?? `dev_${sub}_failed`,
+      response.data?.detail ?? null, response.data?.fix ?? (response.data?.error_stage
+        ? `Candidate failed at ${response.data.error_stage}; the last-good runtime is still serving. Fix the code and save again.`
+        : null));
+  }
   const status = await api(conn, `/api/dev/packages/${id}/status`);
   const merged = { ok: true, action: sub, ...(status.ok && status.data?.ok ? status.data : { package_id: id }) };
   return emit(merged, flags, (o) => {
